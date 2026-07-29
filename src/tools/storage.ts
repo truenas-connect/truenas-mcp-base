@@ -1,4 +1,4 @@
-import { ApiCallResponse, TrueNasEndpoint } from '@truenas/api-client';
+import { TrueNasEndpoint } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool } from '@/catalog/tool';
@@ -26,12 +26,6 @@ export const poolStatus: ReadOnlyTool = {
   },
 };
 
-type Dataset = ApiCallResponse<TrueNasEndpoint.DatasetQuery>[number];
-
-function flatten(datasets: Dataset[]): Dataset[] {
-  return datasets.flatMap((dataset) => [dataset, ...flatten(dataset.children ?? [])]);
-}
-
 export const listDatasets: ReadOnlyTool = {
   name: 'storage_list_datasets',
   description:
@@ -51,13 +45,17 @@ export const listDatasets: ReadOnlyTool = {
   async handler({ system }, args) {
     const filters: [string, string, string][] =
       typeof args['pool'] === 'string' ? [['pool', '=', args['pool']]] : [];
-    const roots = await firstValueFrom(
+    // retrieve_children makes the middleware walk the whole dataset tree; the
+    // response is already a flat list (every dataset is a top-level entry) in
+    // which each entry redundantly nests its descendants under `children`, so
+    // it must not be flattened again.
+    const datasets = await firstValueFrom(
       system.client.api.call(TrueNasEndpoint.DatasetQuery, [
         filters,
         { extra: { retrieve_children: true, properties: ['used', 'available'] } },
       ]),
     );
-    return flatten(roots).map((dataset) => ({
+    return datasets.map((dataset) => ({
       id: dataset.id,
       pool: dataset.pool,
       type: dataset.type,

@@ -4,9 +4,7 @@ Shared core library for TrueNAS MCP: the tool catalog, system registry, safety
 model, and multi-system fan-out used by both the standalone community server
 and the TrueNAS Connect browser adapter.
 
-> **Status:** prototype sketch. See [docs/architecture-proposal.md](docs/architecture-proposal.md)
-> for the design and [docs/prototype-plan.md](docs/prototype-plan.md) for what
-> this sketch covers.
+> **Status:** prototype sketch.
 
 The core is a plain TypeScript library with no environment assumptions — no
 filesystem, no process, no DOM. Everything environment-specific (credentials,

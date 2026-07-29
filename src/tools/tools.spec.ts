@@ -57,12 +57,18 @@ describe('storage_list_datasets', () => {
     children,
   });
 
-  it('flattens nested children', async () => {
+  it('does not duplicate datasets nested under children of other entries', async () => {
+    // pool.dataset.query returns every dataset as a top-level entry while each
+    // entry also nests its descendants under `children`.
     const { ctx } = fakeSystem({
-      [TrueNasEndpoint.DatasetQuery]: [dataset('tank', [dataset('tank/media')])],
+      [TrueNasEndpoint.DatasetQuery]: [
+        dataset('tank', [dataset('tank/media', [dataset('tank/media/movies')])]),
+        dataset('tank/media', [dataset('tank/media/movies')]),
+        dataset('tank/media/movies'),
+      ],
     });
     const result = (await listDatasets.handler(ctx, {})) as { id: string }[];
-    expect(result.map((d) => d.id)).toEqual(['tank', 'tank/media']);
+    expect(result.map((d) => d.id)).toEqual(['tank', 'tank/media', 'tank/media/movies']);
   });
 
   it('passes a pool filter to the query', async () => {
