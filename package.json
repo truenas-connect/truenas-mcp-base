@@ -61,7 +61,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/truenas/truenas-mcp-base.git"
+    "url": "git+https://github.com/truenas-connect/truenas-mcp-base.git"
   },
   "keywords": [
     "truenas",
