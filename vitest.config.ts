@@ -16,6 +16,9 @@ export default defineConfig({
     include: ['src/**/*.spec.ts'],
     coverage: {
       provider: 'v8',
+      // Explicit include so a new src file that no spec imports still enters
+      // the denominator at 0% instead of being invisible to the floors.
+      include: ['src/**/*.ts'],
       exclude: [
         ...coverageConfigDefaults.exclude,
         // Manual smoke script against a live system, not a test.
