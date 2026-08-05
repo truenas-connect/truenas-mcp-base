@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { defineConfig } from 'vitest/config';
+import { coverageConfigDefaults, defineConfig } from 'vitest/config';
 
 const srcDir = fileURLToPath(new URL('./src', import.meta.url));
 
@@ -14,5 +14,40 @@ export default defineConfig({
     environment: 'node',
     globals: true,
     include: ['src/**/*.spec.ts'],
+    coverage: {
+      provider: 'v8',
+      // Narrows the untested-file scan to src. Vitest 3 already pulls
+      // unimported files into the denominator via the coverage.all default;
+      // vitest 4 removes that option and requires an explicit include for a
+      // new src file that no spec imports to keep reporting at 0%.
+      include: ['src/**/*.ts'],
+      exclude: [
+        ...coverageConfigDefaults.exclude,
+        // Manual smoke script against a live system, not a test.
+        'scripts/**',
+        // Re-export barrel; no logic of its own.
+        'src/index.ts',
+        // Types only; no runtime exports for v8 to see.
+        'src/catalog/tool.ts',
+      ],
+      // Floors, not targets: set at the measured level so a decrease fails CI.
+      // Raised by hand in the same PR that raises the coverage — never lowered,
+      // never auto-updated. See docs/testing-plan.md in truenas-mcp-server.
+      // Branch is the primary gate; the statements floor exists because v8
+      // reports a file that no test touches as 100% branch (no branches
+      // recorded), so a branch-only floor cannot see a file losing all its
+      // tests at once.
+      thresholds: {
+        branches: 94,
+        statements: 96,
+        // Per-file floors on the files where the safety model lives. A key
+        // that matches no file passes vacuously, so renaming one of these
+        // files must carry its key along or the floor silently disappears.
+        'src/execution/executor.ts': { branches: 92, statements: 97 },
+        'src/registry/system-registry.ts': { branches: 93, statements: 97 },
+        'src/execution/confirmation.ts': { branches: 94, statements: 97 },
+        'src/catalog/catalog.ts': { branches: 95, statements: 96 },
+      },
+    },
   },
 });
