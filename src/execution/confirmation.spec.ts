@@ -85,6 +85,15 @@ describe('ConfirmationService', () => {
     expect(() => service.consume(third, key)).not.toThrow();
   });
 
+  it('still mints a usable token when maxPending is zero', () => {
+    // Degenerate but constructible config: with an empty map and
+    // maxPending 0 the eviction loop has nothing to evict, and its guard
+    // must terminate the loop rather than spin forever.
+    const service = new ConfirmationService({ maxPending: 0 });
+    const token = service.mint(key);
+    expect(() => service.consume(token, key)).not.toThrow();
+  });
+
   it('sweeps abandoned expired tokens on mint', () => {
     let time = 0;
     let id = 0;

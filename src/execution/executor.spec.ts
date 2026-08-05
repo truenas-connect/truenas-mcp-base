@@ -366,6 +366,45 @@ describe('ToolExecutor — plan/confirm', () => {
     expect(sinkErrors).toHaveLength(1);
   });
 
+  it('reports a sink failure via console.error when no onAuditError is supplied', async () => {
+    const registry = new SystemRegistry();
+    registry.add({ name: 'a', client: {} as TrueNasApiClient } as SystemHandle);
+    const catalog = new ToolCatalog();
+    catalog.register({
+      name: 'ok_read',
+      description: 'test',
+      inputSchema: { type: 'object', properties: {} },
+      requiredRole: Role.ReadOnly,
+      mutating: false,
+      handler: async () => 'fine',
+    });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const executor = new ToolExecutor({
+        catalog,
+        registry,
+        confirmations: new ConfirmationService(),
+        audit: {
+          record: () => {
+            throw new Error('audit db down');
+          },
+        },
+      });
+
+      // The default handler must keep the failure visible without altering
+      // the tool-call outcome.
+      const outcome = await executor.execute('ok_read');
+      expect(outcome.type).toBe('RESULTS');
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      expect(consoleError).toHaveBeenCalledWith(
+        'Audit sink failed for ok_read/read:',
+        expect.any(Error),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it('a rejecting async audit sink routes to onAuditError', async () => {
     const registry = new SystemRegistry();
     registry.add({ name: 'a', client: {} as TrueNasApiClient } as SystemHandle);

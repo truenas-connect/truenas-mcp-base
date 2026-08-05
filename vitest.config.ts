@@ -38,14 +38,14 @@ export default defineConfig({
       // recorded), so a branch-only floor cannot see a file losing all its
       // tests at once.
       thresholds: {
-        branches: 94,
-        statements: 96,
+        branches: 96,
+        statements: 97,
         // Per-file floors on the files where the safety model lives. A key
         // that matches no file passes vacuously, so renaming one of these
         // files must carry its key along or the floor silently disappears.
-        'src/execution/executor.ts': { branches: 92, statements: 97 },
-        'src/registry/system-registry.ts': { branches: 93, statements: 97 },
-        'src/execution/confirmation.ts': { branches: 94, statements: 97 },
+        'src/execution/executor.ts': { branches: 95, statements: 97 },
+        'src/registry/system-registry.ts': { branches: 96, statements: 97 },
+        'src/execution/confirmation.ts': { branches: 97, statements: 97 },
         'src/catalog/catalog.ts': { branches: 95, statements: 96 },
       },
     },
