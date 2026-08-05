@@ -72,6 +72,12 @@ describe('SystemRegistry', () => {
     expect(registry.resolve(['a', 'a', 'b']).map((s) => s.name)).toEqual(['a', 'b']);
   });
 
+  it('rejects an empty list of names', () => {
+    const registry = new SystemRegistry();
+    registry.add(handle('a'));
+    expect(() => registry.resolve([])).toThrow(/must name at least one system/);
+  });
+
   it('names unknown systems in the error', () => {
     const registry = new SystemRegistry();
     registry.add(handle('a'));
@@ -199,6 +205,31 @@ describe('connectSystems', () => {
         },
       ),
     ).rejects.toThrow(/bad: auth failed/);
+    expect(connected.close).toHaveBeenCalled();
+    expect(registry.names()).toEqual([]);
+  });
+
+  it('a throwing close during rollback does not mask the connect failure', async () => {
+    const registry = new SystemRegistry();
+    const connected = {
+      close: vi.fn(() => {
+        throw new Error('socket already gone');
+      }),
+    } as unknown as TrueNasApiClient;
+    await expect(
+      connectSystems(
+        registry,
+        { getSystems: async () => [spec('good'), spec('bad')] },
+        async (s) => {
+          if (s.name === 'bad') {
+            throw new Error('auth failed');
+          }
+          return connected;
+        },
+      ),
+    ).rejects.toThrow(/bad: auth failed/);
+    // The rollback close was attempted, its throw was swallowed, and the
+    // reported error is still the connect failure.
     expect(connected.close).toHaveBeenCalled();
     expect(registry.names()).toEqual([]);
   });

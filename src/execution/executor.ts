@@ -109,11 +109,16 @@ export class ToolExecutor {
       const byName = new Map([...fanned, ...denied].map((r) => [r.system, r]));
       const results = targets.map((t): SystemResult<unknown> => {
         const result = byName.get(t.name);
+        /* v8 ignore start -- unreachable defensive guard: partitionByRole
+           assigns every target to exactly one of allowed/denied, and fanOut
+           returns one result per input system, so allowed ∪ denied always
+           covers targets. No public-API path can reach this; it exists to
+           fail loudly here instead of crashing later in record() if that
+           invariant is ever broken by a refactor. */
         if (!result) {
-          // allowed ∪ denied always covers targets; if that invariant breaks,
-          // fail loudly here instead of crashing later in record().
           throw new Error(`Internal error: no result for system "${t.name}"`);
         }
+        /* v8 ignore stop */
         return result;
       });
       if (fanned.length > 0) {
