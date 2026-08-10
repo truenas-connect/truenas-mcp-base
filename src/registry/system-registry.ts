@@ -1,6 +1,6 @@
-import { createTrueNasClient, TrueNasApiClient } from '@truenas/api-client';
+import { createTrueNasClient, type TrueNasApiClient } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
-import { SystemHandle } from '@/catalog/tool';
+import { ApiSurface, SystemHandle } from '@/catalog/tool';
 import { CredentialProvider, SystemSpec } from '@/interfaces';
 
 /** How a tool call addresses systems: one name, a list of names, or `all`. */
@@ -111,10 +111,10 @@ export class SystemRegistry {
 }
 
 /** Creates a connected, authenticated client for one spec. Injectable for tests. */
-export type ClientFactory = (spec: SystemSpec) => Promise<TrueNasApiClient>;
+export type ClientFactory = (spec: SystemSpec) => Promise<TrueNasApiClient<ApiSurface>>;
 
 export const defaultClientFactory: ClientFactory = async (spec) => {
-  const client = await createTrueNasClient({
+  const client = await createTrueNasClient<ApiSurface>({
     uuid: spec.uuid ?? spec.name,
     hostnames: spec.hostnames,
     enabled: true,

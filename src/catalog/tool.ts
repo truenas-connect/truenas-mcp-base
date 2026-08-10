@@ -1,10 +1,20 @@
-import { TrueNasApiClient } from '@truenas/api-client';
+import type { DefaultApiDirectory, TrueNasApiClient } from '@truenas/api-client';
 import { Role } from '@/interfaces';
+
+/**
+ * The API surface the tools are written against. `DefaultApiDirectory` is the
+ * client's own default: the *oldest* supported TrueNAS version. That is the
+ * conservative direction for a registry holding systems of differing versions
+ * — against a newer server the types understate what is available, rather than
+ * promising methods that are not there. Widen it only in step with a decision
+ * about the minimum TrueNAS version this supports.
+ */
+export type ApiSurface = DefaultApiDirectory;
 
 /** A named, connected, authenticated system from the registry. */
 export interface SystemHandle {
   name: string;
-  client: TrueNasApiClient;
+  client: TrueNasApiClient<ApiSurface>;
 }
 
 /**

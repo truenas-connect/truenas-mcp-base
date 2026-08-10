@@ -1,7 +1,8 @@
-import { ApiCallParams, TrueNasEndpoint } from '@truenas/api-client';
+import type { CallParams } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
+import { asList } from '@/tools/query';
 import { Role } from '@/interfaces';
-import { MutatingTool, ToolContext } from '@/catalog/tool';
+import { ApiSurface, MutatingTool, ToolContext } from '@/catalog/tool';
 
 /**
  * The one mutating tool in the sketch — exists to exercise the two-phase
@@ -34,7 +35,7 @@ function parseArgs(args: Record<string, unknown>): SnapshotArgs {
   return { dataset, name, recursive: recursive === true };
 }
 
-function createParams(args: SnapshotArgs): ApiCallParams<TrueNasEndpoint.SnapshotCreate> {
+function createParams(args: SnapshotArgs): CallParams<ApiSurface, 'pool.snapshot.create'> {
   return [{ dataset: args.dataset, name: args.name, recursive: args.recursive }];
 }
 
@@ -45,11 +46,13 @@ function createParams(args: SnapshotArgs): ApiCallParams<TrueNasEndpoint.Snapsho
  * execute time.
  */
 async function assertDatasetExists(ctx: ToolContext, dataset: string): Promise<void> {
-  const matches = await firstValueFrom(
-    ctx.system.client.api.call(TrueNasEndpoint.DatasetQuery, [
+  const matches = asList(
+    await firstValueFrom(
+      ctx.system.client.api.call('pool.dataset.query', [
       [['id', '=', dataset]],
-      { extra: { retrieve_children: false, properties: ['used'] } },
-    ]),
+        { extra: { retrieve_children: false, properties: ['used'] } },
+      ]),
+    ),
   );
   if (matches.length === 0) {
     throw new Error(`Dataset "${dataset}" does not exist`);
@@ -92,7 +95,7 @@ export const createSnapshot: MutatingTool = {
     await assertDatasetExists(ctx, args.dataset);
     return [
       {
-        method: TrueNasEndpoint.SnapshotCreate,
+        method: 'pool.snapshot.create',
         params: createParams(args),
         description:
           `Create snapshot "${args.dataset}@${args.name}"` +
@@ -103,8 +106,8 @@ export const createSnapshot: MutatingTool = {
   async execute(ctx, rawArgs) {
     const args = parseArgs(rawArgs);
     const snapshot = await firstValueFrom(
-      ctx.system.client.api.call(TrueNasEndpoint.SnapshotCreate, createParams(args)),
+      ctx.system.client.api.call('pool.snapshot.create', createParams(args)),
     );
-    return { created: snapshot.name };
+    return { created: snapshot['name'] };
   },
 };
