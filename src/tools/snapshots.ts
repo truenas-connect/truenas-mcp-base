@@ -1,6 +1,5 @@
 import type { CallParams } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
-import { asList } from '@/tools/query';
 import { Role } from '@/interfaces';
 import { ApiSurface, MutatingTool, ToolContext } from '@/catalog/tool';
 
@@ -46,13 +45,10 @@ function createParams(args: SnapshotArgs): CallParams<ApiSurface, 'pool.snapshot
  * execute time.
  */
 async function assertDatasetExists(ctx: ToolContext, dataset: string): Promise<void> {
-  const matches = asList(
-    await firstValueFrom(
-      ctx.system.client.api.call('pool.dataset.query', [
-      [['id', '=', dataset]],
-        { extra: { retrieve_children: false, properties: ['used'] } },
-      ]),
-    ),
+  const matches = await firstValueFrom(
+    ctx.system.client.api.query('pool.dataset.query', [['id', '=', dataset]], {
+      extra: { retrieve_children: false, properties: ['used'] },
+    }),
   );
   if (matches.length === 0) {
     throw new Error(`Dataset "${dataset}" does not exist`);

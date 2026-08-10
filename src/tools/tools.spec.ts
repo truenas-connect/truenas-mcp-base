@@ -4,14 +4,22 @@ import { SystemHandle, ToolContext } from '@/catalog/tool';
 import { Role } from '@/interfaces';
 import { createDefaultCatalog, createSnapshot, listDatasets, poolStatus } from '@/tools/index';
 
-/** A SystemHandle whose api.call answers from a canned endpoint→response map. */
+/**
+ * A SystemHandle answering from a canned method→response map. Both seams are
+ * stubbed from the same map: `call` for plain verbs, `query` for the client's
+ * query helpers, which return the list directly rather than the union `call`
+ * would. Tools pick whichever fits the verb, so a test asserts on whichever
+ * spy that tool used.
+ */
 function fakeSystem(responses: Partial<Record<string, unknown>>): {
   ctx: ToolContext;
   call: ReturnType<typeof vi.fn>;
+  query: ReturnType<typeof vi.fn>;
 } {
   const call = vi.fn((method: string) => of(responses[method]));
-  const system = { name: 'nas', client: { api: { call } } } as unknown as SystemHandle;
-  return { ctx: { system }, call };
+  const query = vi.fn((method: string) => of(responses[method]));
+  const system = { name: 'nas', client: { api: { call, query } } } as unknown as SystemHandle;
+  return { ctx: { system }, call, query };
 }
 
 describe('createDefaultCatalog', () => {
@@ -71,12 +79,15 @@ describe('storage_list_datasets', () => {
   });
 
   it('passes a pool filter to the query', async () => {
-    const { ctx, call } = fakeSystem({ ['pool.dataset.query']: [] });
+    const { ctx, query } = fakeSystem({ ['pool.dataset.query']: [] });
     await listDatasets.handler(ctx, { pool: 'tank' });
-    expect(call).toHaveBeenCalledWith('pool.dataset.query', [
+    // The query helper takes filters and options as separate arguments, where
+    // `call` took one positional params tuple.
+    expect(query).toHaveBeenCalledWith(
+      'pool.dataset.query',
       [['pool', '=', 'tank']],
       { extra: { retrieve_children: true, properties: ['used', 'available'] } },
-    ]);
+    );
   });
 });
 

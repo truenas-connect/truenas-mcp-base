@@ -1,8 +1,6 @@
-import type { CallParams } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
-import { asList } from '@/tools/query';
 import { Role } from '@/interfaces';
-import { ApiSurface, ReadOnlyTool } from '@/catalog/tool';
+import { ReadOnlyTool } from '@/catalog/tool';
 
 /** A ZFS property as the middleware reports it; the generated types flatten
  * these to `{}`, losing the parsed numeric value the tools surface. */
@@ -21,7 +19,7 @@ export const poolStatus: ReadOnlyTool = {
   requiredRole: Role.ReadOnly,
   mutating: false,
   async handler({ system }) {
-    const pools = asList(await firstValueFrom(system.client.api.call('pool.query')));
+    const pools = await firstValueFrom(system.client.api.query('pool.query'));
     return pools.map((pool) => ({
       name: pool.name,
       status: pool.status,
@@ -50,20 +48,20 @@ export const listDatasets: ReadOnlyTool = {
   requiredRole: Role.ReadOnly,
   mutating: false,
   async handler({ system }, args) {
-    // Derived from the call's own params: QueryOperator is not exported, and
-    // a hand-written [string, string, unknown] no longer satisfies it.
-    const filters: NonNullable<CallParams<ApiSurface, 'pool.dataset.query'>[0]> =
-      typeof args['pool'] === 'string' ? [['pool', '=', args['pool']]] : [];
     // retrieve_children makes the middleware walk the whole dataset tree; the
     // response is already a flat list (every dataset is a top-level entry) in
     // which each entry redundantly nests its descendants under `children`, so
     // it must not be flattened again.
-    const datasets = asList(
-      await firstValueFrom(
-        system.client.api.call('pool.dataset.query', [
-        filters,
-          { extra: { retrieve_children: true, properties: ['used', 'available'] } },
-        ]),
+    const datasets = await firstValueFrom(
+      // Filters are inlined so the call's own parameter types apply: written
+      // to a `const` first they widen to string[][] and no longer satisfy the
+      // filter tuple, and the naming types are not exported to annotate with.
+      system.client.api.query(
+        'pool.dataset.query',
+        typeof args['pool'] === 'string' ? [['pool', '=', args['pool']]] : [],
+        {
+          extra: { retrieve_children: true, properties: ['used', 'available'] },
+        },
       ),
     );
     return datasets.map((dataset) => ({
