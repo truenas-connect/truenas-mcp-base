@@ -1,4 +1,3 @@
-import { TrueNasEndpoint } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool } from '@/catalog/tool';
@@ -16,7 +15,7 @@ export const systemInfo: ReadOnlyTool = {
   requiredRole: Role.ReadOnly,
   mutating: false,
   async handler({ system }) {
-    const info = await firstValueFrom(system.client.api.call(TrueNasEndpoint.SystemInfo));
+    const info = await firstValueFrom(system.client.api.call('system.info'));
     return {
       hostname: info.hostname,
       version: info.version,

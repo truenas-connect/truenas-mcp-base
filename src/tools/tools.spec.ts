@@ -1,18 +1,25 @@
 import { describe, expect, it, vi } from 'vitest';
 import { of } from 'rxjs';
-import { TrueNasEndpoint } from '@truenas/api-client';
 import { SystemHandle, ToolContext } from '@/catalog/tool';
 import { Role } from '@/interfaces';
 import { createDefaultCatalog, createSnapshot, listDatasets, poolStatus } from '@/tools/index';
 
-/** A SystemHandle whose api.call answers from a canned endpoint→response map. */
-function fakeSystem(responses: Partial<Record<TrueNasEndpoint, unknown>>): {
+/**
+ * A SystemHandle answering from a canned method→response map. Both seams are
+ * stubbed from the same map: `call` for plain verbs, `query` for the client's
+ * query helpers, which return the list directly rather than the union `call`
+ * would. Tools pick whichever fits the verb, so a test asserts on whichever
+ * spy that tool used.
+ */
+function fakeSystem(responses: Partial<Record<string, unknown>>): {
   ctx: ToolContext;
   call: ReturnType<typeof vi.fn>;
+  query: ReturnType<typeof vi.fn>;
 } {
-  const call = vi.fn((method: TrueNasEndpoint) => of(responses[method]));
-  const system = { name: 'nas', client: { api: { call } } } as unknown as SystemHandle;
-  return { ctx: { system }, call };
+  const call = vi.fn((method: string) => of(responses[method]));
+  const query = vi.fn((method: string) => of(responses[method]));
+  const system = { name: 'nas', client: { api: { call, query } } } as unknown as SystemHandle;
+  return { ctx: { system }, call, query };
 }
 
 describe('createDefaultCatalog', () => {
@@ -29,7 +36,7 @@ describe('createDefaultCatalog', () => {
 describe('storage_pool_status', () => {
   it('trims pool.query to health and capacity', async () => {
     const { ctx } = fakeSystem({
-      [TrueNasEndpoint.PoolQuery]: [
+      ['pool.query']: [
         { name: 'tank', status: 'ONLINE', healthy: true, size: 100, allocated: 40, free: 60 },
       ],
     });
@@ -61,7 +68,7 @@ describe('storage_list_datasets', () => {
     // pool.dataset.query returns every dataset as a top-level entry while each
     // entry also nests its descendants under `children`.
     const { ctx } = fakeSystem({
-      [TrueNasEndpoint.DatasetQuery]: [
+      ['pool.dataset.query']: [
         dataset('tank', [dataset('tank/media', [dataset('tank/media/movies')])]),
         dataset('tank/media', [dataset('tank/media/movies')]),
         dataset('tank/media/movies'),
@@ -72,12 +79,15 @@ describe('storage_list_datasets', () => {
   });
 
   it('passes a pool filter to the query', async () => {
-    const { ctx, call } = fakeSystem({ [TrueNasEndpoint.DatasetQuery]: [] });
+    const { ctx, query } = fakeSystem({ ['pool.dataset.query']: [] });
     await listDatasets.handler(ctx, { pool: 'tank' });
-    expect(call).toHaveBeenCalledWith(TrueNasEndpoint.DatasetQuery, [
+    // The query helper takes filters and options as separate arguments, where
+    // `call` took one positional params tuple.
+    expect(query).toHaveBeenCalledWith(
+      'pool.dataset.query',
       [['pool', '=', 'tank']],
       { extra: { retrieve_children: true, properties: ['used', 'available'] } },
-    ]);
+    );
   });
 });
 
@@ -100,7 +110,7 @@ describe('snapshots_create', () => {
   });
 
   it('plans the exact pool.snapshot.create call after verifying the dataset exists', async () => {
-    const { ctx } = fakeSystem({ [TrueNasEndpoint.DatasetQuery]: [{ id: 'tank/media' }] });
+    const { ctx } = fakeSystem({ ['pool.dataset.query']: [{ id: 'tank/media' }] });
     const steps = await createSnapshot.plan(ctx, { dataset: 'tank/media', name: 'before' });
     expect(steps).toEqual([
       {
@@ -112,7 +122,7 @@ describe('snapshots_create', () => {
   });
 
   it('fails the plan when the dataset does not exist', async () => {
-    const { ctx } = fakeSystem({ [TrueNasEndpoint.DatasetQuery]: [] });
+    const { ctx } = fakeSystem({ ['pool.dataset.query']: [] });
     await expect(
       createSnapshot.plan(ctx, { dataset: 'tank/nope', name: 'before' }),
     ).rejects.toThrow(/does not exist/);
@@ -126,10 +136,10 @@ describe('snapshots_create', () => {
 
   it('executes the same call the plan described', async () => {
     const { ctx, call } = fakeSystem({
-      [TrueNasEndpoint.SnapshotCreate]: { name: 'tank/media@before' },
+      ['pool.snapshot.create']: { name: 'tank/media@before' },
     });
     const result = await createSnapshot.execute(ctx, { dataset: 'tank/media', name: 'before' });
-    expect(call).toHaveBeenCalledWith(TrueNasEndpoint.SnapshotCreate, [
+    expect(call).toHaveBeenCalledWith('pool.snapshot.create', [
       { dataset: 'tank/media', name: 'before', recursive: false },
     ]);
     expect(result).toEqual({ created: 'tank/media@before' });

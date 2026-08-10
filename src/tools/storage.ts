@@ -1,7 +1,12 @@
-import { TrueNasEndpoint } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool } from '@/catalog/tool';
+
+/** A ZFS property as the middleware reports it; the generated types flatten
+ * these to `{}`, losing the parsed numeric value the tools surface. */
+interface ZfsProperty {
+  parsed?: unknown;
+}
 
 /** Storage-health family: read-only inspection of pools and datasets. */
 
@@ -14,7 +19,7 @@ export const poolStatus: ReadOnlyTool = {
   requiredRole: Role.ReadOnly,
   mutating: false,
   async handler({ system }) {
-    const pools = await firstValueFrom(system.client.api.call(TrueNasEndpoint.PoolQuery));
+    const pools = await firstValueFrom(system.client.api.query('pool.query'));
     return pools.map((pool) => ({
       name: pool.name,
       status: pool.status,
@@ -43,25 +48,31 @@ export const listDatasets: ReadOnlyTool = {
   requiredRole: Role.ReadOnly,
   mutating: false,
   async handler({ system }, args) {
-    const filters: [string, string, string][] =
-      typeof args['pool'] === 'string' ? [['pool', '=', args['pool']]] : [];
     // retrieve_children makes the middleware walk the whole dataset tree; the
     // response is already a flat list (every dataset is a top-level entry) in
     // which each entry redundantly nests its descendants under `children`, so
     // it must not be flattened again.
     const datasets = await firstValueFrom(
-      system.client.api.call(TrueNasEndpoint.DatasetQuery, [
-        filters,
-        { extra: { retrieve_children: true, properties: ['used', 'available'] } },
-      ]),
+      // Filters are inlined so the call's own parameter types apply: written
+      // to a `const` first they widen to string[][] and no longer satisfy the
+      // filter tuple, and the naming types are not exported to annotate with.
+      system.client.api.query(
+        'pool.dataset.query',
+        typeof args['pool'] === 'string' ? [['pool', '=', args['pool']]] : [],
+        {
+          extra: { retrieve_children: true, properties: ['used', 'available'] },
+        },
+      ),
     );
     return datasets.map((dataset) => ({
-      id: dataset.id,
-      pool: dataset.pool,
-      type: dataset.type,
-      mountpoint: dataset.mountpoint,
-      used: dataset.used?.parsed,
-      available: dataset.available?.parsed,
+      id: dataset['id'],
+      pool: dataset['pool'],
+      type: dataset['type'],
+      mountpoint: dataset['mountpoint'],
+      // The generated types erase the ZFS property object to `{}`, so the
+      // `parsed` field the middleware returns has to be re-stated here.
+      used: (dataset['used'] as ZfsProperty | undefined)?.parsed,
+      available: (dataset['available'] as ZfsProperty | undefined)?.parsed,
     }));
   },
 };
