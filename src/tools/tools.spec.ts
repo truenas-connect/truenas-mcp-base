@@ -674,10 +674,11 @@ describe('storage_scrub_history', () => {
         errors: null,
       },
     ]);
-    // Expecting null rather than undefined above is what enforces the
-    // normalization: `toEqual` reads an absent key and an undefined one alike,
-    // so an unnormalized field would arrive as undefined and pass. This says
-    // the same thing in the terms the caller sees.
+    // Expecting null above is what enforces the normalization: `toEqual`
+    // reads an absent key and an undefined one alike, so a field that stopped
+    // being normalized would arrive as undefined and fail against that null.
+    // The keys below restate it in the terms the caller sees, and are the
+    // weaker of the two — `Object.keys` lists a key holding undefined as well.
     expect(Object.keys(results[0])).toContain('started_at');
     expect(Object.keys(results[0])).toContain('errors');
     expect(Object.keys(results[0])).toContain('state');
