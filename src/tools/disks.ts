@@ -5,8 +5,12 @@ import { ReadOnlyTool } from '@/catalog/tool';
 /** Hardware inventory: the physical disks under the pools.
  *
  * `storage_pool_status` reports pools as units and says nothing about the
- * devices beneath them, so "is anything about to fail" or "do I have a spare
- * bay" has no inventory to reason over without this.
+ * devices beneath them, so "which disks are there", "what is unassigned" and
+ * "which model and size is each" have no inventory to reason over without this.
+ *
+ * Physical placement is not among them: `enclosure` (the shelf and slot a disk
+ * sits in) is dropped, so this cannot answer "do I have a spare bay". It
+ * answers the weaker "do I have an unassigned disk", via `pool`.
  *
  * The mapping below is an allowlist rather than a trim, which matters more here
  * than for the other read-only tools: a `disk.query` row carries the SED
