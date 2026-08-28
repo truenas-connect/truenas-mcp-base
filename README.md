@@ -14,7 +14,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
 
 - **Tool catalog** — curated tools with role metadata; irreversibly destructive
   operations are rejected at registration by policy. Read-only family:
-  `system_info`, `storage_pool_status`, `storage_list_datasets`, `alerts_list`.
+  `system_info`, `storage_pool_status`, `storage_list_datasets`, `disks_list`,
+  `alerts_list`.
 - **System registry** — 1..N named systems, each owning its own
   `@truenas/api-client` instance and credentials; `systems` selector
   (name / list / `all`, defaulting when one system is registered).
