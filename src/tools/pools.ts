@@ -44,30 +44,39 @@ interface TopologyNode {
 
 /** One vdev, or one device beneath it: the same shape at every depth. */
 interface TopologyDevice {
-  name: string | undefined;
-  type: string | undefined;
-  status: string | undefined;
+  name: string | null;
+  type: string | null;
+  status: string | null;
   disk: string | null;
   devices: TopologyDevice[];
 }
 
+/**
+ * A field the middleware did not send, reported as null rather than dropped.
+ *
+ * `undefined` serializes to no key at all, so a middleware that omits a field
+ * would hand the caller an object missing one the description promises — a
+ * shape it has not been told about, rather than a value it can see is absent.
+ * Unlike `pool` in `disks.ts`, absent and null have nothing to keep apart on a
+ * topology node: each field has one intended meaning, and "not reported" is it.
+ */
+const orNull = (value: string | null | undefined): string | null => value ?? null;
+
 function mapNode(node: TopologyNode): TopologyDevice {
   return {
-    name: node.name,
+    name: orNull(node.name),
     // The vdev kind — MIRROR, RAIDZ1, DISK, and so on — not the medium. A leaf
     // is reported as type DISK, which is how a single-disk (stripe) vdev and a
     // member of a mirror end up looking alike; their depth is what separates
     // them.
-    type: node.type,
-    status: node.status,
+    type: orNull(node.type),
+    status: orNull(node.status),
     // Null on a node that groups other devices, and null again on a leaf whose
-    // disk the middleware could not resolve — a pulled or dead device, where it
-    // reports the identifier under `unavail_disk` instead. Normalized rather
-    // than passed through, because an absent key serializes to no key at all
-    // and the description promises the caller a null. Unlike `pool` in
-    // `disks.ts`, there is nothing here for absent and null to keep apart: both
-    // mean this node does not name a disk.
-    disk: node.disk ?? null,
+    // disk the middleware could not resolve — a pulled or dead device, for
+    // which it sends `unavail_disk` in place of a disk. That block is dropped
+    // with the rest of the per-node detail, so a device in that state is
+    // located by its position in the tree rather than named.
+    disk: orNull(node.disk),
     // Nested rather than flattened. A disk being replaced is reported as a
     // `replacing` vdev holding the outgoing and incoming disks, and a draid's
     // distributed spare nests the same way; flattening would present both
@@ -86,16 +95,17 @@ export const poolTopology: ReadOnlyTool = {
     'state of that vdev or device: ONLINE is healthy, and FAULTED, DEGRADED, ' +
     'OFFLINE, UNAVAIL and REMOVED are the states that make a pool unhealthy, ' +
     'so they are what identifies the device behind a degraded pool. A device ' +
-    'in the `spare` category is the exception and is not failing in either of ' +
-    'its own states: AVAIL is an idle spare standing by, INUSE one that has ' +
-    'been swapped in for a failed disk. `disk` names the physical device, ' +
-    'matching `name` in `disks_list`. It is null on a vdev that groups other ' +
-    'devices rather than sitting on one, and null again on a device the system ' +
-    'can no longer resolve to a disk — one that has been pulled or has died ' +
-    'outright, which is what a REMOVED or UNAVAIL status on a leaf means. So a ' +
-    'null `disk` is read together with `type`: a leaf reports type DISK and ' +
-    'names itself in `name`, and that name is what identifies it when there is ' +
-    'no `disk` to give. `devices` nests: a mirror lists its ' +
+    'in the `spare` category has two states of its own that are not failures: ' +
+    'AVAIL is an idle spare standing by, INUSE one that has been swapped in ' +
+    'for a failed disk. Any other status on a spare is a failing spare, and is ' +
+    'read like any other. `disk` names the physical device, matching `name` in ' +
+    '`disks_list`. It is null on a vdev that groups other devices rather than ' +
+    'sitting on one, and null again on a device the system can no longer ' +
+    'resolve to a disk — one pulled or dead outright, which is what a REMOVED ' +
+    'or UNAVAIL status on a leaf usually means. Such a device is still ' +
+    'reported, in its place in the tree, and `name` is what ZFS calls that ' +
+    'slot; there is simply no disk left to name, so it cannot be matched ' +
+    'against `disks_list`. `devices` nests: a mirror lists its ' +
     'members, and a member being replaced lists the outgoing and incoming ' +
     'disks beneath it.',
   inputSchema: { type: 'object', properties: {} },

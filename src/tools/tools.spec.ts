@@ -86,9 +86,9 @@ describe('storage_pool_status', () => {
 
 /** The shape `storage_pool_topology` returns, for the assertions below. */
 interface MappedDevice {
-  name: string;
-  type: string;
-  status: string;
+  name: string | null;
+  type: string | null;
+  status: string | null;
   disk: string | null;
   devices: MappedDevice[];
 }
@@ -377,18 +377,21 @@ describe('storage_pool_topology', () => {
   it('reports a pool with no topology, and one whose keys are absent', async () => {
     // `topology` is null on a pool the middleware could not read the layout of;
     // a middleware older than a category omits its key, and one that reports a
-    // leaf without `children` omits that. None is an error, and none may take
-    // the rest of the pools down with it.
+    // leaf without `children` or without `status` omits those. None is an
+    // error, and none may take the rest of the pools down with it: an omitted
+    // field is reported as null, so the caller meets the shape the description
+    // promised with a value missing rather than a key missing.
     const { ctx } = fakeSystem({
       ['pool.query']: [
         pool(null, { name: 'unimported' }),
         pool(
-          { data: [without('children', node({ name: 'sda2', disk: 'sda' }))] },
+          { data: [without('status', without('children', node({ name: 'sda2', disk: 'sda' })))] },
           { name: 'stripe' },
         ),
       ],
     });
-    expect(await poolTopology.handler(ctx, {})).toEqual([
+    const results = (await poolTopology.handler(ctx, {})) as MappedPool[];
+    expect(results).toEqual([
       { name: 'unimported', status: 'ONLINE', vdevs: [] },
       {
         name: 'stripe',
@@ -398,13 +401,16 @@ describe('storage_pool_topology', () => {
             category: 'data',
             name: 'sda2',
             type: 'DISK',
-            status: 'ONLINE',
+            status: null,
             disk: 'sda',
             devices: [],
           },
         ],
       },
     ]);
+    // `toEqual` reads an absent key and an undefined one alike, so the key
+    // itself is asserted: that is what the normalization above buys.
+    expect(Object.keys(results[1].vdevs[0])).toContain('status');
   });
 
   it('returns [] for a system with no pools', async () => {
