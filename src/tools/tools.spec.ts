@@ -10,6 +10,7 @@ import {
   disksList,
   listDatasets,
   poolStatus,
+  poolTopology,
 } from '@/tools/index';
 
 /**
@@ -31,10 +32,11 @@ function fakeSystem(responses: Partial<Record<string, unknown>>): {
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the seven sketch tools', () => {
+  it('registers the eight sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'storage_pool_status',
+      'storage_pool_topology',
       'storage_list_datasets',
       'disks_list',
       'apps_list',
@@ -53,6 +55,12 @@ describe('createDefaultCatalog', () => {
 
   it('advertises apps_list to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('apps_list');
+  });
+
+  it('advertises storage_pool_topology to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'storage_pool_topology',
+    );
   });
 });
 
@@ -73,6 +81,285 @@ describe('storage_pool_status', () => {
         free_bytes: 60,
       },
     ]);
+  });
+});
+
+/** The shape `storage_pool_topology` returns, for the assertions below. */
+interface MappedDevice {
+  name: string;
+  type: string;
+  status: string;
+  disk: string | null;
+  devices: MappedDevice[];
+}
+interface MappedVdev extends MappedDevice {
+  category: string;
+}
+interface MappedPool {
+  name: string;
+  status: string;
+  vdevs: MappedVdev[];
+}
+
+describe('storage_pool_topology', () => {
+  // Every property a topology node carries, so the assertions below show what
+  // the tool drops as well as what it keeps. `stats` is the bulky one — the
+  // middleware repeats that block on every node of a tree with one leaf per
+  // disk in the system — and `path`, `guid`, `device` and `unavail_disk` are
+  // here to be dropped alongside it.
+  const node = (over: Record<string, unknown>) => ({
+    name: 'sda2',
+    type: 'DISK',
+    path: '/dev/disk/by-partuuid/11111111-2222-3333-4444-555555555555',
+    guid: '12345678901234567890',
+    status: 'ONLINE',
+    stats: {
+      timestamp: 1756000000000000000,
+      read_errors: 0,
+      write_errors: 0,
+      checksum_errors: 0,
+      ops: [0, 1, 2, 3, 4, 5],
+      bytes: [0, 1, 2, 3, 4, 5],
+      size: 4000787030016,
+      allocated: 1000000000,
+      fragmentation: 3,
+    },
+    children: [],
+    device: 'sda2',
+    disk: 'sda',
+    unavail_disk: null,
+    ...over,
+  });
+
+  /** A vdev that groups devices: no disk of its own, members underneath. */
+  const group = (over: Record<string, unknown>) =>
+    node({ type: 'MIRROR', path: null, device: null, disk: null, ...over });
+
+  const pool = (topology: unknown, over: Record<string, unknown> = {}) => ({
+    id: 1,
+    name: 'tank',
+    guid: '1',
+    status: 'ONLINE',
+    healthy: true,
+    size: 100,
+    allocated: 40,
+    free: 60,
+    topology,
+    ...over,
+  });
+
+  /** A full topology, with the five categories a plain pool leaves empty. */
+  const topologyOf = (over: Record<string, unknown>) => ({
+    data: [],
+    special: [],
+    dedup: [],
+    log: [],
+    cache: [],
+    spare: [],
+    ...over,
+  });
+
+  it('maps each vdev to its members, keeping the tree', async () => {
+    const { ctx, query } = fakeSystem({
+      ['pool.query']: [
+        pool(
+          topologyOf({
+            data: [
+              group({
+                name: 'mirror-0',
+                children: [node({ name: 'sda2', disk: 'sda' }), node({ name: 'sdb2', disk: 'sdb' })],
+              }),
+            ],
+          }),
+        ),
+      ],
+    });
+    expect(await poolTopology.handler(ctx, {})).toEqual([
+      {
+        name: 'tank',
+        status: 'ONLINE',
+        vdevs: [
+          {
+            category: 'data',
+            name: 'mirror-0',
+            type: 'MIRROR',
+            status: 'ONLINE',
+            disk: null,
+            devices: [
+              { name: 'sda2', type: 'DISK', status: 'ONLINE', disk: 'sda', devices: [] },
+              { name: 'sdb2', type: 'DISK', status: 'ONLINE', disk: 'sdb', devices: [] },
+            ],
+          },
+        ],
+      },
+    ]);
+    // `topology` is part of a pool row as it stands, so the tool asks for the
+    // pool list with no filters and no options.
+    expect(query.mock.calls).toEqual([['pool.query']]);
+  });
+
+  it('labels cache, log and spare vdevs rather than folding them in with data', async () => {
+    const { ctx } = fakeSystem({
+      ['pool.query']: [
+        pool(
+          topologyOf({
+            data: [group({ name: 'raidz1-0', type: 'RAIDZ1' })],
+            special: [group({ name: 'mirror-1' })],
+            dedup: [group({ name: 'mirror-2' })],
+            log: [node({ name: 'nvme0n1p1', disk: 'nvme0n1' })],
+            cache: [node({ name: 'nvme1n1p1', disk: 'nvme1n1' })],
+            // A spare that has not been called on reports AVAIL, not ONLINE.
+            spare: [node({ name: 'sdz2', disk: 'sdz', status: 'AVAIL' })],
+          }),
+        ),
+      ],
+    });
+    const [result] = (await poolTopology.handler(ctx, {})) as MappedPool[];
+    expect(result.vdevs.map((v) => [v.category, v.name, v.status])).toEqual([
+      ['data', 'raidz1-0', 'ONLINE'],
+      ['special', 'mirror-1', 'ONLINE'],
+      ['dedup', 'mirror-2', 'ONLINE'],
+      ['log', 'nvme0n1p1', 'ONLINE'],
+      ['cache', 'nvme1n1p1', 'ONLINE'],
+      ['spare', 'sdz2', 'AVAIL'],
+    ]);
+  });
+
+  it('names the failed device by status, on the device and on the vdev above it', async () => {
+    // The question the tool exists for: the pool says DEGRADED, and the answer
+    // to "which device" has to be reachable by filtering a field rather than by
+    // reading prose.
+    const { ctx } = fakeSystem({
+      ['pool.query']: [
+        pool(
+          topologyOf({
+            data: [
+              group({
+                name: 'mirror-0',
+                status: 'DEGRADED',
+                children: [
+                  node({ name: 'sda2', disk: 'sda' }),
+                  node({ name: 'sdf2', disk: 'sdf', status: 'FAULTED' }),
+                ],
+              }),
+            ],
+          }),
+          { status: 'DEGRADED', healthy: false },
+        ),
+      ],
+    });
+    const [result] = (await poolTopology.handler(ctx, {})) as MappedPool[];
+    expect(result.status).toBe('DEGRADED');
+    const failed = result.vdevs.flatMap((v) => v.devices).filter((d) => d.status !== 'ONLINE');
+    expect(failed).toEqual([
+      { name: 'sdf2', type: 'DISK', status: 'FAULTED', disk: 'sdf', devices: [] },
+    ]);
+  });
+
+  it('nests a replacement beneath the mirror rather than beside its members', async () => {
+    // Mid-resilver the middleware reports a `replacing` vdev holding both the
+    // outgoing and the incoming disk. Flattened, the mirror would read as
+    // having three members and no indication which two are the same slot.
+    const { ctx } = fakeSystem({
+      ['pool.query']: [
+        pool(
+          topologyOf({
+            data: [
+              group({
+                name: 'mirror-0',
+                status: 'DEGRADED',
+                children: [
+                  node({ name: 'sda2', disk: 'sda' }),
+                  group({
+                    name: 'replacing-1',
+                    type: 'REPLACING',
+                    status: 'DEGRADED',
+                    children: [
+                      node({ name: 'sdf2', disk: 'sdf', status: 'FAULTED' }),
+                      node({ name: 'sdg2', disk: 'sdg' }),
+                    ],
+                  }),
+                ],
+              }),
+            ],
+          }),
+        ),
+      ],
+    });
+    const [result] = (await poolTopology.handler(ctx, {})) as MappedPool[];
+    const [mirror] = result.vdevs;
+    expect(mirror.devices.map((d) => [d.name, d.type, d.devices.map((c) => c.disk)])).toEqual([
+      ['sda2', 'DISK', []],
+      ['replacing-1', 'REPLACING', ['sdf', 'sdg']],
+    ]);
+  });
+
+  it('surfaces neither the per-vdev statistics nor a field a later release adds', async () => {
+    const { ctx } = fakeSystem({
+      ['pool.query']: [
+        pool(
+          topologyOf({
+            data: [
+              group({
+                name: 'mirror-0',
+                children: [node({ future_field: 'added by a later TrueNAS release' })],
+              }),
+            ],
+            // A vdev category a later release adds is dropped whole: the tool
+            // walks the six roles it names, not the payload's own keys.
+            future_category: [node({ name: 'sdx2', disk: 'sdx' })],
+          }),
+          { future_field: 'added by a later TrueNAS release' },
+        ),
+      ],
+    });
+    const [result] = (await poolTopology.handler(ctx, {})) as Record<string, unknown>[];
+    expect(Object.keys(result)).toEqual(['name', 'status', 'vdevs']);
+    const [vdev] = result['vdevs'] as MappedVdev[];
+    expect(Object.keys(vdev)).toEqual(['category', 'name', 'type', 'status', 'disk', 'devices']);
+    expect(Object.keys(vdev.devices[0])).toEqual(['name', 'type', 'status', 'disk', 'devices']);
+  });
+
+  /** A node from a middleware that reported no `children` key on a leaf. */
+  const withoutChildren = (row: Record<string, unknown>): Record<string, unknown> => {
+    const copy = { ...row };
+    delete copy['children'];
+    return copy;
+  };
+
+  it('reports a pool with no topology, and one whose keys are absent', async () => {
+    // `topology` is null on a pool the middleware could not read the layout of;
+    // a middleware older than a category omits its key, and one that reports a
+    // leaf without `children` omits that. None is an error, and none may take
+    // the rest of the pools down with it.
+    const { ctx } = fakeSystem({
+      ['pool.query']: [
+        pool(null, { name: 'unimported' }),
+        pool({ data: [withoutChildren(node({ name: 'sda2', disk: 'sda' }))] }, { name: 'stripe' }),
+      ],
+    });
+    expect(await poolTopology.handler(ctx, {})).toEqual([
+      { name: 'unimported', status: 'ONLINE', vdevs: [] },
+      {
+        name: 'stripe',
+        status: 'ONLINE',
+        vdevs: [
+          {
+            category: 'data',
+            name: 'sda2',
+            type: 'DISK',
+            status: 'ONLINE',
+            disk: 'sda',
+            devices: [],
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('returns [] for a system with no pools', async () => {
+    const { ctx } = fakeSystem({ ['pool.query']: [] });
+    expect(await poolTopology.handler(ctx, {})).toEqual([]);
   });
 });
 

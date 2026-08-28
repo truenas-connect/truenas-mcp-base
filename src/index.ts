@@ -62,6 +62,7 @@ export {
   createDefaultCatalog,
   systemInfo,
   poolStatus,
+  poolTopology,
   listDatasets,
   disksList,
   appsList,
