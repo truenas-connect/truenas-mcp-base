@@ -299,8 +299,11 @@ describe('storage_pool_topology', () => {
       { name: 'sdf2', type: 'DISK', status: 'REMOVED', disk: null, devices: [] },
       { name: 'sdg2', type: 'DISK', status: 'UNAVAIL', disk: null, devices: [] },
     ]);
-    // `toEqual` treats an absent key and an undefined one alike, so the null
-    // itself is asserted separately — that is the whole claim being made here.
+    // Expecting null above is what enforces the normalization: `toEqual` reads
+    // an absent key and an undefined one alike, so a `disk` that stopped being
+    // normalized would arrive as undefined and fail against that null. These
+    // two say the same thing more plainly — `Object.keys` lists a key holding
+    // undefined as well, so the first is the weaker of them.
     expect(Object.keys(mirror.devices[1])).toContain('disk');
     expect(mirror.devices[1].disk).toBeNull();
   });
@@ -408,8 +411,10 @@ describe('storage_pool_topology', () => {
         ],
       },
     ]);
-    // `toEqual` reads an absent key and an undefined one alike, so the key
-    // itself is asserted: that is what the normalization above buys.
+    // Expecting null rather than undefined above is what catches a dropped
+    // `status`: `toEqual` reads an absent key and an undefined one alike, so
+    // an unnormalized field fails against that null. This restates it in the
+    // terms the caller sees — the key is present in the response object.
     expect(Object.keys(results[1].vdevs[0])).toContain('status');
   });
 
