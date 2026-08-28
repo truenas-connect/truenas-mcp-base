@@ -175,8 +175,12 @@ interface ScanRecord {
  * decision is made is the handler, so that a row's state and its fields cannot
  * disagree about whether they are describing a scrub.
  */
-function scrubState(topology: unknown, scan: ScanRecord | null, scrub: ScanRecord | null) {
-  if (!topology) return 'UNKNOWN';
+function scrubState(
+  readable: boolean,
+  scan: ScanRecord | null,
+  scrub: ScanRecord | null,
+): string | null {
+  if (!readable) return 'UNKNOWN';
   if (!scan) return 'NEVER_SCRUBBED';
   if (!scrub) return 'UNKNOWN';
   // A paused scrub reports SCANNING with the time it was paused, and stays
@@ -221,10 +225,10 @@ export const scrubHistory: ReadOnlyTool = {
     '`duration_seconds` is the difference between the two, and is null ' +
     'whenever either is missing or is not a timestamp this tool can read. ' +
     '`errors` is the number of errors that scrub found, and is a running ' +
-    'count while one is still going. Those four fields are null exactly when ' +
-    '`state` is `NEVER_SCRUBBED` or `UNKNOWN`, because the record then ' +
-    'describes a resilver, or nothing at all, rather than a scrub; a null ' +
-    '`state` still carries them, because a scrub is on record either way. ' +
+    'count while one is still going. All four are null whenever `state` is ' +
+    '`NEVER_SCRUBBED` or `UNKNOWN`, because the record then describes a ' +
+    'resilver, or nothing at all, rather than a scrub; a null `state` still ' +
+    'carries them, because a scrub is on record either way. ' +
     '`pool` matches `name` in `storage_pool_status`.',
   inputSchema: { type: 'object', properties: {} },
   requiredRole: Role.ReadOnly,
@@ -235,17 +239,20 @@ export const scrubHistory: ReadOnlyTool = {
     // pool is scheduled under, and carries no outcome, no time and no errors.
     const pools = await firstValueFrom(system.client.api.query('pool.query'));
     return pools.map((pool) => {
-      const scan: ScanRecord | null = pool.scan ?? null;
+      // `topology` is what says the system is reading this pool at all: it is
+      // null on one that is not imported, whose absent scan record is then an
+      // absence of evidence rather than evidence of no scrub. Whatever such a
+      // pool does carry is dropped here rather than below, so that the state
+      // and the four fields under it cannot tell different stories.
+      const readable = Boolean(pool.topology);
+      const scan: ScanRecord | null = (readable ? pool.scan : null) ?? null;
       // The scan is only this tool's subject when it is a scrub. A resilver's
       // times and error count are read through `null` rather than reported,
       // so that no field of a resilver is ever presented as one of a scrub.
       const scrub = scan?.function === 'SCRUB' ? scan : null;
       return {
         pool: pool.name,
-        // `topology` is what says the system is reading this pool at all: it
-        // is null on one that is not imported, whose absent scan record is
-        // then an absence of evidence rather than evidence of no scrub.
-        state: scrubState(pool.topology, scan, scrub),
+        state: scrubState(readable, scan, scrub),
         started_at: orNull(scrub?.start_time),
         finished_at: orNull(scrub?.end_time),
         duration_seconds: scrubDuration(scrub),

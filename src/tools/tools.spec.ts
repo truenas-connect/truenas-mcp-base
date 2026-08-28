@@ -621,12 +621,26 @@ describe('storage_scrub_history', () => {
     // missing scan is then an absence of evidence: the record it would be read
     // from is not there. Reported as NEVER_SCRUBBED it would raise the one
     // alarm this tool exists to raise, about a pool nobody can answer for.
+    // The second pool is the same case carrying a stale scan anyway: the
+    // record cannot be read as current, so the state and the four fields agree
+    // that nothing is known rather than reporting a scrub the state denies.
     const { ctx } = fakeSystem({
-      ['pool.query']: [pool({ name: 'exported', topology: null, scan: null })],
+      ['pool.query']: [
+        pool({ name: 'exported', topology: null, scan: null }),
+        pool({ name: 'stale', topology: null }),
+      ],
     });
     expect(await scrubHistory.handler(ctx, {})).toEqual([
       {
         pool: 'exported',
+        state: 'UNKNOWN',
+        started_at: null,
+        finished_at: null,
+        duration_seconds: null,
+        errors: null,
+      },
+      {
+        pool: 'stale',
         state: 'UNKNOWN',
         started_at: null,
         finished_at: null,
