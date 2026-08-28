@@ -154,23 +154,35 @@ interface ScanRecord {
 }
 
 /**
- * The state of a pool's last scrub, from the scan the pool reports.
+ * The state of a pool's last scrub: ZFS's own state for it, or one of the two
+ * states ZFS does not have, or null.
  *
- * The two states ZFS does not have are the ones that matter here. A pool with
- * no scan at all has never been scanned, and "never verified" is the answer
- * this tool exists to give rather than a gap to leave blank. A pool whose last
- * scan was a RESILVER is the awkward one: the resilver overwrote the record of
- * whatever scrub preceded it, so its last scrub is not recoverable — which is
- * not the same as never having had one, and must not read as either a clean
- * scrub or a missing one.
+ * Those two are what the tool is for. A pool the system can read and holds no
+ * scan for has never been scanned, and "never verified" is an answer rather
+ * than a gap to leave blank. `UNKNOWN` is every way the last scrub cannot be
+ * read at all: a pool whose last scan was a RESILVER, which overwrote the
+ * record of whatever scrub preceded it, and a pool the system reports no
+ * layout for — one it is not currently reading, whose scan record is absent
+ * because there is nothing to read it from rather than because none was ever
+ * made. Neither may report as a pool that has never been scrubbed, and neither
+ * may report as a clean one.
+ *
+ * Null is the third case and is not one of those: a scrub IS on record and the
+ * system reported no state for it, so its times and error count still stand.
+ * `orNull` is what says that, here as everywhere else in this file.
+ *
+ * `scrub` is the scan once it is known to be one — the single place that
+ * decision is made is the handler, so that a row's state and its fields cannot
+ * disagree about whether they are describing a scrub.
  */
-function scrubState(scan: ScanRecord | null): string {
+function scrubState(topology: unknown, scan: ScanRecord | null, scrub: ScanRecord | null) {
+  if (!topology) return 'UNKNOWN';
   if (!scan) return 'NEVER_SCRUBBED';
-  if (scan.function !== 'SCRUB') return 'UNKNOWN';
+  if (!scrub) return 'UNKNOWN';
   // A paused scrub reports SCANNING with the time it was paused, and stays
   // that way indefinitely. Read as SCANNING it would look like progress.
-  if (scan.state === 'SCANNING' && scan.pause) return 'PAUSED';
-  return scan.state ?? 'UNKNOWN';
+  if (scrub.state === 'SCANNING' && scrub.pause) return 'PAUSED';
+  return orNull(scrub.state);
 }
 
 /**
@@ -197,20 +209,23 @@ export const scrubHistory: ReadOnlyTool = {
     'completion; `SCANNING`, one running now; `PAUSED`, one started and ' +
     'paused before it finished, which stays paused until it is resumed; ' +
     '`CANCELED`, one stopped before it completed; `NEVER_SCRUBBED`, a pool ' +
-    'the system reports no scan of any kind for; and `UNKNOWN`, a pool whose ' +
-    'most recent scan was a resilver rather than a scrub, or whose scan the ' +
-    'system reported without a state. A resilver replaces the record of the ' +
-    'scrub before it, so `UNKNOWN` means the last scrub cannot be read here — ' +
-    'it is not evidence that the pool has never been scrubbed. `started_at` ' +
-    'and `finished_at` are timestamps as the system reports them; ' +
-    '`finished_at` is null for a scrub that has not ended. ' +
+    'the system holds no scan of any kind for; `UNKNOWN`, a pool whose last ' +
+    'scrub cannot be read; and null, a scrub the system reported no state ' +
+    'for. `UNKNOWN` covers a pool whose most recent scan was a resilver, ' +
+    'which replaces the record of the scrub before it, and a pool the system ' +
+    'reports no layout for — one it is not currently reading, so that no ' +
+    'scan record is available to read. Neither is evidence that the pool has ' +
+    'never been scrubbed, and neither is evidence that it is clean. ' +
+    '`started_at` and `finished_at` are timestamps as the system reports ' +
+    'them; `finished_at` is null for a scrub that has not ended. ' +
     '`duration_seconds` is the difference between the two, and is null ' +
     'whenever either is missing or is not a timestamp this tool can read. ' +
     '`errors` is the number of errors that scrub found, and is a running ' +
-    'count while one is still going. Everything but `pool` and `state` is ' +
-    'null when `state` is `NEVER_SCRUBBED` or `UNKNOWN`, because the figures ' +
-    'on record then describe a resilver or nothing at all rather than a ' +
-    'scrub. `pool` matches `name` in `storage_pool_status`.',
+    'count while one is still going. Those four fields are null exactly when ' +
+    '`state` is `NEVER_SCRUBBED` or `UNKNOWN`, because the record then ' +
+    'describes a resilver, or nothing at all, rather than a scrub; a null ' +
+    '`state` still carries them, because a scrub is on record either way. ' +
+    '`pool` matches `name` in `storage_pool_status`.',
   inputSchema: { type: 'object', properties: {} },
   requiredRole: Role.ReadOnly,
   mutating: false,
@@ -227,7 +242,10 @@ export const scrubHistory: ReadOnlyTool = {
       const scrub = scan?.function === 'SCRUB' ? scan : null;
       return {
         pool: pool.name,
-        state: scrubState(scan),
+        // `topology` is what says the system is reading this pool at all: it
+        // is null on one that is not imported, whose absent scan record is
+        // then an absence of evidence rather than evidence of no scrub.
+        state: scrubState(pool.topology, scan, scrub),
         started_at: orNull(scrub?.start_time),
         finished_at: orNull(scrub?.end_time),
         duration_seconds: scrubDuration(scrub),

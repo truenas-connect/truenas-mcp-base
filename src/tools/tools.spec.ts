@@ -458,6 +458,8 @@ describe('storage_scrub_history', () => {
     name: 'tank',
     status: 'ONLINE',
     healthy: true,
+    // Present on every pool the system is reading, and null on one it is not.
+    topology: { data: [{ name: 'sda2', type: 'DISK' }] },
     scan: scan({}),
     ...over,
   });
@@ -614,9 +616,32 @@ describe('storage_scrub_history', () => {
     ]);
   });
 
+  it('does not claim a pool the system is not reading has never been scrubbed', async () => {
+    // A pool that is not imported carries no topology and no scan, and the
+    // missing scan is then an absence of evidence: the record it would be read
+    // from is not there. Reported as NEVER_SCRUBBED it would raise the one
+    // alarm this tool exists to raise, about a pool nobody can answer for.
+    const { ctx } = fakeSystem({
+      ['pool.query']: [pool({ name: 'exported', topology: null, scan: null })],
+    });
+    expect(await scrubHistory.handler(ctx, {})).toEqual([
+      {
+        pool: 'exported',
+        state: 'UNKNOWN',
+        started_at: null,
+        finished_at: null,
+        duration_seconds: null,
+        errors: null,
+      },
+    ]);
+  });
+
   it('normalizes a scan whose keys the middleware did not send', async () => {
     // An omitted field is reported as null, so the caller meets the shape the
     // description promised with a value missing rather than a key missing.
+    // A scrub with no state of its own is still a scrub on record, so its
+    // times and error count stand: a null state says only that ZFS's own word
+    // for the outcome is missing, where UNKNOWN says the scrub is unreadable.
     const { ctx } = fakeSystem({
       ['pool.query']: [
         pool({
@@ -628,9 +653,7 @@ describe('storage_scrub_history', () => {
     expect(results).toEqual([
       {
         pool: 'tank',
-        // A scan with no state is one this tool cannot read an outcome from,
-        // which is what UNKNOWN says — the same as for a resilver.
-        state: 'UNKNOWN',
+        state: null,
         started_at: null,
         finished_at: '2026-08-20T04:30:00+00:00',
         duration_seconds: null,
@@ -643,6 +666,7 @@ describe('storage_scrub_history', () => {
     // the same thing in the terms the caller sees.
     expect(Object.keys(results[0])).toContain('started_at');
     expect(Object.keys(results[0])).toContain('errors');
+    expect(Object.keys(results[0])).toContain('state');
   });
 
   it('gives no duration for a timestamp it cannot read', async () => {
