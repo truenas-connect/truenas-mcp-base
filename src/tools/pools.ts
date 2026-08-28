@@ -2,8 +2,8 @@ import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool } from '@/catalog/tool';
 
-/** Pool internals: the vdev tree beneath each pool, and the state of every
- * device in it.
+/** Pool internals: the vdev tree beneath each pool, the state of every device
+ * in it, and the outcome of the last scrub that verified it.
  *
  * `storage_pool_status` reports a pool as one unit, so it can say a pool is
  * DEGRADED and not which device made it so. The vdev tree is where that answer
@@ -58,7 +58,8 @@ interface TopologyDevice {
  * would hand the caller an object missing one the description promises — a
  * shape it has not been told about, rather than a value it can see is absent.
  * Unlike `pool` in `disks.ts`, absent and null have nothing to keep apart on a
- * topology node: each field has one intended meaning, and "not reported" is it.
+ * topology node or a scan record: each field has one intended meaning, and
+ * "not reported" is it.
  */
 const orNull = (value: string | null | undefined): string | null => value ?? null;
 
@@ -130,5 +131,108 @@ export const poolTopology: ReadOnlyTool = {
         })),
       ),
     }));
+  },
+};
+
+/**
+ * The scan record a pool row carries, restated with every field optional.
+ *
+ * ZFS records one scan per pool — the last one that ran, of either kind — and
+ * the middleware reports it as `scan` on the pool row. The generated types
+ * declare its fields required, which is what the current middleware sends; an
+ * older one that omits a key would then hand the mapping an `undefined` typed
+ * as present, which is precisely the case the normalization below exists for.
+ * Only the fields read here are named.
+ */
+interface ScanRecord {
+  function?: string;
+  state?: string;
+  start_time?: string | null;
+  end_time?: string | null;
+  errors?: number | null;
+  pause?: string | null;
+}
+
+/**
+ * The state of a pool's last scrub, from the scan the pool reports.
+ *
+ * The two states ZFS does not have are the ones that matter here. A pool with
+ * no scan at all has never been scanned, and "never verified" is the answer
+ * this tool exists to give rather than a gap to leave blank. A pool whose last
+ * scan was a RESILVER is the awkward one: the resilver overwrote the record of
+ * whatever scrub preceded it, so its last scrub is not recoverable — which is
+ * not the same as never having had one, and must not read as either a clean
+ * scrub or a missing one.
+ */
+function scrubState(scan: ScanRecord | null): string {
+  if (!scan) return 'NEVER_SCRUBBED';
+  if (scan.function !== 'SCRUB') return 'UNKNOWN';
+  // A paused scrub reports SCANNING with the time it was paused, and stays
+  // that way indefinitely. Read as SCANNING it would look like progress.
+  if (scan.state === 'SCANNING' && scan.pause) return 'PAUSED';
+  return scan.state ?? 'UNKNOWN';
+}
+
+/**
+ * How long the scrub took, in seconds, or null if that cannot be said: a scrub
+ * still running has no end time, and a timestamp in a format `Date.parse` does
+ * not accept yields no duration rather than a `NaN` the caller has to detect.
+ */
+function scrubDuration(scan: ScanRecord | null): number | null {
+  if (!scan?.start_time || !scan.end_time) return null;
+  const started = Date.parse(scan.start_time);
+  const finished = Date.parse(scan.end_time);
+  if (Number.isNaN(started) || Number.isNaN(finished)) return null;
+  return Math.round((finished - started) / 1000);
+}
+
+export const scrubHistory: ReadOnlyTool = {
+  name: 'storage_scrub_history',
+  description:
+    'The outcome and age of the most recent scrub on each ZFS pool, one entry ' +
+    'per pool. A scrub is what reads every block back and checks it against ' +
+    'its checksum, so a pool whose last scrub is old or absent is one whose ' +
+    'data has not been verified recently, however healthy it reports ' +
+    'elsewhere. `state` is one of: `FINISHED`, a scrub that ran to ' +
+    'completion; `SCANNING`, one running now; `PAUSED`, one started and ' +
+    'paused before it finished, which stays paused until it is resumed; ' +
+    '`CANCELED`, one stopped before it completed; `NEVER_SCRUBBED`, a pool ' +
+    'the system reports no scan of any kind for; and `UNKNOWN`, a pool whose ' +
+    'most recent scan was a resilver rather than a scrub, or whose scan the ' +
+    'system reported without a state. A resilver replaces the record of the ' +
+    'scrub before it, so `UNKNOWN` means the last scrub cannot be read here — ' +
+    'it is not evidence that the pool has never been scrubbed. `started_at` ' +
+    'and `finished_at` are timestamps as the system reports them; ' +
+    '`finished_at` is null for a scrub that has not ended. ' +
+    '`duration_seconds` is the difference between the two, and is null ' +
+    'whenever either is missing or is not a timestamp this tool can read. ' +
+    '`errors` is the number of errors that scrub found, and is a running ' +
+    'count while one is still going. Everything but `pool` and `state` is ' +
+    'null when `state` is `NEVER_SCRUBBED` or `UNKNOWN`, because the figures ' +
+    'on record then describe a resilver or nothing at all rather than a ' +
+    'scrub. `pool` matches `name` in `storage_pool_status`.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }) {
+    // `scan` is part of a pool row as it stands. `pool.scrub.query` is a
+    // neighbouring verb and not this one: it lists the periodic scrub tasks a
+    // pool is scheduled under, and carries no outcome, no time and no errors.
+    const pools = await firstValueFrom(system.client.api.query('pool.query'));
+    return pools.map((pool) => {
+      const scan: ScanRecord | null = pool.scan ?? null;
+      // The scan is only this tool's subject when it is a scrub. A resilver's
+      // times and error count are read through `null` rather than reported,
+      // so that no field of a resilver is ever presented as one of a scrub.
+      const scrub = scan?.function === 'SCRUB' ? scan : null;
+      return {
+        pool: pool.name,
+        state: scrubState(scan),
+        started_at: orNull(scrub?.start_time),
+        finished_at: orNull(scrub?.end_time),
+        duration_seconds: scrubDuration(scrub),
+        errors: scrub?.errors ?? null,
+      };
+    });
   },
 };
