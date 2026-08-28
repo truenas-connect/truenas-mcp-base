@@ -19,8 +19,11 @@ import { ReadOnlyTool } from '@/catalog/tool';
  */
 
 /**
- * The vdev roles a pool's topology is divided into, in the order they are
- * reported. Iterating a fixed list rather than the payload's own keys is what
+ * The vdev roles a pool's topology is divided into, ordered for a reader
+ * rather than after the payload: `PoolTopology` declares them data, log,
+ * cache, spare, special, dedup, and the two storage roles are grouped up
+ * beside `data` here because they hold pool data and the other three do not.
+ * Iterating a fixed list rather than the payload's own keys is what
  * keeps a category a later TrueNAS release adds out of the response — the same
  * guarantee the per-node field list gives, one level up.
  */
@@ -44,7 +47,7 @@ interface TopologyDevice {
   name: string | undefined;
   type: string | undefined;
   status: string | undefined;
-  disk: string | null | undefined;
+  disk: string | null;
   devices: TopologyDevice[];
 }
 
@@ -57,8 +60,14 @@ function mapNode(node: TopologyNode): TopologyDevice {
     // them.
     type: node.type,
     status: node.status,
-    // Null on a node that groups other devices: only a leaf sits on a disk.
-    disk: node.disk,
+    // Null on a node that groups other devices, and null again on a leaf whose
+    // disk the middleware could not resolve — a pulled or dead device, where it
+    // reports the identifier under `unavail_disk` instead. Normalized rather
+    // than passed through, because an absent key serializes to no key at all
+    // and the description promises the caller a null. Unlike `pool` in
+    // `disks.ts`, there is nothing here for absent and null to keep apart: both
+    // mean this node does not name a disk.
+    disk: node.disk ?? null,
     // Nested rather than flattened. A disk being replaced is reported as a
     // `replacing` vdev holding the outgoing and incoming disks, and a draid's
     // distributed spare nests the same way; flattening would present both
@@ -80,8 +89,13 @@ export const poolTopology: ReadOnlyTool = {
     'in the `spare` category is the exception and is not failing in either of ' +
     'its own states: AVAIL is an idle spare standing by, INUSE one that has ' +
     'been swapped in for a failed disk. `disk` names the physical device, ' +
-    'matching `name` in `disks_list`, and is null on a vdev that groups other ' +
-    'devices rather than sitting on one. `devices` nests: a mirror lists its ' +
+    'matching `name` in `disks_list`. It is null on a vdev that groups other ' +
+    'devices rather than sitting on one, and null again on a device the system ' +
+    'can no longer resolve to a disk — one that has been pulled or has died ' +
+    'outright, which is what a REMOVED or UNAVAIL status on a leaf means. So a ' +
+    'null `disk` is read together with `type`: a leaf reports type DISK and ' +
+    'names itself in `name`, and that name is what identifies it when there is ' +
+    'no `disk` to give. `devices` nests: a mirror lists its ' +
     'members, and a member being replaced lists the outgoing and incoming ' +
     'disks beneath it.',
   inputSchema: { type: 'object', properties: {} },

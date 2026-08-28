@@ -135,6 +135,13 @@ describe('storage_pool_topology', () => {
   const group = (over: Record<string, unknown>) =>
     node({ type: 'MIRROR', path: null, device: null, disk: null, ...over });
 
+  /** A node from a middleware that did not send one of the keys read here. */
+  const without = (key: string, row: Record<string, unknown>): Record<string, unknown> => {
+    const copy = { ...row };
+    delete copy[key];
+    return copy;
+  };
+
   const pool = (topology: unknown, over: Record<string, unknown> = {}) => ({
     id: 1,
     name: 'tank',
@@ -256,6 +263,48 @@ describe('storage_pool_topology', () => {
     ]);
   });
 
+  it('gives a null disk for a device the middleware cannot resolve, key or no key', async () => {
+    // A pulled disk is reported as a leaf with `disk: null` and the identifier
+    // moved to `unavail_disk`, which this tool drops; an older middleware sends
+    // no `disk` key at all. Both are the state the description calls a null,
+    // and an absent key would serialize to no key rather than to one — so the
+    // second device is the one that fails if the mapping stops normalizing.
+    const { ctx } = fakeSystem({
+      ['pool.query']: [
+        pool(
+          topologyOf({
+            data: [
+              group({
+                name: 'mirror-0',
+                status: 'DEGRADED',
+                children: [
+                  node({
+                    name: 'sdf2',
+                    status: 'REMOVED',
+                    disk: null,
+                    unavail_disk: { guid: '9999', dev: 'sdf2' },
+                  }),
+                  without('disk', node({ name: 'sdg2', status: 'UNAVAIL' })),
+                ],
+              }),
+            ],
+          }),
+          { status: 'DEGRADED', healthy: false },
+        ),
+      ],
+    });
+    const [result] = (await poolTopology.handler(ctx, {})) as MappedPool[];
+    const [mirror] = result.vdevs;
+    expect(mirror.devices).toEqual([
+      { name: 'sdf2', type: 'DISK', status: 'REMOVED', disk: null, devices: [] },
+      { name: 'sdg2', type: 'DISK', status: 'UNAVAIL', disk: null, devices: [] },
+    ]);
+    // `toEqual` treats an absent key and an undefined one alike, so the null
+    // itself is asserted separately — that is the whole claim being made here.
+    expect(Object.keys(mirror.devices[1])).toContain('disk');
+    expect(mirror.devices[1].disk).toBeNull();
+  });
+
   it('nests a replacement beneath the mirror rather than beside its members', async () => {
     // Mid-resilver the middleware reports a `replacing` vdev holding both the
     // outgoing and the incoming disk. Flattened, the mirror would read as
@@ -325,13 +374,6 @@ describe('storage_pool_topology', () => {
     expect(Object.keys(vdev.devices[0])).toEqual(['name', 'type', 'status', 'disk', 'devices']);
   });
 
-  /** A node from a middleware that reported no `children` key on a leaf. */
-  const withoutChildren = (row: Record<string, unknown>): Record<string, unknown> => {
-    const copy = { ...row };
-    delete copy['children'];
-    return copy;
-  };
-
   it('reports a pool with no topology, and one whose keys are absent', async () => {
     // `topology` is null on a pool the middleware could not read the layout of;
     // a middleware older than a category omits its key, and one that reports a
@@ -340,7 +382,10 @@ describe('storage_pool_topology', () => {
     const { ctx } = fakeSystem({
       ['pool.query']: [
         pool(null, { name: 'unimported' }),
-        pool({ data: [withoutChildren(node({ name: 'sda2', disk: 'sda' }))] }, { name: 'stripe' }),
+        pool(
+          { data: [without('children', node({ name: 'sda2', disk: 'sda' }))] },
+          { name: 'stripe' },
+        ),
       ],
     });
     expect(await poolTopology.handler(ctx, {})).toEqual([
