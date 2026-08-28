@@ -315,7 +315,12 @@ describe('storage_pool_topology', () => {
     });
     const [result] = (await poolTopology.handler(ctx, {})) as Record<string, unknown>[];
     expect(Object.keys(result)).toEqual(['name', 'status', 'vdevs']);
-    const [vdev] = result['vdevs'] as MappedVdev[];
+    const vdevs = result['vdevs'] as MappedVdev[];
+    // The category a later release adds is dropped whole, rather than carried
+    // through as a second vdev alongside the mirror: the tool walks the six
+    // roles it names, not the payload's own keys.
+    expect(vdevs.map((v) => v.category)).toEqual(['data']);
+    const [vdev] = vdevs;
     expect(Object.keys(vdev)).toEqual(['category', 'name', 'type', 'status', 'disk', 'devices']);
     expect(Object.keys(vdev.devices[0])).toEqual(['name', 'type', 'status', 'disk', 'devices']);
   });
