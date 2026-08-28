@@ -71,16 +71,19 @@ export const poolTopology: ReadOnlyTool = {
   name: 'storage_pool_topology',
   description:
     'The vdev layout of each ZFS pool and the state of every device in it. ' +
-    "Each vdev carries a `category` naming the role it serves in the pool — " +
+    'Each vdev carries a `category` naming the role it serves in the pool — ' +
     '`data`, `special`, `dedup`, `log`, `cache` or `spare` — so a cache or ' +
-    'spare device is never read as one holding data. `status` is reported on ' +
-    'every vdev and every device: anything other than ONLINE (FAULTED, ' +
-    'DEGRADED, OFFLINE, UNAVAIL, REMOVED) is why a pool is unhealthy, and is ' +
-    'the field to filter on to find the failing device. `disk` names the ' +
-    'physical device, matching `name` in `disks_list`, and is null on a vdev ' +
-    'that groups other devices rather than sitting on one. `devices` nests: a ' +
-    'mirror lists its members, and a member being replaced lists the outgoing ' +
-    'and incoming disks beneath it.',
+    'spare device is never read as one holding data. `status` is the ZFS ' +
+    'state of that vdev or device: ONLINE is healthy, and FAULTED, DEGRADED, ' +
+    'OFFLINE, UNAVAIL and REMOVED are the states that make a pool unhealthy, ' +
+    'so they are what identifies the device behind a degraded pool. A device ' +
+    'in the `spare` category is the exception and is not failing in either of ' +
+    'its own states: AVAIL is an idle spare standing by, INUSE one that has ' +
+    'been swapped in for a failed disk. `disk` names the physical device, ' +
+    'matching `name` in `disks_list`, and is null on a vdev that groups other ' +
+    'devices rather than sitting on one. `devices` nests: a mirror lists its ' +
+    'members, and a member being replaced lists the outgoing and incoming ' +
+    'disks beneath it.',
   inputSchema: { type: 'object', properties: {} },
   requiredRole: Role.ReadOnly,
   mutating: false,
