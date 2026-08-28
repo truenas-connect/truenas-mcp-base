@@ -218,9 +218,10 @@ describe('disks_list', () => {
 
 describe('apps_list', () => {
   // Every property the middleware's app row carries, so the assertions below
-  // show what the tool drops as well as what it keeps. `config`, `portals`,
-  // `metadata` and `active_workloads` are the bulky ones, and are here to be
-  // dropped.
+  // show what the tool drops as well as what it keeps. `portals`, `metadata`
+  // and `active_workloads` are the bulky ones; `config` is the install-time
+  // form the user filled in, and its `plex_claim_token` is a credential. All
+  // four are here to be dropped.
   const app = (over: Record<string, unknown>) => ({
     name: 'plex',
     id: 'plex',

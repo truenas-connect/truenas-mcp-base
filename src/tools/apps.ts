@@ -10,12 +10,15 @@ import { ReadOnlyTool } from '@/catalog/tool';
  * apps are where a home or small-business TrueNAS spends most of its
  * operational attention.
  *
- * The mapping is an allowlist rather than a trim, and here that is about size
- * rather than secrecy: an `app.query` row carries the app's full chart
- * metadata, its rendered portals, its `config` (the values the user filled in
- * at install time) and `active_workloads` — every container, port and volume.
- * Passing that through would make this the most expensive response in the
- * catalog, so naming the fields is the point of the tool rather than a nicety.
+ * The mapping is an allowlist rather than a trim, and it is doing two jobs at
+ * once. Size is the loud one: an `app.query` row carries the app's full chart
+ * metadata, its rendered portals and `active_workloads` — every container, port
+ * and volume — so passing it through would make this the most expensive
+ * response in the catalog. Secrecy is the quiet one: `config` holds the values
+ * the user filled in at install time, which routinely include an API key or a
+ * claim token, so naming the output fields is what keeps them out of the tool
+ * result and so out of the conversation, exactly as in `disks.ts`. Trimming is
+ * the point of the tool rather than a nicety, on both counts.
  */
 
 export const appsList: ReadOnlyTool = {
