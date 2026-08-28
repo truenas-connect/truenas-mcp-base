@@ -2,7 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { of } from 'rxjs';
 import { SystemHandle, ToolContext } from '@/catalog/tool';
 import { Role } from '@/interfaces';
-import { createDefaultCatalog, createSnapshot, listDatasets, poolStatus } from '@/tools/index';
+import {
+  alertsList,
+  createDefaultCatalog,
+  createSnapshot,
+  listDatasets,
+  poolStatus,
+} from '@/tools/index';
 
 /**
  * A SystemHandle answering from a canned method→response map. Both seams are
@@ -23,13 +29,18 @@ function fakeSystem(responses: Partial<Record<string, unknown>>): {
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the four sketch tools', () => {
+  it('registers the five sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'storage_pool_status',
       'storage_list_datasets',
+      'alerts_list',
       'snapshots_create',
     ]);
+  });
+
+  it('advertises alerts_list to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('alerts_list');
   });
 });
 
@@ -88,6 +99,76 @@ describe('storage_list_datasets', () => {
       [['pool', '=', 'tank']],
       { extra: { retrieve_children: true, properties: ['used', 'available'] } },
     );
+  });
+});
+
+describe('alerts_list', () => {
+  // Every property the middleware's Alert carries, so the assertions below show
+  // what the tool drops as well as what it keeps.
+  const alert = (over: Record<string, unknown>) => ({
+    uuid: 'u1',
+    source: 'AlertSource',
+    klass: 'ZpoolCapacityWarning',
+    args: { pool: 'tank' },
+    node: 'A',
+    key: '[]',
+    datetime: '2026-08-28T12:00:00+00:00',
+    last_occurrence: '2026-08-28T13:00:00+00:00',
+    dismissed: false,
+    mail: null,
+    text: 'Pool %(pool)s is low on space.',
+    id: 'a1',
+    level: 'WARNING',
+    formatted: 'Pool tank is low on space.',
+    one_shot: false,
+    ...over,
+  });
+
+  it('trims alert.list to the named fields', async () => {
+    const { ctx, call } = fakeSystem({ ['alert.list']: [alert({})] });
+    expect(await alertsList.handler(ctx, {})).toEqual([
+      {
+        id: 'a1',
+        klass: 'ZpoolCapacityWarning',
+        level: 'WARNING',
+        formatted: 'Pool tank is low on space.',
+        datetime: '2026-08-28T12:00:00+00:00',
+        dismissed: false,
+      },
+    ]);
+    // The tool reads the alert list and nothing else.
+    expect(call.mock.calls).toEqual([['alert.list']]);
+  });
+
+  it('does not surface a field the middleware adds later', async () => {
+    const { ctx } = fakeSystem({
+      ['alert.list']: [alert({ future_field: 'added by a later TrueNAS release' })],
+    });
+    const [result] = (await alertsList.handler(ctx, {})) as Record<string, unknown>[];
+    expect(Object.keys(result)).toEqual([
+      'id',
+      'klass',
+      'level',
+      'formatted',
+      'datetime',
+      'dismissed',
+    ]);
+  });
+
+  it('returns dismissed alerts, distinguishable by the boolean', async () => {
+    const { ctx } = fakeSystem({
+      ['alert.list']: [alert({ id: 'a1' }), alert({ id: 'a2', dismissed: true })],
+    });
+    const result = (await alertsList.handler(ctx, {})) as { id: string; dismissed: boolean }[];
+    expect(result.map((a) => [a.id, a.dismissed])).toEqual([
+      ['a1', false],
+      ['a2', true],
+    ]);
+  });
+
+  it('returns [] for a system with no alerts', async () => {
+    const { ctx } = fakeSystem({ ['alert.list']: [] });
+    expect(await alertsList.handler(ctx, {})).toEqual([]);
   });
 });
 

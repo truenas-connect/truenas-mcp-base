@@ -63,5 +63,6 @@ export {
   systemInfo,
   poolStatus,
   listDatasets,
+  alertsList,
   createSnapshot,
 } from '@/tools/index';
