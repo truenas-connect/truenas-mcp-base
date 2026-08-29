@@ -16,6 +16,12 @@ import { ReadOnlyTool } from '@/catalog/tool';
  * is on the same hardware as what it protects, so the copy that survives losing
  * the system is the one a cloud sync task made — and a task that stopped
  * succeeding announces itself nowhere until someone needs the copy.
+ *
+ * `tasks_recent_runs` comes at all of it from the other end. The two above list
+ * what is *arranged*, one kind of task at a time; that one lists what actually
+ * *ran*, of every kind at once — scrubs, replication, cloud sync, app upgrades,
+ * updates — because every long-running operation on TrueNAS is a job and they
+ * all land in the same place.
  */
 
 /**
@@ -357,6 +363,13 @@ const MAX_TIME_MS = 8.64e15;
  * record naming nothing — so every field of it arrives as `unknown`, the same
  * way a replication task's state record does. Only the three fields read here
  * are named.
+ *
+ * A `core.get_jobs` row satisfies this too, and `tasks_recent_runs` passes one
+ * straight to {@link jobFinishedAt} and {@link jobError}: it is the same job
+ * record, reached by listing the jobs rather than by reading the task that
+ * started one. The client types that row's fields where this does not, and
+ * every field named here is optional and `unknown`, so the typed row is
+ * assignable and the guards below cost it nothing.
  */
 interface LastRun {
   state?: unknown;
@@ -427,6 +440,11 @@ function lastRunState(job: unknown): string | null {
   return typeof reported === 'string' && reported.length > 0 ? reported : null;
 }
 
+/** An instant as an ISO 8601 UTC timestamp, or null where there is no instant. */
+function isoOrNull(millis: number | null): string | null {
+  return millis === null ? null : new Date(millis).toISOString();
+}
+
 /**
  * When the last run ended, as an ISO 8601 UTC timestamp, or null where nothing
  * this tool can read says a run ended.
@@ -437,8 +455,7 @@ function lastRunState(job: unknown): string | null {
  */
 function jobFinishedAt(run: LastRun | null, reported: string | null): string | null {
   if (run === null || reported === null || !ENDED_JOB_STATES.has(reported)) return null;
-  const millis = jobMillis(run.time_finished);
-  return millis === null ? null : new Date(millis).toISOString();
+  return isoOrNull(jobMillis(run.time_finished));
 }
 
 /**
@@ -579,5 +596,268 @@ export const cloudsyncTasksList: ReadOnlyTool = {
         error: jobError(run),
       };
     });
+  },
+};
+
+/**
+ * How far back `tasks_recent_runs` looks when the caller bounds nothing.
+ *
+ * The middleware holds every job it has run since it last started, which on a
+ * system that has been up for weeks is thousands of them, nearly all of which
+ * succeeded and are nobody's question. A day is the window that makes "what has
+ * this system been doing, and what went wrong" answerable in one call; a longer
+ * one is asked for rather than assumed.
+ */
+const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The ISO 8601 forms `since` is accepted in: a date, or a date and a time
+ * carrying an explicit zone.
+ *
+ * A zone is required for the same reason {@link jobMillis} will not read a
+ * formatted string. `Date.parse('2026-08-28 09:00')` is implementation-defined
+ * and Node reads it as LOCAL time, so a bound that looks exact would move the
+ * window by the offset of whatever machine this happens to run on — silently,
+ * and by hours. The date-only form is exempt because ECMAScript defines that
+ * one as UTC.
+ */
+const ISO_INSTANT =
+  /^(\d{4})-(\d{2})-(\d{2})(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2}))?$/;
+
+/**
+ * Whether the year, month and day are a date that exists.
+ *
+ * `Date.parse` does not settle this and is silent about it. A month out of
+ * range, an hour of 25 and a malformed offset each answer `NaN`, but a day the
+ * month does not have ROLLS OVER into the next one and answers a real instant:
+ * `2026-02-30` parses as the 2nd of March, measured. So a caller that bounded a
+ * report at a mistyped date would be handed a window starting two days after
+ * the one it named, with nothing anywhere saying so — and every job in the gap
+ * would be missing from an answer that looked complete.
+ *
+ * Rebuilt from the components and compared back, which needs no table of month
+ * lengths to know that February has no 30th and that some Februaries have a
+ * 29th. The year is not checked: the pattern above admits four digits and every
+ * four-digit year exists.
+ */
+function isRealDate(year: number, month: number, day: number): boolean {
+  const at = new Date(0);
+  at.setUTCFullYear(year, month - 1, day);
+  return at.getUTCMonth() === month - 1 && at.getUTCDate() === day;
+}
+
+/**
+ * The instant the result is bounded at, in milliseconds since the epoch — the
+ * default window back from `now` where the caller named none.
+ *
+ * Strict rather than lenient, as `snapshots_list` is about the dataset it is
+ * asked for and for the same reason: a `since` that cannot be read is not a
+ * request for the default window. Ignoring it would answer about the last day
+ * while the caller believes it answered about the last month, and an empty
+ * result would then read as "nothing failed" rather than as "the bound was not
+ * applied". Null and undefined are the argument being absent, which is not the
+ * same as unreadable and is what the default is for.
+ */
+function windowStart(raw: unknown, now: number): number {
+  if (raw == null) return now - DEFAULT_WINDOW_MS;
+  const match = typeof raw === 'string' ? ISO_INSTANT.exec(raw) : null;
+  if (match === null) {
+    throw new Error(
+      '"since" must be an ISO 8601 timestamp with a timezone, such as ' +
+        '"2026-08-28T09:00:00Z", or a date such as "2026-08-28"',
+    );
+  }
+  // `match[0]` is the whole match, which an anchored pattern makes the whole
+  // string — the same characters as `raw`, and typed where `raw` is `unknown`.
+  const text = match[0];
+  const millis = Date.parse(text);
+  if (Number.isNaN(millis) || !isRealDate(Number(match[1]), Number(match[2]), Number(match[3]))) {
+    throw new Error(`"since" is not a real date: "${text}"`);
+  }
+  return millis;
+}
+
+/**
+ * Whether the caller asked for failures alone.
+ *
+ * Strict, as `snapshots_create` is about `recursive`: coercing `"false"` or `0`
+ * would answer a different question from the one asked — every job the system
+ * ran, where the caller asked what went wrong — and a listing that is wrong in
+ * that direction is one a model will summarise as fact.
+ */
+function failedOnly(raw: unknown): boolean {
+  if (raw == null) return false;
+  if (typeof raw !== 'boolean') throw new Error('"failed_only" must be a boolean');
+  return raw;
+}
+
+/**
+ * The job states that describe a run that SUCCEEDED, and those that describe
+ * one still under way. Between them they are every state middleware defines —
+ * the client's own `JobState` — that is not a failure, and
+ * {@link ENDED_JOB_STATES} above is the first of these two together with
+ * `FAILED`, `ERROR` and `ABORTED`.
+ *
+ * Written as what `failed_only` EXCLUDES rather than as the failures it keeps,
+ * and that direction is the whole point. A failure state a later TrueNAS
+ * release adds is in neither set, so it survives the filter instead of being
+ * dropped from the one answer this tool exists to give. The reverse — listing
+ * the failures — would go quiet about exactly the runs nobody here has heard
+ * of yet.
+ */
+const SUCCEEDED_JOB_STATES = new Set(['SUCCESS', 'FINISHED']);
+const UNDER_WAY_JOB_STATES = new Set(['RUNNING', 'WAITING', 'PENDING', 'HOLD', 'LOCKED']);
+
+/**
+ * Whether `failed_only` keeps this job: one that has not succeeded and is not
+ * still going.
+ *
+ * A state this tool could not read counts as not succeeded. A job that cannot
+ * be shown to have worked has not been shown to have worked, and hiding it from
+ * the failure listing is the one mistake here that matters.
+ */
+function notSucceeded(state: string | null): boolean {
+  return state === null || !(SUCCEEDED_JOB_STATES.has(state) || UNDER_WAY_JOB_STATES.has(state));
+}
+
+/**
+ * How far through the job is, as a percentage, or null where the system
+ * reported none this tool can read.
+ *
+ * Not defaulted to zero: a job whose progress could not be read must not report
+ * as one that has not started, which is a claim about the job rather than about
+ * this tool.
+ */
+function progressPercent(progress: unknown): number | null {
+  const percent =
+    typeof progress === 'object' && progress !== null
+      ? (progress as { percent?: unknown }).percent
+      : undefined;
+  return typeof percent === 'number' && Number.isFinite(percent) ? percent : null;
+}
+
+/**
+ * What the system has been doing, and what went wrong doing it.
+ *
+ * Every long-running operation on TrueNAS is a job, so one call reaches across
+ * scrubs, replication, cloud sync, app upgrades and updates at once — where the
+ * per-family tools each answer for their own kind of task and none of them
+ * answers for a job nothing on the board started.
+ *
+ * A job row is the largest payload in this catalog: it carries the full
+ * arguments the job was called with, its whole result, and an excerpt of its
+ * logs. None of the three is reported. `arguments` and `credentials` are
+ * refused on the catalog's own rule that secrets do not pass through tools —
+ * a job that mounts a share or authenticates to a remote was called with the
+ * password — and `result` and `logs_excerpt` are refused for size, being
+ * unbounded and per-job. The query asks for the named fields alone, so on a
+ * middleware that honours `select` none of them is even fetched; the mapping
+ * below is what guarantees it either way.
+ */
+export const tasksRecentRuns: ReadOnlyTool = {
+  name: 'tasks_recent_runs',
+  description:
+    'Recent background jobs on the system, with failures called out. Every ' +
+    'long-running operation on TrueNAS is a job — scrubs, replication, cloud ' +
+    'sync, app upgrades, updates — so this answers what the system has been ' +
+    'doing and what went wrong, across all of them at once. `id` is the ' +
+    "job's numeric identity and `method` the API method it runs, such as " +
+    '`pool.scrub.run` or `app.upgrade`; the method is what says which kind of ' +
+    'operation a job is. `state` is the state the system recorded. `SUCCESS` ' +
+    'and `FINISHED` describe a run that succeeded; `FAILED`, `ERROR` and ' +
+    '`ABORTED` one that did not; `RUNNING`, `WAITING`, `PENDING`, `HOLD` and ' +
+    '`LOCKED` one still under way. A state a later TrueNAS release adds is ' +
+    'passed through as the system spelled it, so `state` is not limited to ' +
+    'that list, and null is a state this tool could not read — a job in either ' +
+    'has not been shown to have worked. `progress_percent` is how far through ' +
+    'the job is, and `progress_description` what it says it is doing; each is ' +
+    'null where the system reported no value, and a null percent is not zero. ' +
+    '`started_at` is when the job started and `finished_at` when it ended, ' +
+    'both as ISO 8601 UTC timestamps. `finished_at` is reported only under the ' +
+    'states that describe a run that ended, and is null under every other ' +
+    'state including `RUNNING`. Either is null where the system recorded no ' +
+    'time this tool can read. `error` is the text recorded with a job that ' +
+    'failed and is null where none was recorded, so a job in `FAILED` with a ' +
+    'null `error` failed for a reason the system did not record; it has not ' +
+    'succeeded. `failed_only` restricts the result to jobs that have not ' +
+    'succeeded and are not still under way — the failure states above, plus ' +
+    'any state this tool does not recognise or could not read, so a failure ' +
+    'is never hidden by being unfamiliar. `since` bounds the result to jobs ' +
+    'started at or after an ISO 8601 instant; omitted, THE LAST 24 HOURS, so ' +
+    'an empty result means nothing matched within that window rather than ' +
+    'that the system has never run the job in question. Pass `since` to look ' +
+    'further back. A job whose start time could not be read is returned under ' +
+    'any window, because nothing places it outside one. The arguments a job ' +
+    'was called with, its result, its credentials and its logs are NOT ' +
+    'returned: arguments and credentials can hold passwords and keys, and no ' +
+    'secret passes through this tool. This lists jobs, which are operations ' +
+    'the system ran; the schedules that start some of them are ' +
+    '`snapshot_tasks_list` and `cloudsync_tasks_list`, and a task that has ' +
+    'never run has no job here at all.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      failed_only: {
+        type: 'boolean',
+        default: false,
+        description:
+          'Only report jobs that did not succeed and are not still running. ' +
+          'Default false, which reports every job in the window.',
+      },
+      since: {
+        type: 'string',
+        description:
+          'Only report jobs started at or after this instant, as an ISO 8601 ' +
+          'timestamp carrying a timezone — "2026-08-28T09:00:00Z" — or a ' +
+          'date, "2026-08-28", which is midnight UTC. Omitted, the last 24 ' +
+          'hours.',
+      },
+    },
+  },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }, args) {
+    // Both arguments are read before the call, so an unreadable one is an
+    // error rather than a query the system answers and this tool then discards.
+    const failed = failedOnly(args['failed_only']);
+    const since = windowStart(args['since'], Date.now());
+    const jobs = await firstValueFrom(
+      // Options are inlined so the call's own parameter types apply, as in
+      // `storage.ts`. `select` names the fields this tool reports and no
+      // others, which keeps the arguments, result and logs of every job off
+      // the wire entirely on a middleware that applies it. It is defence in
+      // depth rather than the control: an unrecognised query option is dropped
+      // rather than refused, so the mapping below is what actually decides
+      // what a caller sees.
+      system.client.api.query('core.get_jobs', [], {
+        select: ['id', 'method', 'state', 'progress', 'time_started', 'time_finished', 'error'],
+      }),
+    );
+    const rows = [];
+    for (const job of jobs) {
+      const state = fieldOrNull(job.state);
+      if (failed && !notSucceeded(state)) continue;
+      const startedMillis = jobMillis(job.time_started);
+      // Only a job whose start time reads as older than the bound is dropped.
+      // One with no readable start time is kept: it cannot be shown to fall
+      // outside the window, and a failure that disappears because its
+      // timestamp was unreadable is the failure mode worth avoiding here.
+      if (startedMillis !== null && startedMillis < since) continue;
+      rows.push({
+        id: job.id,
+        method: job.method,
+        state,
+        // Named field by field rather than passed through: `progress` also
+        // carries `extra`, which is per-method and unbounded.
+        progress_percent: progressPercent(job.progress),
+        progress_description: stringField(job.progress, 'description'),
+        started_at: isoOrNull(startedMillis),
+        // The job row is the run record, so it is read as one — and the state
+        // passed is the one the caller is given, not a second reading of it.
+        finished_at: jobFinishedAt(job, state),
+        error: jobError(job),
+      });
+    }
+    return rows;
   },
 };

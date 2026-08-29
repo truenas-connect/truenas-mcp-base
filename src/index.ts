@@ -73,5 +73,6 @@ export {
   replicationStatus,
   snapshotTasksList,
   cloudsyncTasksList,
+  tasksRecentRuns,
   createSnapshot,
 } from '@/tools/index';
