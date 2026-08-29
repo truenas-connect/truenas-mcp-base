@@ -2,11 +2,16 @@
  * The guards and constants the tool files share, in one place rather than one
  * copy per family.
  *
- * Every tool in `src/tools/` reads middleware payloads whose fields arrive as
- * `unknown`, so each of them needs the same handful of narrowings — is this a
- * string, a finite number, a record — and each of them needs the same reading
- * of a rejection. Those grew as a private copy per file, on the stated ground
- * that a tool file is read on its own. They did not all stay identical: by the
+ * Every tool in `src/tools/` reads middleware payloads whose declared shape it
+ * does not take as given, so each of them needs the same handful of narrowings
+ * — is this a string, a finite number, a record — and each of them needs the
+ * same reading of a rejection. The pinned client typed many of these payloads
+ * as `unknown` outright; `@truenas/api-client` 4.x declares nearly all of them,
+ * which changed what the compiler knows and not what a system sends, so nothing
+ * below was retired by the bump.
+ *
+ * Those narrowings grew as a private copy per file, on the stated ground that a
+ * tool file is read on its own. They did not all stay identical: by the
  * time this module was cut, `shares.ts`'s `errorText` had lost the branch that
  * reads a middleware error object, so a real rejection there reported as having
  * said nothing while every sibling file reported its reason.

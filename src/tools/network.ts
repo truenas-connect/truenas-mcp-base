@@ -1,6 +1,7 @@
+import type { CallResponse } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
-import { ReadOnlyTool } from '@/catalog/tool';
+import { ApiSurface, ReadOnlyTool } from '@/catalog/tool';
 import { errorText, numberOrNull, recordOrNull, textList, textOrNull } from '@/tools/common';
 
 /**
@@ -473,6 +474,19 @@ function gatewayReport(
   };
 }
 
+/**
+ * The system-wide network settings, as the API surface in use types the
+ * `network.configuration.config` response.
+ *
+ * Named off the call through the client's own `CallResponse` rather than by
+ * importing the generated entity, so the surface decides which version's shape
+ * this is and a regeneration that renames the interface does not reach this
+ * file. It says what the middleware is declared to send, which is not what this
+ * tool acts on: every field below is still read through a guard, and
+ * `localHostname` still falls back for the same reason it always did.
+ */
+type NetworkConfiguration = CallResponse<ApiSurface, 'network.configuration.config'>;
+
 /** One DNS server, and what this tool can say about where it came from. */
 interface NameserverReport {
   address: string;
@@ -493,13 +507,13 @@ interface NameserverReport {
  * not report as one that is definitely unused.
  */
 function nameserverReports(
-  config: Record<string, unknown>,
+  config: NetworkConfiguration,
   effective: string[] | null,
 ): NameserverReport[] {
   // Three numbered fields rather than a list: that is the shape the middleware
   // holds them in, and a server configured in the third slot with the second
   // left empty is ordinary.
-  const configured = ['nameserver1', 'nameserver2', 'nameserver3'].flatMap((key) => {
+  const configured = (['nameserver1', 'nameserver2', 'nameserver3'] as const).flatMap((key) => {
     const address = textOrNull(config[key]);
     return address === null ? [] : [address];
   });
@@ -566,7 +580,7 @@ function staticRouteRows(routes: unknown): StaticRouteRow[] | null {
  * could not read it from, still has the field that was correct before HA — and
  * on a single-node system the two are the same value anyway.
  */
-function localHostname(config: Record<string, unknown>): string | null {
+function localHostname(config: NetworkConfiguration): string | null {
   return textOrNull(config['hostname_local']) ?? textOrNull(config['hostname']);
 }
 
