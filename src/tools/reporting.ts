@@ -1793,13 +1793,28 @@ const NO_VM_CPU =
   'this system exposes no per-virtual-machine CPU consumption that this tool can read';
 
 /**
- * What a libvirt VM that is not running is marked with.
+ * What a libvirt VM the system reported a state for that is not `RUNNING` is
+ * marked with.
  *
- * Distinct from every other marker here: this one says the workload has no
- * consumption rather than that the figure could not be obtained, and it is what
- * keeps a stopped VM from reading as one whose memory is unknown.
+ * It says what was done rather than what the machine is consuming, because "not
+ * RUNNING" covers two different facts on this stack: a STOPPED machine is
+ * consuming nothing, and a SUSPENDED one may still be holding everything it
+ * had. Nothing here can say which of the two a given state word is, so both are
+ * stated and `state` beside it is what tells them apart.
  */
-const VM_NOT_RUNNING = 'this virtual machine is not running, so it is consuming no memory';
+const VM_NOT_RUNNING =
+  'the system reports this virtual machine as not RUNNING, so no memory was read for it — a ' +
+  'stopped machine is consuming none, and a suspended one may still be holding what it had';
+
+/**
+ * What a libvirt VM the system reported no readable state for is marked with.
+ *
+ * Kept apart from {@link VM_NOT_RUNNING}: an unreadable state is not evidence
+ * that the machine is stopped, and reporting one as the other turns a read that
+ * failed into a claim about a machine that may well be running.
+ */
+const NO_VM_STATE =
+  'the system reported no state for this virtual machine, so its memory was not read';
 
 /**
  * What a libvirt VM the system named no identifier for is marked with. The
@@ -1879,13 +1894,22 @@ interface MemoryRead {
  * {@link NETWORK_UNIT} carries and is stated in the description for the same
  * reason: a memory figure with no unit cannot be compared with anything.
  *
- * A VM that is not running is not asked about. The call would fail on a domain
- * that does not exist, and "not running" is a better answer than the error text
- * that would come back — it is the reason there is no figure, and it is a fact
- * about the VM rather than about the read.
+ * Only a machine the system reported AS RUNNING is asked about. The call would
+ * fail on a domain that is not there, and the state is a better answer than the
+ * error text that would come back: it is the reason there is no figure, and it
+ * is a fact about the machine rather than about the read.
+ *
+ * The three reasons for not asking are kept apart because they are different
+ * facts, and only one of them is about the machine's consumption: no identifier
+ * to ask by, no state to decide from, and a state that is not RUNNING.
  */
-async function vmMemory(system: SystemHandle, id: number | null, state: string | null): Promise<MemoryRead> {
+async function vmMemory(
+  system: SystemHandle,
+  id: number | null,
+  state: string | null,
+): Promise<MemoryRead> {
   if (id === null) return { bytes: null, unavailable: NO_VM_ID };
+  if (state === null) return { bytes: null, unavailable: NO_VM_STATE };
   if (state !== RUNNING) return { bytes: null, unavailable: VM_NOT_RUNNING };
   try {
     const answer = await firstValueFrom(system.client.api.call('vm.get_memory_usage', [id]));
@@ -1977,9 +2001,12 @@ export const reportingAppVmUsage: ReadOnlyTool = {
     'available for any workload; memory is available only for a RUNNING ' +
     'libvirt-backed VM; and per-app CPU and memory are exposed by the system ' +
     'only through a subscription this tool does not open, so an app reports its ' +
-    'name and state and no consumption at all. A VM that is not running says so ' +
-    'in `memory_unavailable`, and that one IS a statement that it is consuming ' +
-    'nothing. A memory read that failed carries the reason the system gave. ' +
+    'name and state and no consumption at all. A libvirt VM the system reports ' +
+    'as anything other than RUNNING is not asked about, and `memory_unavailable` ' +
+    'says so: A STOPPED MACHINE IS CONSUMING NOTHING, WHILE A SUSPENDED ONE MAY ' +
+    'STILL BE HOLDING WHAT IT HAD, and `state` is what tells those apart. A VM ' +
+    'whose state could not be read says that instead, and is not reported as ' +
+    'stopped. A memory read that failed carries the reason the system gave. ' +
     'Entries fail independently, so one VM can report its memory while another ' +
     'cannot. AN EMPTY `entries` LIST WITH AN EMPTY `failures` LIST IS A SYSTEM ' +
     'RUNNING NO APPS AND NO VMs. `failures` names each listing that could not ' +

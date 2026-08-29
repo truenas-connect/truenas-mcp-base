@@ -9444,7 +9444,8 @@ describe('reporting_app_vm_usage', () => {
     const [entry] = (await reported(fake)).entries;
     expect(entry.state).toBe('STOPPED');
     expect(entry.memory_used_bytes).toBeNull();
-    expect(entry.memory_unavailable).toMatch(/not running/);
+    expect(entry.memory_unavailable).toMatch(/not RUNNING/);
+    expect(entry.memory_unavailable).toMatch(/stopped machine is consuming none/);
     // Nothing is asked about a VM that is not running: the call would fail on a
     // domain that does not exist, and that error text would be a worse answer
     // than the reason there is no figure.
@@ -9481,6 +9482,25 @@ describe('reporting_app_vm_usage', () => {
     // and non-null, and a system that sent neither must answer null.
     expect(await oneVm({ status: null })).toMatchObject({ state: null });
     expect(await oneInstance({ status: '' })).toMatchObject({ state: null });
+  });
+
+  it('does not report a VM whose state it could not read as one that is stopped', async () => {
+    const fake = usageSystem({ apps: [], instances: [], vms: [vm({ status: null })] });
+    const [entry] = (await reported(fake)).entries;
+    expect(entry.memory_unavailable).toMatch(/reported no state/);
+    // An unreadable state is not evidence the machine is stopped, so nothing
+    // here may say it is consuming nothing.
+    expect(entry.memory_unavailable).not.toMatch(/consuming none/);
+    expect(fake.call).not.toHaveBeenCalled();
+  });
+
+  it('does not claim a suspended VM is consuming nothing', async () => {
+    const entry = await oneVm({ status: { state: 'SUSPENDED', domain_state: 'PAUSED' } });
+    expect(entry.state).toBe('SUSPENDED');
+    expect(entry.memory_used_bytes).toBeNull();
+    // The marker is the same one a stopped machine carries, and it states both
+    // readings rather than asserting the wrong one: `state` says which this is.
+    expect(entry.memory_unavailable).toMatch(/suspended one may still be holding/);
   });
 
   it('excludes incus containers even where the middleware kept them', async () => {
