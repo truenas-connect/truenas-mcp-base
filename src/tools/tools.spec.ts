@@ -14,6 +14,7 @@ import {
   createSnapshot,
   directoryServicesStatus,
   disksList,
+  haStatus,
   iscsiList,
   listDatasets,
   networkConfig,
@@ -80,7 +81,7 @@ function failingSystem(
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the thirty-three sketch tools', () => {
+  it('registers the thirty-four sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -114,8 +115,13 @@ describe('createDefaultCatalog', () => {
       'reporting_disk_io',
       'reporting_space_trends',
       'reporting_app_vm_usage',
+      'ha_status',
       'snapshots_create',
     ]);
+  });
+
+  it('advertises ha_status to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('ha_status');
   });
 
   it('advertises reporting_utilisation to a read-only credential', () => {
@@ -9568,5 +9574,208 @@ describe('reporting_app_vm_usage', () => {
       entries: [],
       failures: [],
     });
+  });
+});
+
+describe('ha_status', () => {
+  /** An HA pair with nothing in the way of a failover. */
+  const pair = (over: Partial<Record<string, unknown>> = {}) => ({
+    ['failover.status']: 'MASTER',
+    ['failover.node']: 'A',
+    ['failover.disabled.reasons']: [],
+    ...over,
+  });
+
+  const reported = async (
+    rows: Partial<Record<string, unknown>> = {},
+    failures: Partial<Record<string, unknown>> = {},
+  ): Promise<Record<string, unknown>> => {
+    const { ctx } = failingSystem(pair(rows), failures);
+    return (await haStatus.handler(ctx, {})) as Record<string, unknown>;
+  };
+
+  it('reports the state, the node and that a failover would work', async () => {
+    expect(await reported()).toEqual({
+      status: 'MASTER',
+      ha_configured: true,
+      node: 'A',
+      failover_possible: true,
+      failover_disabled_reasons: [],
+      node_error: null,
+      reasons_error: null,
+    });
+  });
+
+  it('reports the standby node as part of a working pair', async () => {
+    expect(await reported({ ['failover.status']: 'BACKUP', ['failover.node']: 'B' })).toMatchObject({
+      status: 'BACKUP',
+      ha_configured: true,
+      node: 'B',
+      failover_possible: true,
+    });
+  });
+
+  it('reports every reason the system gives for a failover not being possible', async () => {
+    expect(
+      await reported({
+        ['failover.disabled.reasons']: ['NO_VIP', 'MISMATCH_DISKS', 'NO_PONG'],
+      }),
+    ).toMatchObject({
+      failover_possible: false,
+      failover_disabled_reasons: ['NO_VIP', 'MISMATCH_DISKS', 'NO_PONG'],
+      reasons_error: null,
+    });
+  });
+
+  it('passes through a state a later release adds, as an HA pair', async () => {
+    // Only the exact word `SINGLE` is read as "not a pair". Anything else is
+    // treated as one and the reasons are read, so a state this library has
+    // never seen produces a checkable answer rather than a silent
+    // "not applicable".
+    expect(
+      await reported({ ['failover.status']: 'RESILVERING', ['failover.disabled.reasons']: ['X'] }),
+    ).toMatchObject({
+      status: 'RESILVERING',
+      ha_configured: true,
+      failover_possible: false,
+      failover_disabled_reasons: ['X'],
+    });
+  });
+
+  it('reports a single-node system as not an HA pair, and never as degraded', async () => {
+    expect(await reported({ ['failover.status']: 'SINGLE' })).toEqual({
+      status: 'SINGLE',
+      ha_configured: false,
+      node: null,
+      failover_possible: null,
+      failover_disabled_reasons: null,
+      node_error: null,
+      reasons_error: null,
+    });
+  });
+
+  it('never asks a single-node system about a pair it is not part of', async () => {
+    // The structural half of the criterion above: the reasons a single-node
+    // system would give for being unable to fail over are never read, so there
+    // is nothing that could be presented as a fault.
+    const { ctx, call } = fakeSystem({ ['failover.status']: 'SINGLE' });
+    await haStatus.handler(ctx, {});
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(call).toHaveBeenCalledWith('failover.status');
+  });
+
+  it('reports a system that answered with no state as settling nothing', async () => {
+    // Not false: nothing has placed this system outside a pair either, so the
+    // fields that describe one are left unread rather than answered about a
+    // pair that has not been shown to exist.
+    for (const empty of ['', undefined]) {
+      expect(await reported({ ['failover.status']: empty })).toEqual({
+        status: null,
+        ha_configured: null,
+        node: null,
+        failover_possible: null,
+        failover_disabled_reasons: null,
+        node_error: null,
+        reasons_error: null,
+      });
+    }
+  });
+
+  it('fails the tool when the state itself cannot be read', async () => {
+    // The one read with no partial answer behind it: every other field
+    // describes a pair this system has not been shown to be part of.
+    await expect(reported({}, { ['failover.status']: new Error('websocket closed') })).rejects.toThrow(
+      'websocket closed',
+    );
+  });
+
+  it('names a failed node read and still answers about the failover', async () => {
+    expect(await reported({}, { ['failover.node']: new Error('node unreachable') })).toEqual({
+      status: 'MASTER',
+      ha_configured: true,
+      node: null,
+      failover_possible: true,
+      failover_disabled_reasons: [],
+      node_error: 'node unreachable',
+      reasons_error: null,
+    });
+  });
+
+  it('reports a pair that answered the node read with no node', async () => {
+    expect(await reported({ ['failover.node']: 42 })).toMatchObject({
+      node: null,
+      node_error: null,
+    });
+  });
+
+  it('does not read an unreadable reasons check as a working failover', async () => {
+    expect(
+      await reported({}, { ['failover.disabled.reasons']: new Error('peer did not answer') }),
+    ).toMatchObject({
+      failover_possible: null,
+      failover_disabled_reasons: null,
+      reasons_error: 'peer did not answer',
+    });
+  });
+
+  it('does not read a non-list answer as nothing standing in the way', async () => {
+    expect(await reported({ ['failover.disabled.reasons']: { reasons: [] } })).toMatchObject({
+      failover_possible: null,
+      failover_disabled_reasons: null,
+      reasons_error: 'the system did not answer with a list of reasons',
+    });
+  });
+
+  it('keeps a failover impossible when a reason it named could not be read', async () => {
+    // The count is what answers `failover_possible`, not the list: dropping an
+    // unreadable entry and then reading the shorter list as empty would turn
+    // "something is wrong here" into "everything is fine".
+    expect(
+      await reported({ ['failover.disabled.reasons']: ['NO_VIP', '', 'NO_PONG'] }),
+    ).toMatchObject({
+      failover_possible: false,
+      failover_disabled_reasons: ['NO_VIP', 'NO_PONG'],
+      reasons_error: 'the system named 3 reasons and 1 could not be read',
+    });
+  });
+
+  it('returns only the fields it names', async () => {
+    // Not phrased as the "no field a later release adds" check the tools
+    // reading object payloads carry: none of the three reads here answers with
+    // an object, so there is nothing a middleware field could arrive on. What
+    // holds the guarantee is the flat literal the handler builds, and this is
+    // the assertion on it.
+    expect(Object.keys(await reported())).toEqual([
+      'status',
+      'ha_configured',
+      'node',
+      'failover_possible',
+      'failover_disabled_reasons',
+      'node_error',
+      'reasons_error',
+    ]);
+  });
+
+  it('names a failure in whatever shape the transport rejected with', async () => {
+    // The client rejects with whatever it was given, so each shape it documents
+    // is read, and one it does not still has to read as a failure rather than
+    // as "[object Object]".
+    const named = async (failure: unknown): Promise<unknown> =>
+      (await reported({}, { ['failover.node']: failure }))['node_error'];
+    expect(await named(new Error(''))).toBe('the system reported no reason');
+    expect(await named({ reason: 'middleware refused' })).toBe('middleware refused');
+    expect(await named({ message: 'json-rpc refused' })).toBe('json-rpc refused');
+    expect(await named({})).toBe('the system reported no reason');
+    expect(await named('the transport gave a bare string')).toBe(
+      'the transport gave a bare string',
+    );
+    expect(await named(42)).toBe('the system reported no reason');
+    expect(await named(null)).toBe('the system reported no reason');
+  });
+
+  it('is read-only and takes no arguments', () => {
+    expect(haStatus.mutating).toBe(false);
+    expect(haStatus.requiredRole).toBe(Role.ReadOnly);
+    expect(haStatus.inputSchema).toEqual({ type: 'object', properties: {} });
   });
 });
