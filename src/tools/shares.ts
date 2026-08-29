@@ -120,18 +120,20 @@ interface AccessTarget {
 /**
  * An NFS export's host or network restriction list.
  *
- * An absent list and an empty one are the same answer from the middleware — the
- * export carries no restriction of that kind — so both map to `[]` rather than
- * one of them becoming a null that would read as unreadable.
+ * Only a list the export actually carries is reported. `[]` says the export
+ * restricts nothing of that kind and ANY machine may mount it, which is the
+ * strongest claim this function makes — so it is made only where the system
+ * sent an empty list and said so. An absent field is not that: the field is
+ * optional on the client's own type, so its absence is a middleware that did
+ * not report the restriction rather than an export that has none, and reading
+ * the two as one would fail open in the direction that matters here.
  *
- * Everything else is unreadable, and the list is reported whole or not at all:
- * dropping the entries that could not be read would answer with a narrower
- * restriction than the export carries, and dropping all of them would answer
- * `[]`, which here means the OPPOSITE — no restriction, and any machine may
- * mount it.
+ * The list is also reported whole or not at all: dropping the entries that
+ * could not be read would answer with a narrower restriction than the export
+ * carries, and dropping all of them would answer `[]`, which again means the
+ * opposite.
  */
 function restrictionList(value: unknown): string[] | null {
-  if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) return null;
   const restrictions = value.filter(
     (item): item is string => typeof item === 'string' && item.length > 0,
@@ -636,13 +638,14 @@ export const shareAccess: ReadOnlyTool = {
     'switch the system reported no value for, which is not the same as false. ' +
     '`nfs` is the export record\'s own say in who may reach it, and is null on ' +
     'an SMB share, where the protocol has none of it. Within it, `hosts` and ' +
-    '`networks` are which machines may mount the export at all. THEY ARE EMPTY ' +
-    'WHEN THE EXPORT IS UNRESTRICTED — an empty `hosts` and an empty `networks` ' +
-    'together mean any machine that can reach this server may mount it, which ' +
-    'is the opposite of nobody — and either is null where the system reported ' +
-    'something that could not be read as a list of hosts or networks, including ' +
-    'a list holding an entry that is not one, since a restriction reported in ' +
-    'part is a different restriction. `mapall_user` and `mapall_group`, when ' +
+    '`networks` are which machines may mount the export at all. AN EMPTY LIST ' +
+    'MEANS UNRESTRICTED — an empty `hosts` and an empty `networks` together ' +
+    'mean any machine that can reach this server may mount it, which is the ' +
+    'opposite of nobody. Null is neither: it means the system reported no list ' +
+    'this tool could read — the field absent, or a list holding an entry that ' +
+    'is not a host or a network, since a restriction reported in part is a ' +
+    'different restriction — and it is NOT evidence that the export is ' +
+    'unrestricted. `mapall_user` and `mapall_group`, when ' +
     'set, REPLACE THE IDENTITY OF EVERY REQUEST arriving over the export with ' +
     'that account before the ACL below is consulted, so the ACL then answers ' +
     'for that one account and not for whoever connected; `maproot_user` and ' +

@@ -3275,6 +3275,22 @@ describe('share_access', () => {
     );
   });
 
+  it('names both protocols when neither share list could be read', async () => {
+    await expect(
+      answered(
+        { share: 'ghost' },
+        {},
+        {
+          ['sharing.smb.query']: new Error('smb is down'),
+          ['sharing.nfs.query']: new Error('nfs is down'),
+        },
+      ),
+    ).rejects.toThrow(
+      'no share is named "ghost" or exports that path, and it may be one that could not be ' +
+        'looked up: SMB: smb is down; NFS: nfs is down',
+    );
+  });
+
   it('leaves out a failure of a protocol the caller excluded', async () => {
     // The NFS list failing says nothing about a question restricted to SMB, so
     // reporting it would make a complete answer read as a doubtful one.
@@ -3338,16 +3354,23 @@ describe('share_access', () => {
   it('reports an unrestricted NFS export as empty, which is not nobody', async () => {
     // No host restriction and no network restriction together mean any machine
     // that can reach the server may mount it.
-    for (const unrestricted of [[], undefined, null]) {
+    const result = await answered(
+      { share: '/mnt/tank/backups' },
+      { ['sharing.nfs.query']: [nfsExport({ hosts: [], networks: [] })] },
+    );
+    expect(result['nfs']).toMatchObject({ hosts: [], networks: [] });
+  });
+
+  it('does not read an absent restriction as an unrestricted export', async () => {
+    // The field is optional on the client's own type, so its absence is a
+    // middleware that did not report the restriction rather than an export
+    // that has none — and `[]` would claim any machine may mount it.
+    for (const absent of [undefined, null]) {
       const result = await answered(
         { share: '/mnt/tank/backups' },
-        {
-          ['sharing.nfs.query']: [
-            nfsExport({ hosts: unrestricted, networks: unrestricted }),
-          ],
-        },
+        { ['sharing.nfs.query']: [nfsExport({ hosts: absent, networks: absent })] },
       );
-      expect(result['nfs']).toMatchObject({ hosts: [], networks: [] });
+      expect(result['nfs']).toMatchObject({ hosts: null, networks: null });
     }
   });
 
