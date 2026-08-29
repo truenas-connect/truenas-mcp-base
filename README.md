@@ -17,7 +17,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `system_info`, `system_update_status`, `audit_log_query`,
   `storage_pool_status`, `storage_pool_topology`, `storage_scrub_history`,
   `storage_list_datasets`, `datasets_quota_report`, `disks_list`, `apps_list`,
-  `vms_list`, `alerts_list`, `snapshots_list`, `replication_status`,
+  `vms_list`, `vm_logs`, `alerts_list`, `snapshots_list`, `replication_status`,
   `snapshot_tasks_list`, `cloudsync_tasks_list`, `tasks_recent_runs`,
   `shares_list`, `share_access`, `iscsi_list`, `nvmeof_list`, `users_list`,
   `directory_services_status`, `network_interfaces`, `network_config`,
@@ -37,7 +37,9 @@ confirmation UX, audit sinks) enters through injected interfaces.
   tool the last N lines of a path on one system, over `core.download` and an
   adapter-supplied `ContentFetcher`. The line and byte bounds are enforced on
   this side, and the minted download URL never reaches a tool. Absent unless
-  `connectSystems` is given a `ContentReaderFactory`; see `CLAUDE.md`.
+  `connectSystems` is given a `ContentReaderFactory`, and `vm_logs` — the one
+  tool that reads through it — reports that rather than an empty log; see
+  `CLAUDE.md`.
 - **Stubs** — role mapping (always Full), audit sinks (console/noop).
 
 ## Usage sketch
