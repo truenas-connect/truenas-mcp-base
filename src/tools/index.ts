@@ -1,4 +1,5 @@
 import { ToolCatalog } from '@/catalog/catalog';
+import { usersList } from '@/tools/accounts';
 import { alertsList } from '@/tools/alerts';
 import { appsList } from '@/tools/apps';
 import { iscsiList, nvmeofList } from '@/tools/block';
@@ -11,7 +12,7 @@ import { listDatasets, poolStatus, quotaReport } from '@/tools/storage';
 import { systemInfo } from '@/tools/system';
 import { cloudsyncTasksList, snapshotTasksList, tasksRecentRuns } from '@/tools/tasks';
 
-/** The sketch's catalog: eighteen read-only tools plus one mutating tool. */
+/** The sketch's catalog: nineteen read-only tools plus one mutating tool. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -32,6 +33,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(shareAccess);
   catalog.register(iscsiList);
   catalog.register(nvmeofList);
+  catalog.register(usersList);
   catalog.register(createSnapshot);
   return catalog;
 }
@@ -56,4 +58,5 @@ export {
   snapshotTasksList,
   systemInfo,
   tasksRecentRuns,
+  usersList,
 };

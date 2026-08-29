@@ -78,5 +78,6 @@ export {
   shareAccess,
   iscsiList,
   nvmeofList,
+  usersList,
   createSnapshot,
 } from '@/tools/index';
