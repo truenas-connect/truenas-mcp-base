@@ -188,11 +188,43 @@ a rollup that scored health its own way would be the drifting second opinion
 composites exist to prevent. **Summarise by dropping fields, never by
 recomputing them**, and point the caller at the composed tool for the detail.
 
+### Name a payload type off the call, never off the entity (#91)
+
+`@truenas/api-client` 4.x declares a concrete interface for payloads 2.x typed
+as `Record<string, unknown>` — `network.configuration.config`, `disk.query`,
+`interface.query`, `nvmet.subsys.query` and `pool.dataset.query` among them. A
+tool that now needs to name one of those payloads has two routes, and only one
+of them survives the next regeneration:
+
+- **Derive it from the method**, through the client's own `QueryEntity` and
+  `CallResponse` over `ApiSurface` — `QueryEntity<ApiSurface['call'],
+  'nvmet.subsys.query'>`, `CallResponse<ApiSurface, 'network.configuration.config'>`.
+  This is what `block.ts` and `network.ts` do, and it is the same move
+  `snapshots.ts` already made for arguments with `CallParams`.
+- **Do not import the generated entity by name.** The generator suffixes a
+  colliding interface `$1`/`$2`/`$N`, and the suffix a type carries in one
+  release is not the one it carries in the next: `AppEntry$1` became
+  `AppEntry$2` across this bump, and `ReplicationEntry.transport`'s enum was
+  renamed `Transport` → `ReplicationCountEligibleManualSnapshotsTransport` with
+  identical members. Importing either name would have broken on a rename that
+  changed nothing.
+
+**A declared type is a claim about what the middleware sends, not the value
+received, so it does not retire a guard.** Every field named through one of
+these aliases is still read through `common.ts` — the bump did not delete a
+single `textOrNull`. Where a type says a field is required and the code falls
+back anyway, the fallback is the load-bearing half: `network.ts`'s
+`hostname_local` is declared `string` and is an extend rather than a stored
+field, so a release that does not add it still answers.
+
 ### The shared guards live in `src/tools/common.ts` (#86)
 
-Every tool file reads middleware payloads whose fields arrive as `unknown`, so
-each needed the same narrowings — `textOrNull`, `numberOrNull`, `booleanOrNull`,
-`recordOrNull`, `textList` — and the same reading of a rejection, `errorText`.
+Every tool file reads middleware payloads whose declared shape it does not take
+as given, so each needed the same narrowings — `textOrNull`, `numberOrNull`,
+`booleanOrNull`, `recordOrNull`, `textList` — and the same reading of a
+rejection, `errorText`. The pinned client left many of those payloads as
+`unknown` outright; 4.x declares nearly all of them, which changed what the
+compiler knows and not what a system sends (#91).
 Each file grew a private copy, on the stated ground that a tool file is read on
 its own. Eleven copies of `textOrNull` later, they had not all stayed identical:
 `shares.ts`'s `errorText` had lost the branch that reads the `{ reason }` and

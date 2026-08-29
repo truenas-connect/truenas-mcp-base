@@ -1,6 +1,7 @@
+import type { QueryEntity } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
-import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
 import { booleanOrNull, errorText, numberOrNull, textOrNull } from '@/tools/common';
 
 /**
@@ -348,12 +349,12 @@ export const iscsiList: ReadOnlyTool = {
 };
 
 /**
- * The NVMe-oF reads below need `numberOrNull` where the iSCSI ones do not: the
- * pinned client types a subsystem entry as `Record<string, unknown>`, so every
- * field of one — including the id the other two reads are joined on — arrives
- * as `unknown` and has to be read rather than trusted. Non-finite is excluded
- * there for a reason this family feels directly: an id that is `NaN` joins
- * nothing and a size that is `NaN` measures nothing.
+ * The NVMe-oF reads below need `numberOrNull` where the iSCSI ones do not: a
+ * subsystem's id is what the other two reads are joined on, and the client
+ * declaring it `number` is a claim about what the middleware sends rather than
+ * about the value received, so it is read rather than trusted. Non-finite is
+ * excluded there for a reason this family feels directly: an id that is `NaN`
+ * joins nothing and a size that is `NaN` measures nothing.
  */
 
 /** One namespace of a subsystem: a block device, as an initiator addresses it. */
@@ -523,6 +524,9 @@ interface Read<T> {
   reason: unknown;
 }
 
+/** One NVMe-oF subsystem, as the API surface in use types a row of it. */
+type SubsystemRow = QueryEntity<ApiSurface['call'], 'nvmet.subsys.query'>;
+
 /**
  * The subsystems, with a rejection kept as it arrived rather than reduced to
  * text.
@@ -532,11 +536,14 @@ interface Read<T> {
  * rejection it is, and `attempt` has already thrown that away by the time its
  * caller sees a `Failure`.
  *
- * The rows are `Record<string, unknown>[]` because that is how the pinned
- * client types a subsystem entry — untyped, unlike the namespace and join rows
- * beside it — rather than because this widens anything.
+ * The rows are named off the call through the client's own `QueryEntity` rather
+ * than by importing the generated entity: the surface decides which version's
+ * shape that is, and a regeneration that renames the interface does not reach
+ * this file. It is a claim about what the middleware sends and not one this
+ * tool acts on — every field below is still read through a guard, because a
+ * declared type is not a received value.
  */
-function readSubsystems(system: SystemHandle): Promise<Read<Record<string, unknown>[]>> {
+function readSubsystems(system: SystemHandle): Promise<Read<SubsystemRow[]>> {
   return firstValueFrom(system.client.api.query('nvmet.subsys.query')).then(
     (rows) => ({ rows, reason: null }),
     (reason: unknown) => ({ rows: null, reason }),
