@@ -2501,9 +2501,17 @@ function countDevice(tally: DeviceTally, entry: DeviceEntry, category: string | 
  * here: the first is two leaves, and the second is a leaf located by its `name`
  * in the tree rather than by a disk there is none of.
  *
- * A node carrying no readable `devices` is a leaf, which is the reading that
- * makes this total: a node whose fields cannot be read at all still counts as
- * one device, at `unranked`, rather than dropping out of the total silently.
+ * A LEAF IS A NODE WHOSE `devices` IS EMPTY, not one whose `devices` could not
+ * be read. `storage_pool_topology` builds that array on every node it maps, so
+ * a node carrying anything else is that tool answering a shape this one does not
+ * read — and the cast below throws rather than quietly counting a grouping vdev
+ * as a disk. That throw lands in {@link section}'s catch and the whole disks
+ * section is stated as unreadable, which is the one mechanism this file uses for
+ * every way a composed read can fail.
+ *
+ * A leaf whose individual FIELDS cannot be read is different and is ordinary: it
+ * still counts as one device, at `unranked`, rather than dropping out of the
+ * total silently.
  */
 function walkDevices(
   node: Record<string, unknown>,
