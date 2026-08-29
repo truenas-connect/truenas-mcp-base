@@ -269,9 +269,11 @@ export const alertSettings: ReadOnlyTool = {
     '`IMMEDIATELY`, `HOURLY`, `DAILY` or `NEVER`, AND `NEVER` IS THE ' +
     'SUPPRESSED CASE — a class whose alerts are still raised and still ' +
     'reported by `alerts_list`, and are sent to no destination at all. `policy` ' +
-    'is null where the stored setting names none, which means the class is at ' +
-    'the DEFAULT policy and was changed some other way; A NULL POLICY IS NEVER ' +
-    'SUPPRESSION. `level` is the severity that class is raised at where it has ' +
+    'is null where the stored setting named no policy this tool could read — ' +
+    'either the class is at the DEFAULT policy and was changed some other way, ' +
+    'or its setting named one in a shape this tool does not read. A NULL ' +
+    'POLICY IS NEVER SUPPRESSION. `level` is the severity that class is raised ' +
+    'at where it has ' +
     'been changed from that class\'s own default, in the same vocabulary as ' +
     '`minimum_level` above, and null where the stored setting names none. ' +
     '`proactive_support` is whether that class is included in proactive ' +
