@@ -11161,6 +11161,9 @@ describe('fleet_compliance_report', () => {
         cert({ name: 'just-outside', until: inDays(31) }),
       ],
     });
+    // Listed worst first — expired, then the expiry that would not read, then
+    // the two expiring soon in the order the system reported them — rather than
+    // in the order above, so that the cap drops the least alarming lines.
     expect(result.certificates).toEqual({
       unavailable: null,
       reported: 6,
@@ -11169,20 +11172,6 @@ describe('fleet_compliance_report', () => {
       expiry_unknown: 1,
       expiring_within_days: 30,
       entries: [
-        {
-          name: 'boundary',
-          common_name: 'truenas.local',
-          not_after: inDays(30),
-          days_until_expiry: 30,
-          expired: false,
-        },
-        {
-          name: 'soon',
-          common_name: 'truenas.local',
-          not_after: inDays(5),
-          days_until_expiry: 5,
-          expired: false,
-        },
         {
           name: 'gone',
           common_name: 'truenas.local',
@@ -11195,6 +11184,20 @@ describe('fleet_compliance_report', () => {
           common_name: 'truenas.local',
           not_after: 'the ides of March',
           days_until_expiry: null,
+          expired: false,
+        },
+        {
+          name: 'boundary',
+          common_name: 'truenas.local',
+          not_after: inDays(30),
+          days_until_expiry: 30,
+          expired: false,
+        },
+        {
+          name: 'soon',
+          common_name: 'truenas.local',
+          not_after: inDays(5),
+          days_until_expiry: 5,
           expired: false,
         },
       ],
@@ -11262,6 +11265,37 @@ describe('fleet_compliance_report', () => {
     expect(result.certificates['expiring_soon']).toBe(12);
     expect(result.certificates['entries']).toHaveLength(10);
     expect(result.certificates['truncated']).toBe(true);
+  });
+
+  it('keeps every expired certificate through a cap that drops expiring-soon ones', async () => {
+    const result = await report({
+      // The three that matter are reported LAST, so listing in reported order
+      // would cap them out and leave a report whose entries name only
+      // certificates that have not broken anything yet.
+      ['certificate.query']: [
+        ...Array.from({ length: 12 }, (_, index) =>
+          cert({ name: `expiring-${index}`, until: inDays(1) }),
+        ),
+        cert({ name: 'lapsed', until: inDays(-3) }),
+        cert({ name: 'unreadable', until: 'the ides of March' }),
+        // Ranked on the system's own verdict, not on the 200 days beside it —
+        // the same disagreement the counts are settled on.
+        cert({ name: 'disputed', until: inDays(200), expired: true }),
+      ],
+    });
+    const entries = result.certificates['entries'] as { name: string }[];
+    expect(entries.map((entry) => entry.name).slice(0, 3)).toEqual([
+      'lapsed',
+      'disputed',
+      'unreadable',
+    ]);
+    expect(entries).toHaveLength(10);
+    expect(result.certificates['truncated']).toBe(true);
+    // The ordering moved lines, not facts: every count is still over all 15.
+    expect(result.certificates['reported']).toBe(15);
+    expect(result.certificates['expired']).toBe(2);
+    expect(result.certificates['expiring_soon']).toBe(12);
+    expect(result.certificates['expiry_unknown']).toBe(1);
   });
 
   it('reports where identities come from, with no bind credential', async () => {
