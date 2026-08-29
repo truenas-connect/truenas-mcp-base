@@ -11049,7 +11049,7 @@ describe('fleet_compliance_report', () => {
       system: 'nas',
       section: 'certificates',
       detail:
-        '1 certificate reported no expiry date this report could read, so whether they are ' +
+        '1 certificate reported no expiry date this report could read, so whether each is ' +
         'still valid is not established',
     });
 
@@ -11060,7 +11060,7 @@ describe('fleet_compliance_report', () => {
       system: 'nas',
       section: 'certificates',
       detail:
-        '2 certificates reported no expiry date this report could read, so whether they are ' +
+        '2 certificates reported no expiry date this report could read, so whether each is ' +
         'still valid is not established',
     });
   });
@@ -11159,6 +11159,25 @@ describe('fleet_compliance_report', () => {
       ],
       truncated: false,
     });
+  });
+
+  it('does not establish exposure for a share whose own switch would not read', async () => {
+    const result = await report({
+      ['sharing.smb.query']: [smb({ enabled: 'yes' }), smb({ id: 4, enabled: undefined })],
+      ['sharing.nfs.query']: [],
+    });
+    expect(result.shares['enablement_unknown']).toBe(2);
+    // Without this the section has a hole in it and `unreadable` is empty,
+    // which the tool's own description offers as "every fact below was read".
+    expect(result.unreadable).toEqual([
+      {
+        system: 'nas',
+        section: 'shares',
+        detail:
+          '2 shares reported no switch this report could read, so whether each is exposed is ' +
+          'not established',
+      },
+    ]);
   });
 
   it('reports no id for a share whose own id the system did not report as a number', async () => {

@@ -273,14 +273,15 @@ export const haStatus: ReadOnlyTool = {
  */
 
 /**
- * How many certificates, shares and services the report names individually.
+ * How many certificates and how many shares the report names individually.
  *
- * The cap is on the DETAIL LISTS ONLY: every count and every entry in
+ * The cap is on those TWO DETAIL LISTS ONLY: every count and every entry in
  * `unreadable` is computed over everything the section read, so truncation can
- * drop the line describing a fact and can never drop the fact. Ten is chosen
- * against the systems this is asked about — a TrueNAS system holds a handful of
- * certificates and tens of shares, and ten of each is already more than a reader
- * checks in one sitting.
+ * drop the line describing a fact and can never drop the fact. `by_service` is
+ * not capped and needs no cap — it holds one row per audit trail, of which
+ * TrueNAS keeps four. Ten is chosen against the systems this is asked about — a
+ * TrueNAS system holds a handful of certificates and tens of shares, and ten of
+ * each is already more than a reader checks in one sitting.
  */
 const MAX_LISTED = 10;
 
@@ -399,6 +400,16 @@ function auditRead(answer: unknown): AuditRead {
  * nothing and looks identical to one that is not auditing at all. The setting
  * that would tell them apart is `audit.config`, which no tool in this catalog
  * reports and which a composite may not reach for itself.
+ *
+ * True is also WEAKER THAN IT LOOKS on the `MIDDLEWARE` trail, and that is a
+ * property of the arrangement rather than of this code: every tool in this
+ * catalog reaches the system through the middleware API, so a call made by this
+ * assistant lands in the same trail this reads — `audit_log_query`'s own
+ * description says so, and calls it the point rather than a side effect. So
+ * `MIDDLEWARE` recording is close to self-fulfilling once the assistant has been
+ * used at all inside the window, and the trails worth reading for evidence a
+ * PERSON did not generate are the other ones. The tool's description says this
+ * where a caller will read it.
  */
 function recordingFrom(read: AuditRead | null): boolean | null {
   if (read === null || read.entries_seen === 0) return null;
@@ -677,7 +688,7 @@ function certificateUnreadable(read: CertificateRead, system: string): Unreadabl
       detail: `${plural(
         read.expiry_unknown,
         'certificate',
-      )} reported no expiry date this report could read, so whether they are still valid is not established`,
+      )} reported no expiry date this report could read, so whether each is still valid is not established`,
     },
   ];
 }
@@ -697,15 +708,36 @@ function directoryUnreadable(read: DirectoryRead, system: string): Unreadable[] 
 /** How a protocol whose own name could not be read is referred to. */
 const UNNAMED_PROTOCOL = 'a protocol the system did not name';
 
-/** What the shares section could not establish — one entry per unlisted protocol. */
+/**
+ * What the shares section could not establish: one entry per protocol that could
+ * not be listed at all, and one for the shares whose own switch would not read.
+ *
+ * The second is the same fact `certificates` reports about an unreadable expiry,
+ * and it is here for the same reason: a share that did not say whether it is
+ * switched on has not been shown to be exposed OR not exposed, so leaving it out
+ * of `unreadable` would let an empty `unreadable` — which this tool's
+ * description offers as the claim that every fact below was read — stand over a
+ * section that has a hole in it.
+ */
 function shareUnreadable(read: ShareRead, system: string): Unreadable[] {
-  return read.failures.map((failure) => ({
+  const facts: Unreadable[] = read.failures.map((failure) => ({
     system,
     section: 'shares' as const,
     detail: `no ${
       failure.protocol ?? UNNAMED_PROTOCOL
     } share could be listed, so what this system exposes over it is not established: ${failure.error}`,
   }));
+  if (read.enablement_unknown > 0) {
+    facts.push({
+      system,
+      section: 'shares',
+      detail: `${plural(
+        read.enablement_unknown,
+        'share',
+      )} reported no switch this report could read, so whether each is exposed is not established`,
+    });
+  }
+  return facts;
 }
 
 /**
@@ -734,6 +766,15 @@ function updateUnreadable(read: UpdateRead, system: string): Unreadable[] {
   return facts;
 }
 
+/**
+ * The configuration facts an auditor asks for, from one system, in one call.
+ *
+ * Five sections over five existing tools and no endpoint of its own, no section
+ * able to fail the report, and NO VERDICT — see the design note above this
+ * file's constants for why a compliance composite may not state one where a
+ * health composite may, and for what `auditing` is measuring instead of the
+ * setting it was asked for.
+ */
 export const fleetComplianceReport: ReadOnlyTool = {
   name: 'fleet_compliance_report',
   description:
@@ -773,7 +814,13 @@ export const fleetComplianceReport: ReadOnlyTool = {
     'all. WHETHER AUDITING IS CONFIGURED ON CANNOT BE ANSWERED BY THIS TOOL — ' +
     'that setting is `audit.config` on the middleware, no tool in this catalog ' +
     'reports it, and a null `recording` is a question to put to the system ' +
-    'directly rather than an answer. `entries_seen` is how many entries came ' +
+    'directly rather than an answer. TRUE IS ALSO WEAKER THAN IT LOOKS ON THE ' +
+    '`MIDDLEWARE` TRAIL: every tool in this catalog reaches the system through ' +
+    'the middleware API, so a call this assistant makes lands in the trail this ' +
+    'reads, and `MIDDLEWARE` recording is close to self-fulfilling once the ' +
+    'assistant has been used inside the window. The trails that carry evidence ' +
+    'of activity this assistant did not generate are the other ones. ' +
+    '`entries_seen` is how many entries came ' +
     'back inside the window and `by_service` counts them per trail, busiest ' +
     'first, so a trail that IS recording can be named — `MIDDLEWARE`, `SMB`, ' +
     '`SUDO`, `SYSTEM`, or a name a later TrueNAS release adds. A SERVICE ' +
@@ -790,7 +837,11 @@ export const fleetComplianceReport: ReadOnlyTool = {
     '`expiry_unknown` how many reported no expiry date this report could read ' +
     '— WHICH IS NOT "DOES NOT EXPIRE", every certificate expires, and those are ' +
     'the ones to look at by hand. The three counts and `reported` are over ' +
-    'EVERY certificate. `entries` lists the certificates in those three ' +
+    'EVERY certificate. `expiring_within_days` is the horizon `expiring_soon` ' +
+    'was counted against, so the count is readable against the window it was ' +
+    'taken from; it is fixed rather than an argument, so that one system\'s ' +
+    'report can be compared with another\'s. `entries` lists the certificates ' +
+    'in those three ' +
     'categories individually and lists no comfortably-valid one, each with its ' +
     '`name`, `common_name`, `not_after` exactly as the system formatted it, ' +
     '`days_until_expiry` — negative where it has already expired, by that many ' +
@@ -806,7 +857,11 @@ export const fleetComplianceReport: ReadOnlyTool = {
     'service can be enabled and `FAULTED` at once. `domain`, `server_urls` and ' +
     '`kerberos_realm` name the directory: `domain` is null for LDAP, which is ' +
     'identified by `server_urls` instead, and `server_urls` is null for Active ' +
-    'Directory and IPA. `credential_type` names HOW the system binds and NEVER ' +
+    'Directory and IPA. `server_urls` IS REPORTED WHOLE OR NOT AT ALL — a list ' +
+    'holding an entry this report could not read is null rather than the ' +
+    'readable part of it, since a partial list names a different set of servers ' +
+    'from the one the system holds. `credential_type` names HOW the system ' +
+    'binds and NEVER ' +
     'WITH WHAT — NO PASSWORD, BIND PASSWORD, KEYTAB OR CERTIFICATE PASSES ' +
     'THROUGH THIS TOOL. `config_error` names what the system said when the ' +
     'configuration read failed, and while it is non-null `enabled`, `domain`, ' +
@@ -825,7 +880,13 @@ export const fleetComplianceReport: ReadOnlyTool = {
     '`enabled`. THE HOST RESTRICTIONS, THE SHARE ACL AND THE FILESYSTEM ACL ARE ' +
     'NOT REPORTED HERE: who may reach one share is `share_access`, called per ' +
     'share, and nothing in this section is evidence that a share is reachable ' +
-    'by anyone in particular or by everyone. iSCSI and NVMe-oF export block ' +
+    'by anyone in particular or by everyone. SMB AND NFS ARE LISTED BY TWO ' +
+    'SEPARATE READS AND EITHER CAN FAIL ON ITS OWN, in which case `unavailable` ' +
+    'STAYS NULL — the other protocol was read — and every count and entry here ' +
+    'is over the protocol that answered. `unreadable` names the one that did ' +
+    'not, and while it does, `reported` is a floor rather than a total and a ' +
+    'share not appearing is not evidence it does not exist. `unavailable` is ' +
+    'set only where NEITHER could be listed. iSCSI and NVMe-oF export block ' +
     'devices rather than filesystem paths and are not counted as shares — see ' +
     '`iscsi_list` and `nvmeof_list`. `updates` reports whether the system is ' +
     'patched. `update_available` is true, false, or NULL WHERE THE CHECK DID ' +
