@@ -159,18 +159,21 @@ interface MemberRow {
  * named no member list at all.
  *
  * A bridge names them under `bridge_members` and a link aggregation under
- * `lag_ports`; a physical or VLAN interface holds neither, which is the
- * ordinary case rather than a fault. Null is therefore "the system reported no
- * member list", and `type` is what says whether that means "does not aggregate
- * anything" or "an aggregate whose members could not be read".
+ * `lag_ports`. Null is therefore "the system reported no member list", and
+ * `type` is what says whether that means "does not aggregate anything" or "an
+ * aggregate whose members could not be read".
  *
  * Both fields are read and joined rather than one being preferred to the
- * other. The middleware sends an interface record whole, so a LAGG can carry an
- * empty `bridge_members` beside its populated `lag_ports` — and preferring the
- * first field that is present would then report a live aggregation as having no
- * members at all, which is the one answer worse than no answer. Nothing is
- * double-counted by joining them: an interface is a bridge or an aggregation
- * and never both, so at most one of the two lists is ever populated.
+ * other, because (unconfirmed) which of two shapes the middleware sends: if it
+ * sends an interface record whole, a LAGG carries an empty `bridge_members`
+ * beside its populated `lag_ports`, and preferring the first field that is
+ * present would report a live aggregation as having no members at all — the
+ * one answer worse than no answer. That same uncertainty is why a physical or
+ * VLAN interface may answer either null (neither field sent) or an empty list
+ * (both sent and both empty) here, and why the tool's description states both
+ * rather than promising one. Nothing is double-counted by joining them: an
+ * interface is a bridge or an aggregation and never both, so at most one of
+ * the two lists is ever populated.
  */
 function memberNames(row: Record<string, unknown>): string[] | null {
   // The predicate is written out rather than left to inference: `Array.isArray`
@@ -281,11 +284,14 @@ export const networkInterfaces: ReadOnlyTool = {
     '`vlan_tag` are the interface a VLAN sits on and the tag it carries, and ' +
     'ARE BOTH NULL ON EVERY INTERFACE THAT IS NOT A VLAN, which `type` is what ' +
     'identifies. `members` are the interfaces a bridge or a link aggregation ' +
-    'is built from. IT IS NULL WHERE THE SYSTEM REPORTED NO MEMBER LIST, which ' +
-    'is the ordinary case for a `PHYSICAL` or `VLAN` interface and is not a ' +
-    'failure; on a `BRIDGE` or `LINK_AGGREGATION` an empty list means the ' +
-    'aggregate currently has no members, and null means its member list could ' +
-    'not be read — `type` is what tells those apart. Each member carries its ' +
+    'is built from. ON A `PHYSICAL` OR `VLAN` INTERFACE IT IS EITHER NULL OR ' +
+    'AN EMPTY LIST, depending on whether the system sent member fields at all ' +
+    'for a row that aggregates nothing, and NEITHER IS A FAILURE: an interface ' +
+    'of those types is built from no other interface, and the two readings ' +
+    'carry no distinction there. ON A `BRIDGE` OR `LINK_AGGREGATION` THEY DO: ' +
+    'an empty list means the aggregate currently has no members, and null ' +
+    'means its member list could not be read — `type` is what says which of ' +
+    'the two readings applies. Each member carries its ' +
     'own `name`, the `link_state` FROM THAT MEMBER\'S OWN ENTRY in this same ' +
     'result — null where no entry for it was returned OR where that entry ' +
     'reported no link state, so a null there is a member whose link CANNOT BE ' +
