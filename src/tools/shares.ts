@@ -84,57 +84,117 @@ function errorText(reason: unknown): string {
   return textOrNull(reason) ?? 'the system reported no reason';
 }
 
+/**
+ * What an NFS export says about who may reach it, beyond the ACL on its path.
+ *
+ * These are read from the export row rather than from a second call, and they
+ * are here because each of them can make the path's ACL overstate what someone
+ * actually gets: the restrictions decide which machines may mount it at all,
+ * and the map fields replace the id that arrives before the ACL is ever
+ * consulted.
+ */
+interface NfsExport {
+  hosts: string[] | null;
+  networks: string[] | null;
+  mapall_user: string | null;
+  mapall_group: string | null;
+  maproot_user: string | null;
+  maproot_group: string | null;
+}
+
+/**
+ * One share, with everything the share record itself says about reaching it.
+ *
+ * Both tools in this family read the same two queries, so this is what those
+ * queries produce and `shares_list` takes the `share` half of it. One mapping
+ * per protocol rather than two: two would drift, and the drift would show as
+ * one tool naming a share differently from the other.
+ */
+interface AccessTarget {
+  share: Share;
+  /** Read-only however the ACL reads, or null where the switch was not readable. */
+  readOnly: boolean | null;
+  nfs: NfsExport | null;
+}
+
+/**
+ * An NFS export's host or network restriction list.
+ *
+ * An absent list and an empty one are the same answer from the middleware — the
+ * export carries no restriction of that kind — so both map to `[]` rather than
+ * one of them becoming a null that would read as unreadable.
+ *
+ * Everything else is unreadable, and the list is reported whole or not at all:
+ * dropping the entries that could not be read would answer with a narrower
+ * restriction than the export carries, and dropping all of them would answer
+ * `[]`, which here means the OPPOSITE — no restriction, and any machine may
+ * mount it.
+ */
+function restrictionList(value: unknown): string[] | null {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) return null;
+  const restrictions = value.filter(
+    (item): item is string => typeof item === 'string' && item.length > 0,
+  );
+  return restrictions.length === value.length ? restrictions : null;
+}
+
 /** Every SMB share the system holds. */
-async function smbShares(system: SystemHandle): Promise<Share[]> {
+async function smbTargets(system: SystemHandle): Promise<AccessTarget[]> {
   // No filters and no options: a system holds tens of shares at most, and every
   // field this tool reads is part of a share row as it stands. No `select`
   // either — unlike a job row, a share row carries no credential and nothing
   // unbounded, and the mapping below is what decides what a caller sees.
   const shares = await firstValueFrom(system.client.api.query('sharing.smb.query'));
   return shares.map((share) => ({
-    protocol: 'SMB' as const,
-    id: share.id,
-    name: textOrNull(share.name),
-    // `EXTERNAL` is passed through as the system spelled it: an external share
-    // is a redirection to another server rather than a path on this one, and
-    // reporting null there would read as a path that could not be found.
-    path: textOrNull(share.path),
-    // Optional on the client's own type, so a middleware that omits it reports
-    // null rather than a default. Not defaulted either way: a share whose
-    // switch cannot be read must not be presented as definitely on or off.
-    enabled: share.enabled ?? null,
-    comment: textOrNull(share.comment),
+    share: {
+      protocol: 'SMB' as const,
+      id: share.id,
+      name: textOrNull(share.name),
+      // `EXTERNAL` is passed through as the system spelled it: an external share
+      // is a redirection to another server rather than a path on this one, and
+      // reporting null there would read as a path that could not be found.
+      path: textOrNull(share.path),
+      // Optional on the client's own type, so a middleware that omits it reports
+      // null rather than a default. Not defaulted either way: a share whose
+      // switch cannot be read must not be presented as definitely on or off.
+      enabled: share.enabled ?? null,
+      comment: textOrNull(share.comment),
+    },
+    readOnly: share.readonly ?? null,
+    // A fact about the protocol: SMB has no export restrictions and no id
+    // mapping, so there is nothing here rather than an empty set of them.
+    nfs: null,
   }));
 }
 
-/**
- * One NFS export as this family presents one.
- *
- * Split out of `nfsShares` because `share_access` reads the same rows for their
- * host restrictions and must present the share half identically — two mappings
- * of one row would drift, and the drift would show as one tool naming a share
- * differently from the other.
- */
-function nfsShare(share: { id: number; path: string; enabled?: boolean; comment?: string }): Share {
-  return {
-    protocol: 'NFS' as const,
-    id: share.id,
-    // An NFS export has no name. The middleware identifies one by the path it
-    // exports and carries no name field at all, so this is null on every NFS
-    // share — a fact about the protocol rather than about this system. Not the
-    // path repeated under a second key, which would read as a name somebody
-    // chose.
-    name: null,
-    path: textOrNull(share.path),
-    enabled: share.enabled ?? null,
-    comment: textOrNull(share.comment),
-  };
-}
-
 /** Every NFS export the system holds. */
-async function nfsShares(system: SystemHandle): Promise<Share[]> {
+async function nfsTargets(system: SystemHandle): Promise<AccessTarget[]> {
   const shares = await firstValueFrom(system.client.api.query('sharing.nfs.query'));
-  return shares.map(nfsShare);
+  return shares.map((share) => ({
+    share: {
+      protocol: 'NFS' as const,
+      id: share.id,
+      // An NFS export has no name. The middleware identifies one by the path it
+      // exports and carries no name field at all, so this is null on every NFS
+      // share — a fact about the protocol rather than about this system. Not the
+      // path repeated under a second key, which would read as a name somebody
+      // chose.
+      name: null,
+      path: textOrNull(share.path),
+      enabled: share.enabled ?? null,
+      comment: textOrNull(share.comment),
+    },
+    readOnly: share.ro ?? null,
+    nfs: {
+      hosts: restrictionList(share.hosts),
+      networks: restrictionList(share.networks),
+      mapall_user: textOrNull(share.mapall_user),
+      mapall_group: textOrNull(share.mapall_group),
+      maproot_user: textOrNull(share.maproot_user),
+      maproot_group: textOrNull(share.maproot_group),
+    },
+  }));
 }
 
 /**
@@ -193,13 +253,15 @@ export const sharesList: ReadOnlyTool = {
     // Both queries are issued before either is awaited, so the second is not
     // waiting on the first, and neither can take the other down.
     const attempts = await Promise.all([
-      attempt('SMB', () => smbShares(system)),
-      attempt('NFS', () => nfsShares(system)),
+      attempt('SMB', () => smbTargets(system)),
+      attempt('NFS', () => nfsTargets(system)),
     ]);
     const shares: Share[] = [];
     const failures: Failure[] = [];
     for (const attempted of attempts) {
-      shares.push(...attempted.rows);
+      // The share half only: what an export restricts and whom it maps is
+      // `share_access`, and this tool's own description says so.
+      shares.push(...attempted.rows.map((target) => target.share));
       if (attempted.failure !== null) failures.push(attempted.failure);
     }
     // Nothing was read, so there is no partial answer to preserve. An empty
@@ -234,13 +296,6 @@ export const sharesList: ReadOnlyTool = {
  * So the ACL is read for both and the restrictions are read for NFS, and
  * neither half is presented as the whole answer.
  */
-
-/** One protocol's shares, with the export restrictions that only NFS carries. */
-interface AccessTarget {
-  share: Share;
-  hosts: string[] | null;
-  networks: string[] | null;
-}
 
 /** Which share the caller asked about. */
 interface Selector {
@@ -286,28 +341,6 @@ function numberOrNull(value: unknown): number | null {
 function principalId(value: unknown): number | null {
   const id = numberOrNull(value);
   return id === null || id < 0 ? null : id;
-}
-
-/**
- * An NFS export's host or network restriction list.
- *
- * An absent list and an empty one are the same answer from the middleware — the
- * export carries no restriction of that kind — so both map to `[]` rather than
- * one of them becoming a null that would read as unreadable.
- *
- * Everything else is unreadable, and the list is reported whole or not at all:
- * dropping the entries that could not be read would answer with a narrower
- * restriction than the export carries, and dropping all of them would answer
- * `[]`, which here means the OPPOSITE — no restriction, and any machine may
- * mount it.
- */
-function restrictionList(value: unknown): string[] | null {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) return null;
-  const restrictions = value.filter(
-    (item): item is string => typeof item === 'string' && item.length > 0,
-  );
-  return restrictions.length === value.length ? restrictions : null;
 }
 
 /**
@@ -442,20 +475,80 @@ async function readAcl(
   }
 }
 
-/** Every SMB share, as a target. SMB carries no export restrictions of its own. */
-async function smbTargets(system: SystemHandle): Promise<AccessTarget[]> {
-  const shares = await smbShares(system);
-  return shares.map((share) => ({ share, hosts: null, networks: null }));
+/**
+ * One entry of an SMB share-level ACL: who it names, and what it does to them.
+ *
+ * A principal here can be named three ways and the middleware fills whichever
+ * it has, so all three are reported and none stands in for another: `name` is
+ * the resolved account, `id` with `kind` is the local uid or gid, and `sid` is
+ * the Windows security identifier a domain principal arrives as. An entry that
+ * resolved to none of them is still an entry, and is reported empty rather than
+ * dropped.
+ */
+interface ShareAclEntry {
+  name: string | null;
+  id: number | null;
+  kind: 'USER' | 'GROUP' | null;
+  sid: string | null;
+  access: 'ALLOWED' | 'DENIED' | null;
+  permission: string | null;
 }
 
-/** Every NFS export, as a target, with the restrictions on who may mount it. */
-async function nfsTargets(system: SystemHandle): Promise<AccessTarget[]> {
-  const shares = await firstValueFrom(system.client.api.query('sharing.nfs.query'));
-  return shares.map((share) => ({
-    share: nfsShare(share),
-    hosts: restrictionList(share.hosts),
-    networks: restrictionList(share.networks),
-  }));
+/** One share-level ACL entry, mapped field by field. */
+function shareAclEntry(entry: unknown): ShareAclEntry {
+  const row = entry !== null && typeof entry === 'object' ? (entry as Record<string, unknown>) : {};
+  const who = row['ae_who_id'];
+  const identity = who !== null && typeof who === 'object' ? (who as Record<string, unknown>) : {};
+  const kind = identity['id_type'];
+  const access = row['ae_type'];
+  return {
+    name: textOrNull(row['ae_who_str']),
+    id: numberOrNull(identity['id']),
+    kind: kind === 'USER' || kind === 'GROUP' ? kind : null,
+    sid: textOrNull(row['ae_who_sid']),
+    access: access === 'ALLOWED' || access === 'DENIED' ? access : null,
+    permission: textOrNull(row['ae_perm']),
+  };
+}
+
+/**
+ * The SMB share-level ACL, which is a second gate in front of the filesystem
+ * one and can deny what the path grants.
+ *
+ * Read for SMB only, because it is an SMB concept: an NFS export has no such
+ * layer, so both halves of the answer are null there rather than empty. As with
+ * the filesystem ACL, a failure is returned rather than thrown — the rest of
+ * the answer is still worth having beside a stated reason.
+ */
+async function readShareAcl(
+  system: SystemHandle,
+  share: Share,
+): Promise<{ entries: ShareAclEntry[] | null; error: string | null }> {
+  if (share.protocol !== 'SMB') return { entries: null, error: null };
+  if (share.name === null) {
+    return {
+      entries: null,
+      error: 'the system reported no name for this share, and the share ACL is read by name',
+    };
+  }
+  try {
+    const acl = await firstValueFrom(
+      system.client.api.call('sharing.smb.getacl', [{ share_name: share.name }]),
+    );
+    const entries = (acl as unknown as Record<string, unknown>)['share_acl'];
+    if (!Array.isArray(entries)) {
+      // Not reported as an empty ACL: at share level an empty list of entries
+      // would read as a share nobody is allowed to reach, which is the opposite
+      // of what a share carrying no share-level ACL means.
+      return {
+        entries: null,
+        error: 'the system reported no share-level ACL, so what it allows is not known here',
+      };
+    }
+    return { entries: entries.map(shareAclEntry), error: null };
+  } catch (reason) {
+    return { entries: null, error: errorText(reason) };
+  }
 }
 
 /** The caller's arguments, or an error naming what is wrong with them. */
@@ -536,24 +629,46 @@ export const shareAccess: ReadOnlyTool = {
     'and `enabled` identify the share and mean exactly what they mean in ' +
     '`shares_list`, including that `name` is ALWAYS null on an NFS export and ' +
     'that a disabled share reaches nobody whatever the rest of this says. ' +
-    '`hosts` and `networks` are the NFS export restrictions: which machines may ' +
-    'mount it at all, by host and by network. THEY ARE EMPTY WHEN THE EXPORT IS ' +
-    'UNRESTRICTED — an empty `hosts` and an empty `networks` together mean any ' +
-    'machine that can reach this server may mount it, which is the opposite of ' +
-    'nobody. Both are null on an SMB share, where the protocol has no such ' +
-    'restriction, and null on an NFS export where the system reported ' +
-    'something that could not be read as a list of hosts or networks — ' +
-    'including a list holding an entry that is not one, since a restriction ' +
-    'reported in part is a different restriction; `protocol` tells those two ' +
-    'apart. `acl` is the filesystem ACL on `path`, which is what decides what ' +
-    'each principal may do once connected — over SMB it is the whole answer, ' +
-    'and over NFS it applies to the ids arriving from a machine the ' +
-    'restrictions already let in. EXACTLY ONE of `acl` and `acl_error` is ' +
+    'ACCESS IS THE NARROWEST OF EVERYTHING BELOW, not any one field: a share ' +
+    'is reached only by a principal that every layer reporting on it allows. ' +
+    '`read_only` true CAPS EVERY WRITE PERMISSION reported anywhere below — the ' +
+    'share or export is served read-only whatever its ACLs say — and null is a ' +
+    'switch the system reported no value for, which is not the same as false. ' +
+    '`nfs` is the export record\'s own say in who may reach it, and is null on ' +
+    'an SMB share, where the protocol has none of it. Within it, `hosts` and ' +
+    '`networks` are which machines may mount the export at all. THEY ARE EMPTY ' +
+    'WHEN THE EXPORT IS UNRESTRICTED — an empty `hosts` and an empty `networks` ' +
+    'together mean any machine that can reach this server may mount it, which ' +
+    'is the opposite of nobody — and either is null where the system reported ' +
+    'something that could not be read as a list of hosts or networks, including ' +
+    'a list holding an entry that is not one, since a restriction reported in ' +
+    'part is a different restriction. `mapall_user` and `mapall_group`, when ' +
+    'set, REPLACE THE IDENTITY OF EVERY REQUEST arriving over the export with ' +
+    'that account before the ACL below is consulted, so the ACL then answers ' +
+    'for that one account and not for whoever connected; `maproot_user` and ' +
+    '`maproot_group` do the same for root alone. Each is null where no such ' +
+    'mapping is set. `share_acl` is the SMB SHARE-LEVEL ACL, a separate gate in ' +
+    'front of the filesystem one that can DENY what the path grants, so a ' +
+    'principal allowed below may still be refused here. It and ' +
+    '`share_acl_error` are BOTH null on an NFS export, which has no such layer; ' +
+    'on an SMB share exactly one of them is non-null. Each of its entries names ' +
+    'a principal in whichever of three ways the system had — `name` the ' +
+    'resolved account, `id` with `kind` (`USER` or `GROUP`) the local numeric ' +
+    'id, and `sid` the Windows security identifier of a domain principal — and ' +
+    'an entry that resolved to none of them is reported empty rather than ' +
+    'dropped. `access` is `ALLOWED` or `DENIED`, and `permission` is `FULL`, ' +
+    '`CHANGE`, `READ` or `CUSTOM`. `acl` is the filesystem ACL on `path`, which ' +
+    'is what decides what each principal may do once connected: over SMB it ' +
+    'applies to whoever the share ACL above already let through, and over NFS ' +
+    'to the ids arriving from a machine the restrictions already let in, after ' +
+    'any mapping. EXACTLY ONE of `acl` and `acl_error` is ' +
     'non-null: `acl_error` says in words why the ACL could not be read, and an ' +
     'unread ACL is never presented as an empty one. Within `acl`, `type` is ' +
     '`NFS4`, `POSIX1E`, or `DISABLED` for a path whose ACLs are switched off — ' +
     'there `entries` is null and access is governed by the Unix mode bits, ' +
-    'which this tool does not read, so it can say nothing about who has access. ' +
+    'which this tool does not read, so it can say nothing about who has access ' +
+    '— or null where the system named no type, which leaves the entries below ' +
+    'readable but says nothing about which vocabulary they are in. ' +
     '`trivial` true means the ACL grants nothing beyond the owner, the owning ' +
     'group and everyone else. `owner_user` and `owner_group` are the names of ' +
     'the path\'s owner, with `owner_uid` and `owner_gid` the raw ids, and they ' +
@@ -589,9 +704,12 @@ export const shareAccess: ReadOnlyTool = {
     'entry GRANTS NOTHING ON THIS PATH and exists to be inherited by what is ' +
     'created inside it, so its principal does not have the access it appears to ' +
     'have; null is an entry whose inheritance could not be read. This tool ' +
-    'reads access and changes none of it, and it does not report Unix mode ' +
-    'bits, SMB service-level restrictions, or which users are members of a ' +
-    'group named here.',
+    'reads access and changes none of it. It does not report Unix mode bits, ' +
+    'the SMB service\'s own bind addresses, which users are members of a group ' +
+    'named here, or whether a dataset is locked by encryption — so a principal ' +
+    'this reports as having access can still be stopped by something outside ' +
+    'these fields, and this is an upper bound on access rather than a proof of ' +
+    'it.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -615,10 +733,11 @@ export const shareAccess: ReadOnlyTool = {
   mutating: false,
   async handler({ system }, args) {
     const selector = parseSelector(args);
-    // Both protocols are read even when one is asked for, and the unwanted one
-    // is discarded by `selects`. Issuing one query would be cheaper and would
-    // report a share of the other protocol as not existing, which is the one
-    // answer here that a caller would repeat as fact.
+    // Both protocols are read even when one is asked for, and `selects` then
+    // discards the excluded one. The saving from skipping it is one query
+    // against a list of tens of rows, and it would buy a second code path
+    // through the matching and failure handling below — where the cost of a
+    // mistake is a share reported as not existing.
     const attempts = await Promise.all([
       attempt('SMB', () => smbTargets(system)),
       attempt('NFS', () => nfsTargets(system)),
@@ -641,15 +760,22 @@ export const shareAccess: ReadOnlyTool = {
     if (matches.length === 0) throw noMatch(selector, failures);
     if (matches.length > 1) throw ambiguous(selector, matches);
     const target = matches[0];
-    const { acl, error } = await readAcl(system, target.share);
+    // Neither read waits on the other: they are separate gates in front of the
+    // same share and one failing must not cost the other.
+    const [{ acl, error }, shareAcl] = await Promise.all([
+      readAcl(system, target.share),
+      readShareAcl(system, target.share),
+    ]);
     return {
       protocol: target.share.protocol,
       id: target.share.id,
       name: target.share.name,
       path: target.share.path,
       enabled: target.share.enabled,
-      hosts: target.hosts,
-      networks: target.networks,
+      read_only: target.readOnly,
+      nfs: target.nfs,
+      share_acl: shareAcl.entries,
+      share_acl_error: shareAcl.error,
       acl,
       acl_error: error,
       // A protocol that could not be listed is reported even though one share

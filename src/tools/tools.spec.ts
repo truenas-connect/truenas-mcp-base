@@ -2875,6 +2875,7 @@ describe('share_access', () => {
     path: '/mnt/tank/media',
     enabled: true,
     comment: 'Films and music',
+    readonly: false,
     ...over,
   });
 
@@ -2883,10 +2884,53 @@ describe('share_access', () => {
     path: '/mnt/tank/backups',
     enabled: true,
     comment: 'Nightly backups',
+    ro: false,
     hosts: ['10.0.0.5'],
     networks: ['10.0.0.0/24'],
+    mapall_user: null,
+    mapall_group: null,
+    maproot_user: null,
+    maproot_group: null,
     ...over,
   });
+
+  /** One entry of an SMB share-level ACL as `sharing.smb.getacl` reports one. */
+  const shareAce = (over: Record<string, unknown> = {}) => ({
+    ae_who_str: 'alice',
+    ae_who_id: { id_type: 'USER', id: 1001 },
+    ae_who_sid: 'S-1-5-21-1-1001',
+    ae_type: 'ALLOWED',
+    ae_perm: 'FULL',
+    ...over,
+  });
+
+  const shareAclOf = (over: Record<string, unknown> = {}) => ({
+    share_name: 'media',
+    share_acl: [shareAce()],
+    ...over,
+  });
+
+  /** The default NFS export's own say in who may reach it, once mapped. */
+  const nfs = {
+    hosts: ['10.0.0.5'],
+    networks: ['10.0.0.0/24'],
+    mapall_user: null,
+    mapall_group: null,
+    maproot_user: null,
+    maproot_group: null,
+  };
+
+  /** The default SMB share ACL, once mapped. */
+  const shareAcl = [
+    {
+      name: 'alice',
+      id: 1001,
+      kind: 'USER',
+      sid: 'S-1-5-21-1-1001',
+      access: 'ALLOWED',
+      permission: 'FULL',
+    },
+  ];
 
   /** One ACL entry as `filesystem.getacl` reports one, resolved. */
   const ace = (over: Record<string, unknown> = {}) => ({
@@ -2942,6 +2986,7 @@ describe('share_access', () => {
         ['sharing.smb.query']: [smbShare()],
         ['sharing.nfs.query']: [nfsExport()],
         ['filesystem.getacl']: aclOf(),
+        ['sharing.smb.getacl']: shareAclOf(),
         ...rows,
       },
       failures,
@@ -2961,16 +3006,18 @@ describe('share_access', () => {
     return entriesOf(result)[0];
   };
 
-  it('reports an SMB share by name, with the ACL on its path', async () => {
+  it('reports an SMB share by name, with both gates in front of its path', async () => {
     expect(await answered({ share: 'media' })).toEqual({
       protocol: 'SMB',
       id: 3,
       name: 'media',
       path: '/mnt/tank/media',
       enabled: true,
-      // SMB has no host or network restriction of its own.
-      hosts: null,
-      networks: null,
+      read_only: false,
+      // SMB has no export restrictions and no id mapping.
+      nfs: null,
+      share_acl: shareAcl,
+      share_acl_error: null,
       acl,
       acl_error: null,
       failures: [],
@@ -2985,12 +3032,146 @@ describe('share_access', () => {
       name: null,
       path: '/mnt/tank/backups',
       enabled: true,
-      hosts: ['10.0.0.5'],
-      networks: ['10.0.0.0/24'],
+      read_only: false,
+      nfs,
+      // NFS has no share-level ACL, so neither half of that answer is present.
+      share_acl: null,
+      share_acl_error: null,
       acl,
       acl_error: null,
       failures: [],
     });
+  });
+
+  it('does not read the SMB share ACL for an NFS export', async () => {
+    const { ctx, call } = fakeAccess({
+      ['sharing.smb.query']: [],
+      ['sharing.nfs.query']: [nfsExport()],
+      ['filesystem.getacl']: aclOf(),
+    });
+    await shareAccess.handler(ctx, { share: '/mnt/tank/backups' });
+    expect(call).not.toHaveBeenCalledWith('sharing.smb.getacl', expect.anything());
+  });
+
+  it('reads the SMB share ACL by the share name', async () => {
+    const { ctx, call } = fakeAccess({
+      ['sharing.smb.query']: [smbShare()],
+      ['sharing.nfs.query']: [],
+      ['filesystem.getacl']: aclOf(),
+      ['sharing.smb.getacl']: shareAclOf(),
+    });
+    await shareAccess.handler(ctx, { share: 'media' });
+    expect(call).toHaveBeenCalledWith('sharing.smb.getacl', [{ share_name: 'media' }]);
+  });
+
+  it('reports a read-only share as read-only, and an unreadable switch as null', async () => {
+    // It caps every write permission reported anywhere else in the answer.
+    expect((await answered({ share: 'media' }, { ['sharing.smb.query']: [smbShare({ readonly: true })] }))['read_only']).toBe(true);
+    expect(
+      (
+        await answered(
+          { share: '/mnt/tank/backups' },
+          { ['sharing.nfs.query']: [nfsExport({ ro: true })] },
+        )
+      )['read_only'],
+    ).toBe(true);
+    for (const unreadable of [undefined, null]) {
+      const result = await answered(
+        { share: 'media' },
+        { ['sharing.smb.query']: [smbShare({ readonly: unreadable })] },
+      );
+      expect(result['read_only']).toBeNull();
+    }
+  });
+
+  it('reports the mapping that replaces who arrives over an NFS export', async () => {
+    // The ACL then answers for that one account rather than for whoever
+    // connected, so an answer that omitted this would be about the wrong user.
+    const result = await answered(
+      { share: '/mnt/tank/backups' },
+      {
+        ['sharing.nfs.query']: [
+          nfsExport({ mapall_user: 'nobody', mapall_group: '', maproot_user: 'root' }),
+        ],
+      },
+    );
+    expect(result['nfs']).toEqual({
+      ...nfs,
+      mapall_user: 'nobody',
+      mapall_group: null,
+      maproot_user: 'root',
+      maproot_group: null,
+    });
+  });
+
+  it('names a share ACL principal every way the system had, and keeps one it did not', async () => {
+    const result = await answered(
+      { share: 'media' },
+      {
+        ['sharing.smb.getacl']: shareAclOf({
+          share_acl: [
+            shareAce({ ae_who_str: null, ae_who_id: null, ae_type: 'DENIED', ae_perm: 'READ' }),
+            shareAce({ ae_who_id: { id_type: 'GROUP', id: 2002 }, ae_who_sid: null }),
+            // Neither an object nor an entry with anything readable in it.
+            null,
+            shareAce({ ae_who_str: '', ae_who_id: { id_type: 'ALIAS', id: 'x' }, ae_who_sid: '', ae_type: 'MAYBE', ae_perm: '' }),
+          ],
+        }),
+      },
+    );
+    expect(result['share_acl']).toEqual([
+      {
+        name: null,
+        id: null,
+        kind: null,
+        sid: 'S-1-5-21-1-1001',
+        access: 'DENIED',
+        permission: 'READ',
+      },
+      { name: 'alice', id: 2002, kind: 'GROUP', sid: null, access: 'ALLOWED', permission: 'FULL' },
+      { name: null, id: null, kind: null, sid: null, access: null, permission: null },
+      { name: null, id: null, kind: null, sid: null, access: null, permission: null },
+    ]);
+  });
+
+  it('does not present an unread share ACL as a share nobody may reach', async () => {
+    // An empty share-level ACL would read as everyone denied, which is the
+    // opposite of a share that carries no share-level ACL at all.
+    const missing = await answered(
+      { share: 'media' },
+      { ['sharing.smb.getacl']: shareAclOf({ share_acl: undefined }) },
+    );
+    expect(missing['share_acl']).toBeNull();
+    expect(missing['share_acl_error']).toBe(
+      'the system reported no share-level ACL, so what it allows is not known here',
+    );
+
+    const failed = await answered(
+      { share: 'media' },
+      {},
+      { ['sharing.smb.getacl']: new Error('smb is down') },
+    );
+    expect(failed['share_acl']).toBeNull();
+    expect(failed['share_acl_error']).toBe('smb is down');
+    // The rest of the answer survives it.
+    expect(failed['acl']).toEqual(acl);
+
+    const nameless = await answered(
+      { share: '/mnt/tank/media' },
+      { ['sharing.smb.query']: [smbShare({ name: null })] },
+    );
+    expect(nameless['share_acl_error']).toBe(
+      'the system reported no name for this share, and the share ACL is read by name',
+    );
+  });
+
+  it('reports a share ACL that allows nobody as empty, which is not unread', async () => {
+    const result = await answered(
+      { share: 'media' },
+      { ['sharing.smb.getacl']: shareAclOf({ share_acl: [] }) },
+    );
+    expect(result['share_acl']).toEqual([]);
+    expect(result['share_acl_error']).toBeNull();
   });
 
   it('surfaces no field a later release adds', async () => {
@@ -3002,6 +3183,10 @@ describe('share_access', () => {
           future_field: 'added later',
           acl: [ace({ future_field: 'added later' })],
         }),
+        ['sharing.smb.getacl']: shareAclOf({
+          future_field: 'added later',
+          share_acl: [shareAce({ future_field: 'added later' })],
+        }),
       },
     );
     expect(Object.keys(result)).toEqual([
@@ -3010,11 +3195,21 @@ describe('share_access', () => {
       'name',
       'path',
       'enabled',
-      'hosts',
-      'networks',
+      'read_only',
+      'nfs',
+      'share_acl',
+      'share_acl_error',
       'acl',
       'acl_error',
       'failures',
+    ]);
+    expect(Object.keys((result['share_acl'] as object[])[0])).toEqual([
+      'name',
+      'id',
+      'kind',
+      'sid',
+      'access',
+      'permission',
     ]);
     expect(Object.keys(result['acl'] as object)).toEqual([
       'type',
@@ -3152,8 +3347,7 @@ describe('share_access', () => {
           ],
         },
       );
-      expect(result['hosts']).toEqual([]);
-      expect(result['networks']).toEqual([]);
+      expect(result['nfs']).toMatchObject({ hosts: [], networks: [] });
     }
   });
 
@@ -3165,15 +3359,13 @@ describe('share_access', () => {
       { share: '/mnt/tank/backups' },
       { ['sharing.nfs.query']: [nfsExport({ hosts: ['10.0.0.5', '', 42], networks: 'everyone' })] },
     );
-    expect(result['hosts']).toBeNull();
-    expect(result['networks']).toBeNull();
+    expect(result['nfs']).toMatchObject({ hosts: null, networks: null });
 
     const allDropped = await answered(
       { share: '/mnt/tank/backups' },
       { ['sharing.nfs.query']: [nfsExport({ hosts: [42], networks: [''] })] },
     );
-    expect(allDropped['hosts']).toBeNull();
-    expect(allDropped['networks']).toBeNull();
+    expect(allDropped['nfs']).toMatchObject({ hosts: null, networks: null });
   });
 
   it('states why a share that serves no path here has no ACL', async () => {
@@ -3206,7 +3398,7 @@ describe('share_access', () => {
         {},
         { ['filesystem.getacl']: reason },
       );
-      expect(result['hosts']).toEqual(['10.0.0.5']);
+      expect(result['nfs']).toEqual(nfs);
       expect(result['acl']).toBeNull();
       expect(result['acl_error']).toBe(text);
     }
