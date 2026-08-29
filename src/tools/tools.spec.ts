@@ -11773,6 +11773,20 @@ describe('fleet_health_rollup', () => {
     expect(row.reasons_truncated).toBe(true);
   });
 
+  it('counts every section the health report actually carries', async () => {
+    const { ctx } = failingSystem(healthy());
+    const report = (await systemHealthReport.handler(ctx, {})) as Record<string, unknown>;
+    // A section of that report is exactly a field carrying an `unavailable` of
+    // its own, which is the contract its own description states. Asserted against
+    // the live report rather than against a list written twice: a fifth section
+    // added there and not reached by this rollup fails here.
+    const sections = Object.values(report).filter(
+      (value) => typeof value === 'object' && value !== null && 'unavailable' in value,
+    );
+    expect(sections.length).toBeGreaterThan(0);
+    expect((await rollup()).sections_total).toBe(sections.length);
+  });
+
   it('is read-only and takes no arguments', () => {
     expect(fleetHealthRollup.mutating).toBe(false);
     expect(fleetHealthRollup.requiredRole).toBe(Role.ReadOnly);

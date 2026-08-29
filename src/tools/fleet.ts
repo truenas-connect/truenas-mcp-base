@@ -8,7 +8,7 @@ import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
 // this one, so there is no cycle.
 import { directoryServicesStatus } from '@/tools/accounts';
 import { certificatesList } from '@/tools/certificates';
-import { systemHealthReport } from '@/tools/reporting';
+import { HEALTH_SECTIONS, systemHealthReport } from '@/tools/reporting';
 import { sharesList } from '@/tools/shares';
 import { auditLogQuery, updateStatus } from '@/tools/system';
 
@@ -1186,13 +1186,6 @@ export const fleetComplianceReport: ReadOnlyTool = {
 const MAX_REASONS = 3;
 
 /**
- * The sections `system_health_report` carries, each of which can come back
- * unread. Named here so `sections_unreadable` is a count of something stated
- * rather than of prose parsed back out of the reasons.
- */
-const HEALTH_SECTIONS = ['pools', 'alerts', 'disks', 'updates'] as const;
-
-/**
  * The severities `system_health_report` states, WORST FIRST. Position is the
  * rank, so there is one place a severity can be added and no map that can
  * disagree with the order.
@@ -1347,6 +1340,9 @@ export const fleetHealthRollup: ReadOnlyTool = {
       reasons_reported: reasons.length,
       reasons: ordered.slice(0, MAX_REASONS),
       reasons_truncated: ordered.length > MAX_REASONS,
+      // The list comes from the report's own file rather than being restated
+      // here: a section added there has to be named in it to compile, so this
+      // count follows rather than drifting quietly one section behind.
       sections_total: HEALTH_SECTIONS.length,
       // Read off each section's own `unavailable` rather than off the reasons,
       // which state the same gap in prose.
