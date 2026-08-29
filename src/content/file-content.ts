@@ -129,9 +129,14 @@ export function createDownloadContentReader(
 
       const url = await mintDownloadUrl(client, base, path);
       // The whole file is on offer, so the tail is reached by discarding the
-      // front of it. `stat.size` is the size a moment ago: a log file that
-      // rotated or was appended to since will land the window somewhere other
-      // than its exact end, which `truncated` already covers.
+      // front of it — and how much to discard is decided from a size read a
+      // moment earlier. A log file that has grown since is served from an
+      // offset that is no longer its tail: the window fills before the body
+      // ends, `stoppedAtBound` records that, and the lines returned are older
+      // than the newest ones. `truncated` says the answer is not the whole
+      // file; it does not say which end of it was missed, and a caller that
+      // needs the newest line of a file being written to fast should read it
+      // again rather than treat one answer as final.
       // The window is the last `maxBytes` of the file: discard that many bytes
       // fewer than its size, then keep everything to the end. It has to reach
       // the end — a window stopping short would drop the newest line, which is
@@ -186,8 +191,11 @@ async function mintDownloadUrl(
       { cause: error },
     );
   }
-  // `core.download` is typed `unknown[]` and answers `[job_id, url]`.
-  const minted = answer[1];
+  // `core.download` is typed `unknown[]` and answers `[job_id, url]`. Typed is
+  // not the same as guaranteed, and indexing a non-array would leave this
+  // function by way of a raw TypeError rather than the failure the reader
+  // promises to fail with.
+  const minted = Array.isArray(answer) ? answer[1] : undefined;
   if (typeof minted !== 'string' || minted.length === 0) {
     throw new FileContentError(
       'TRANSPORT',
@@ -296,6 +304,12 @@ function toTail(path: string, window: ByteWindow, partial: boolean, maxLines: nu
   // A file ending in a newline splits to a trailing empty element, which is
   // the end of the last line rather than a line of its own.
   if (candidates[candidates.length - 1] === '') {
+    candidates.pop();
+  } else if (window.stoppedAtBound) {
+    // Nothing ended the read but the ceiling, so the bytes stop wherever it
+    // fell — mid-line unless the branch above already found a newline there.
+    // Half a line is not a line, at the end of the window any more than at
+    // the start of it.
     candidates.pop();
   }
   // A window that began mid-file begins mid-line, and there is no byte before

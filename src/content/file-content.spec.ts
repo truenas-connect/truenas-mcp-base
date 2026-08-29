@@ -213,6 +213,26 @@ describe('createDownloadContentReader', () => {
       });
     });
 
+    it('does not return the half line the ceiling stopped on', async () => {
+      // stat said 10 bytes and the body is 20 — the file grew, or the system
+      // contradicted itself — so the read fills and stops inside "ccc". Two
+      // whole lines is the honest answer; "cc" is not a line.
+      const { files } = readerFor('aaa\nbbb\nccc\nddd\neee\n', { size: 10, maxBytes: 10 });
+      await expect(files.readTail('/var/log/app.log', 10)).resolves.toEqual({
+        path: '/var/log/app.log',
+        lines: ['aaa', 'bbb'],
+        truncated: true,
+      });
+    });
+
+    it('keeps the last line when the ceiling fell exactly on a newline', async () => {
+      const { files } = readerFor('aaa\nbbb\nccc\n', { size: 8, maxBytes: 8 });
+      await expect(files.readTail('/var/log/app.log', 10)).resolves.toMatchObject({
+        lines: ['aaa', 'bbb'],
+        truncated: true,
+      });
+    });
+
     it('bounds a server that returns far more than its own stat reported', async () => {
       // stat says 20 bytes; the body is 200. Nothing about the answer may grow
       // with the body — that is the whole point of bounding on this side.
@@ -383,6 +403,13 @@ describe('createDownloadContentReader', () => {
     it('is reported when the system returns no URL', async () => {
       await transportFailure(
         { 'core.download': downloadOf(null) },
+        fetcherOf({ status: 200, body: null }),
+      );
+    });
+
+    it('is reported, rather than thrown raw, when the system answers no list at all', async () => {
+      await transportFailure(
+        { 'core.download': () => of('not a list') },
         fetcherOf({ status: 200, body: null }),
       );
     });
