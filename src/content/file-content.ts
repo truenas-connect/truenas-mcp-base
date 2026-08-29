@@ -109,13 +109,21 @@ export function createDownloadContentReader(
       if (stat.type === 'DIRECTORY') {
         throw new FileContentError('NOT_A_FILE', path, `"${path}" is a directory, not a file`);
       }
+      // Everything below is arithmetic on the size, so a size that is not one
+      // is a failure to read rather than a number to compute with. Saying so
+      // is what keeps it out of the empty-file answer below, which asserts
+      // that the file was read and held nothing.
+      if (!Number.isFinite(stat.size) || stat.size < 0) {
+        throw new FileContentError(
+          'UNREADABLE',
+          path,
+          `The system reported no usable size for "${path}"`,
+        );
+      }
       // A file of no bytes is an empty answer, not a failure — and answering
       // it from `stat` alone is also what keeps a zero-length file from
-      // costing a download. `> 0` rather than `!== 0` so a size the system
-      // reported as something other than a number lands here too, where the
-      // answer is "no content read", instead of poisoning the arithmetic
-      // below into an unbounded skip.
-      if (!(stat.size > 0)) {
+      // costing a download.
+      if (stat.size === 0) {
         return { path, lines: [], truncated: false };
       }
 
@@ -216,12 +224,15 @@ async function readWindow(
   try {
     response = await fetch(url);
   } catch (error) {
-    throw new FileContentError(
-      'TRANSPORT',
-      path,
-      `Downloading "${path}" failed: ${toSystemError(error).message}`,
-      { cause: error },
-    );
+    // The adapter's own message is NOT quoted here, unlike the API-client
+    // failures above. A fetch implementation names the URL it was asked for in
+    // its message — `node-fetch` says "request to <url> failed" — and that URL
+    // carries the auth token. It travels on `cause` instead, where a debugger
+    // can reach it and the audit trail, which records a failure by its
+    // message, cannot.
+    throw new FileContentError('TRANSPORT', path, `Downloading "${path}" failed`, {
+      cause: error,
+    });
   }
   if (response.status < 200 || response.status > 299) {
     throw new FileContentError(
@@ -259,12 +270,10 @@ async function readWindow(
       kept += chunk.length;
     }
   } catch (error) {
-    throw new FileContentError(
-      'TRANSPORT',
-      path,
-      `Reading the download of "${path}" failed: ${toSystemError(error).message}`,
-      { cause: error },
-    );
+    // Not quoted, for the reason the fetch failure above gives.
+    throw new FileContentError('TRANSPORT', path, `Reading the download of "${path}" failed`, {
+      cause: error,
+    });
   } finally {
     // Always, not only on the bounded exit: a body left unread holds the
     // connection open, and the ceiling is precisely the case that leaves one.

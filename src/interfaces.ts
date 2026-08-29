@@ -77,6 +77,11 @@ export const fullAccessRoleMapper: RoleMapper = {
  * library runs in both.
  */
 export interface ContentByteReader {
+  /**
+   * The next chunk, or `{ done: true }` at the end of the body. A chunk handed
+   * out here belongs to the caller: a reader must not write into it again,
+   * because the bytes are held as views until the whole window is assembled.
+   */
   read(): Promise<{ done: boolean; value?: Uint8Array }>;
   /**
    * Releases the underlying resource. Called once the byte bound has stopped

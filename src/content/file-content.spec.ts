@@ -300,15 +300,21 @@ describe('createDownloadContentReader', () => {
       expect(call).toHaveBeenCalledWith('filesystem.stat', ['/var/log/app.log']);
     });
 
-    it('reads a size the system reported as something other than a number as no content', async () => {
-      const { client } = fakeClient({ 'filesystem.stat': () => of({ size: null, type: 'FILE' }) });
-      const files = createDownloadContentReader({
-        client,
-        baseUrl: BASE,
-        fetch: fetcherOf({ status: 200, body: null }),
-      });
-      await expect(files.readTail('/var/log/app.log', 10)).resolves.toMatchObject({ lines: [] });
-    });
+    it.each([null, Number.NaN, -1])(
+      'is not what a size of %s is read as — that is unreadable, not empty',
+      async (size) => {
+        const { client } = fakeClient({ 'filesystem.stat': () => of({ size, type: 'FILE' }) });
+        const files = createDownloadContentReader({
+          client,
+          baseUrl: BASE,
+          fetch: fetcherOf({ status: 200, body: null }),
+        });
+        await expect(files.readTail('/var/log/app.log', 10)).rejects.toMatchObject({
+          reason: 'UNREADABLE',
+          path: '/var/log/app.log',
+        });
+      },
+    );
   });
 
   describe('a path that cannot be read', () => {
@@ -389,10 +395,15 @@ describe('createDownloadContentReader', () => {
     });
 
     it('is reported when the fetch itself rejects', async () => {
+      // A fetch implementation names the URL it was given in its own message,
+      // so that message is carried on `cause` and never interpolated into
+      // one the audit trail will record.
+      const reason = new Error(`request to ${BASE}${MINTED} failed: ECONNREFUSED`);
       const error = await transportFailure({ 'core.download': downloadOf() }, () =>
-        Promise.reject(new Error('ECONNREFUSED')),
+        Promise.reject(reason),
       );
-      expect(error.message).toContain('ECONNREFUSED');
+      expect(error.message).not.toContain(TOKEN);
+      expect(error.cause).toBe(reason);
     });
 
     it('is reported when the download answers with an error status', async () => {
@@ -411,15 +422,17 @@ describe('createDownloadContentReader', () => {
     });
 
     it('is reported when the body fails part-way through', async () => {
+      const reason = new Error(`reading ${BASE}${MINTED} failed: stream reset`);
       const body: ContentByteReader = {
-        read: () => Promise.reject(new Error('stream reset')),
+        read: () => Promise.reject(reason),
         cancel: () => Promise.resolve(undefined),
       };
       const error = await transportFailure(
         { 'core.download': downloadOf() },
         fetcherOf({ status: 200, body }),
       );
-      expect(error.message).toContain('stream reset');
+      expect(error.message).not.toContain(TOKEN);
+      expect(error.cause).toBe(reason);
     });
   });
 
