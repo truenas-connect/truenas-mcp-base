@@ -111,6 +111,7 @@ export {
   reportingDiskIo,
   reportingSpaceTrends,
   reportingAppVmUsage,
+  servicesStatus,
   haStatus,
   systemHealthReport,
   fleetComplianceReport,
