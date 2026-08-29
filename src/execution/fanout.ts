@@ -24,7 +24,13 @@ export type SystemResult<T> =
   | { system: string; status: 'SUCCESS'; value: T }
   | { system: string; status: 'ERROR'; error: SystemError };
 
-function toSystemError(error: unknown): SystemError {
+/**
+ * Reads whatever shape the client threw into the one structured form the core
+ * reports failures in. Exported so the content seam reads a thrown API error
+ * the same way the fan-out does, rather than growing a second reader that can
+ * drift from this one.
+ */
+export function toSystemError(error: unknown): SystemError {
   const message = error instanceof Error ? error.message : String(error);
   const source = (
     typeof error === 'object' && error !== null ? error : {}

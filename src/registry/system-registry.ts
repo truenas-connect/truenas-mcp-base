@@ -1,7 +1,7 @@
 import { createTrueNasClient, type TrueNasApiClient } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { ApiSurface, SystemHandle } from '@/catalog/tool';
-import { CredentialProvider, SystemSpec } from '@/interfaces';
+import { CredentialProvider, FileContentReader, SystemSpec } from '@/interfaces';
 
 /** How a tool call addresses systems: one name, a list of names, or `all`. */
 export type SystemSelector = string | string[] | undefined;
@@ -136,6 +136,24 @@ export const defaultClientFactory: ClientFactory = async (spec) => {
   return client;
 };
 
+/** How a system is addressed, without the credential it is reached with. */
+export type SystemTarget = Pick<SystemSpec, 'name' | 'hostnames'>;
+
+/**
+ * Builds the bounded-content seam for one connected system, or answers
+ * `undefined` to leave that system without one.
+ *
+ * Optional, and absent by default, because the seam needs an HTTP fetch and
+ * the core will not choose one (see `ContentFetcher`). It is handed the
+ * hostnames rather than the whole {@link SystemSpec} deliberately: the content
+ * seam has no business holding the API key, and the download URL it works from
+ * carries its own single-use token.
+ */
+export type ContentReaderFactory = (
+  target: SystemTarget,
+  client: TrueNasApiClient<ApiSurface>,
+) => FileContentReader | undefined;
+
 /**
  * Populates a registry from a {@link CredentialProvider} — the standalone
  * server calls this at startup, the Connect adapter at session start.
@@ -146,6 +164,7 @@ export async function connectSystems(
   registry: SystemRegistry,
   provider: CredentialProvider,
   clientFactory: ClientFactory = defaultClientFactory,
+  contentReaderFactory?: ContentReaderFactory,
 ): Promise<void> {
   const specs = await provider.getSystems();
   // Both checks run before anything connects, so the add loop below cannot
@@ -159,7 +178,24 @@ export async function connectSystems(
     seen.add(spec.name);
   }
   const results = await Promise.allSettled(
-    specs.map(async (spec) => ({ spec, client: await clientFactory(spec) })),
+    specs.map(async (spec) => {
+      const client = await clientFactory(spec);
+      try {
+        // Built here rather than in the add loop below, so that a factory
+        // which throws becomes an ordinary connect failure and takes the
+        // rollback path — the add loop still cannot throw part-way through
+        // and strand the clients it has not reached yet.
+        const files = contentReaderFactory?.({ name: spec.name, hostnames: spec.hostnames }, client);
+        return { spec, client, files };
+      } catch (error) {
+        try {
+          client.close();
+        } catch {
+          // Best-effort: a throwing close must not replace the real reason.
+        }
+        throw error;
+      }
+    }),
   );
 
   const failures = results.filter((r) => r.status === 'rejected');
@@ -185,7 +221,8 @@ export async function connectSystems(
 
   for (const result of results) {
     if (result.status === 'fulfilled') {
-      registry.add({ name: result.value.spec.name, client: result.value.client });
+      const { spec, client, files } = result.value;
+      registry.add({ name: spec.name, client, files });
     }
   }
 }

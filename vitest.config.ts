@@ -47,6 +47,9 @@ export default defineConfig({
         'src/registry/system-registry.ts': { branches: 96, statements: 97 },
         'src/execution/confirmation.ts': { branches: 97, statements: 97 },
         'src/catalog/catalog.ts': { branches: 95, statements: 96 },
+        // The content seam holds two invariants nothing else can: the byte
+        // bound, and the download URL never reaching a caller.
+        'src/content/file-content.ts': { branches: 100, statements: 100 },
       },
     },
   },

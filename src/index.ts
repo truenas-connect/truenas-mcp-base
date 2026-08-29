@@ -20,6 +20,11 @@ export type {
   RoleMapper,
   AuditEvent,
   AuditSink,
+  ContentByteReader,
+  ContentFetchResponse,
+  ContentFetcher,
+  FileContentReader,
+  FileTail,
 } from '@/interfaces';
 
 // ── Catalog ──────────────────────────────────────────────────────────────────
@@ -42,7 +47,19 @@ export {
   connectSystems,
   defaultClientFactory,
 } from '@/registry/system-registry';
-export type { SystemSelector, ClientFactory } from '@/registry/system-registry';
+export type {
+  SystemSelector,
+  ClientFactory,
+  ContentReaderFactory,
+  SystemTarget,
+} from '@/registry/system-registry';
+
+// ── Bounded file content ─────────────────────────────────────────────────────
+export { createDownloadContentReader, FileContentError } from '@/content/file-content';
+export type {
+  DownloadContentReaderOptions,
+  FileContentFailure,
+} from '@/content/file-content';
 
 // ── Execution ────────────────────────────────────────────────────────────────
 export { ToolExecutor } from '@/execution/executor';
