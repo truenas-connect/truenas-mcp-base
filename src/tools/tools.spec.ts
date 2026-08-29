@@ -6,6 +6,7 @@ import {
   alertSettings,
   alertsList,
   appsList,
+  auditLogQuery,
   certificatesList,
   cloudCredentialsList,
   cloudsyncTasksList,
@@ -75,10 +76,11 @@ function failingSystem(
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the twenty-eight sketch tools', () => {
+  it('registers the twenty-nine sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
+      'audit_log_query',
       'storage_pool_status',
       'storage_pool_topology',
       'storage_scrub_history',
@@ -111,6 +113,12 @@ describe('createDefaultCatalog', () => {
   it('advertises system_update_status to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
       'system_update_status',
+    );
+  });
+
+  it('advertises audit_log_query to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'audit_log_query',
     );
   });
 
@@ -447,6 +455,388 @@ describe('system_update_status', () => {
     });
     await updateStatus.handler(ctx, {});
     expect(call.mock.calls.map((args) => args[0])).toEqual(['update.status', 'system.version']);
+  });
+});
+
+describe('audit_log_query', () => {
+  /**
+   * A fixed present, so the default window is a fixed interval rather than one
+   * that moves with the clock. Only `Date` is faked, as in `tasks_recent_runs`:
+   * the tool reads the clock and nothing here schedules anything.
+   */
+  const NOW = 1_700_000_000_000; // 2023-11-14T22:13:20.000Z
+  /** NOW minus the tool's 24-hour default window. */
+  const WINDOW_START = NOW - 24 * 60 * 60 * 1000; // 2023-11-13T22:13:20.000Z
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * An audit entry as `audit.query` reports one, recorded a minute ago.
+   *
+   * `address`, `session`, `service_data` and the whole of `event_data` beyond
+   * the method are here to be dropped, and the password among the parameters is
+   * a real string for the same reason a job's arguments carry one in
+   * `tasks_recent_runs`: the test that no secret survives is only worth
+   * anything if one was there to survive.
+   */
+  const entry = (over: Record<string, unknown> = {}) => ({
+    audit_id: '5b4b1c9e-1f1e-4a3b-9f6a-2f0f0f0f0f0f',
+    message_timestamp: 1_699_999_940,
+    timestamp: { $date: NOW - 60_000 },
+    address: '10.0.0.5',
+    username: 'alice',
+    session: 'a5f0c2d1',
+    service: 'MIDDLEWARE',
+    service_data: { vers: { major: 25, minor: 4 }, origin: '10.0.0.5:54321' },
+    event: 'METHOD_CALL',
+    event_data: {
+      method: 'user.update',
+      params: [1, { password: 'SECRET-PARAMETER-MATERIAL' }],
+      description: 'Update user alice',
+      authenticated: true,
+      authorized: true,
+    },
+    success: true,
+    ...over,
+  });
+
+  /** The whole result, for the fields around the entries. */
+  const queried = async (
+    rows: unknown,
+    args: Record<string, unknown> = {},
+  ): Promise<{
+    entries: Record<string, unknown>[];
+    truncated: boolean;
+    limit: number;
+    since: string;
+  }> => {
+    const { ctx } = fakeSystem({ ['audit.query']: rows });
+    return (await auditLogQuery.handler(ctx, args)) as {
+      entries: Record<string, unknown>[];
+      truncated: boolean;
+      limit: number;
+      since: string;
+    };
+  };
+
+  /** Just the entries. */
+  const listed = async (
+    rows: unknown[],
+    args: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>[]> => (await queried(rows, args)).entries;
+
+  /** One entry, differing only in the fields the case is about. */
+  const one = async (over: Record<string, unknown>): Promise<Record<string, unknown>> =>
+    (await listed([entry(over)]))[0];
+
+  it('reports when, who, which service, which method and whether it worked', async () => {
+    expect(await listed([entry()])).toEqual([
+      {
+        timestamp: '2023-11-14T22:12:20.000Z',
+        user: 'alice',
+        service: 'MIDDLEWARE',
+        event: 'METHOD_CALL',
+        method: 'user.update',
+        success: true,
+      },
+    ]);
+  });
+
+  it('states the bound and the window it applied', async () => {
+    expect(await queried([entry()])).toMatchObject({
+      truncated: false,
+      limit: 100,
+      since: '2023-11-13T22:13:20.000Z',
+    });
+  });
+
+  it('returns an empty list, not an error, when nothing matched', async () => {
+    // The window it was taken from comes back with it, so an empty result is
+    // readable as "nothing in the last day" rather than as "nothing ever".
+    expect(await queried([])).toEqual({
+      entries: [],
+      truncated: false,
+      limit: 100,
+      since: '2023-11-13T22:13:20.000Z',
+    });
+  });
+
+  it('returns no address, session, parameters or field a later release adds', async () => {
+    const result = await one({ future_field: 'added by a later release' });
+    expect(Object.keys(result)).toEqual([
+      'timestamp',
+      'user',
+      'service',
+      'event',
+      'method',
+      'success',
+    ]);
+    expect(JSON.stringify(result)).not.toContain('added by a later release');
+    expect(JSON.stringify(result)).not.toContain('10.0.0.5');
+    expect(JSON.stringify(result)).not.toContain('a5f0c2d1');
+  });
+
+  it('never returns the parameters an audited call was made with', async () => {
+    expect(JSON.stringify(await listed([entry()]))).not.toContain('SECRET-PARAMETER-MATERIAL');
+  });
+
+  it('reads the method out of the event data, and nothing else of it', async () => {
+    expect(await one({ event_data: { method: 'pool.dataset.delete' } })).toMatchObject({
+      method: 'pool.dataset.delete',
+    });
+    // An event that is not a call, one whose data names no method, and one
+    // whose data is not a record at all: each is a null method beside an
+    // `event` that still says what kind of entry it is.
+    expect(await one({ event: 'AUTHENTICATION', event_data: null })).toMatchObject({
+      event: 'AUTHENTICATION',
+      method: null,
+    });
+    expect(await one({ event_data: { description: 'no method here' } })).toMatchObject({
+      method: null,
+    });
+    expect(await one({ event_data: { method: '' } })).toMatchObject({ method: null });
+    expect(await one({ event_data: 'METHOD_CALL' })).toMatchObject({ method: null });
+  });
+
+  it('reports an outcome the system did not record as null, not as a failure', async () => {
+    expect(await one({ success: false })).toMatchObject({ success: false });
+    expect(await one({ success: null })).toMatchObject({ success: null });
+    expect(await one({ success: 'true' })).toMatchObject({ success: null });
+  });
+
+  it('reports a user, service or event the system sent as empty as null', async () => {
+    expect(await one({ username: '', service: null, event: 42 })).toMatchObject({
+      user: null,
+      service: null,
+      event: null,
+    });
+  });
+
+  it('reads a recorded time however the middleware spelled it', async () => {
+    const spellings: [unknown, string | null][] = [
+      [{ $date: NOW - 60_000 }, '2023-11-14T22:12:20.000Z'],
+      [NOW - 60_000, '2023-11-14T22:12:20.000Z'],
+      ['2023-11-14T22:12:20Z', '2023-11-14T22:12:20.000Z'],
+      ['2023-11-14T22:12Z', '2023-11-14T22:12:00.000Z'],
+      ['2023-11-14T22:12:20.123456', '2023-11-14T22:12:20.123Z'],
+      ['2023-11-14 22:12:20', '2023-11-14T22:12:20.000Z'],
+      ['2023-11-15T00:12:20+02:00', '2023-11-14T22:12:20.000Z'],
+      ['2023-11-14T20:12:20-02:00', '2023-11-14T22:12:20.000Z'],
+      ['2023-11-14', '2023-11-14T00:00:00.000Z'],
+      // Not a time this tool reads, and each would be a confidently wrong
+      // instant if it were guessed at.
+      ['14/11/2023 22:12', null],
+      ['2023-11-31T00:00:00Z', null],
+      ['2023-11-14T25:00:00Z', null],
+      ['2023-11-14T22:99:00Z', null],
+      ['2023-11-14T22:12:99Z', null],
+      ['2023-11-14T22:12:20+99:00', null],
+      ['2023-11-14T22:12:20-00:99', null],
+      ['0050-11-14T22:12:20Z', null],
+      [Number.NaN, null],
+      [8.64e15 + 1, null],
+      [{ $date: 'yesterday' }, null],
+      [true, null],
+      [null, null],
+    ];
+    for (const [timestamp, expected] of spellings) {
+      // Every case is inside the default window or unreadable, so none is
+      // dropped by it and each reaches the assertion.
+      expect((await one({ timestamp }))['timestamp']).toBe(expected);
+    }
+  });
+
+  it('bounds the result to the last 24 hours when nothing is asked for', async () => {
+    const rows = [
+      entry({ timestamp: { $date: WINDOW_START + 1 }, event_data: { method: 'inside' } }),
+      entry({ timestamp: { $date: WINDOW_START - 1 }, event_data: { method: 'outside' } }),
+      // Exactly at the bound is inside it: the window is "at or after".
+      entry({ timestamp: { $date: WINDOW_START }, event_data: { method: 'at-the-bound' } }),
+    ];
+    expect((await listed(rows)).map((row) => row['method'])).toEqual(['inside', 'at-the-bound']);
+  });
+
+  it('keeps an entry whose recorded time could not be read, under any window', async () => {
+    // Nothing places it outside the window, and an action disappearing because
+    // its timestamp was unreadable is the failure worth avoiding.
+    expect(await listed([entry({ timestamp: 'not a time' })], { since: '2023-11-14' })).toEqual([
+      expect.objectContaining({ timestamp: null }),
+    ]);
+  });
+
+  it('takes the window from `since` when it is given', async () => {
+    const rows = [
+      entry({ timestamp: { $date: WINDOW_START - 1000 }, event_data: { method: 'older' } }),
+      entry({ timestamp: { $date: NOW - 1000 }, event_data: { method: 'newer' } }),
+    ];
+    // A day before the default window start, so the older entry is now inside.
+    expect((await listed(rows, { since: '2023-11-12' })).map((row) => row['method'])).toEqual([
+      'newer',
+      'older',
+    ]);
+    expect((await listed(rows, { since: '2023-11-14T22:00:00Z' })).map((row) => row['method'])).toEqual(
+      ['newer'],
+    );
+  });
+
+  it('reads a `since` given without a timezone as UTC, not as this machine\'s zone', async () => {
+    expect((await queried([], { since: '2023-11-14 22:00:00' })).since).toBe(
+      '2023-11-14T22:00:00.000Z',
+    );
+    expect((await queried([], { since: '2023-11-14T22:00:00+02:00' })).since).toBe(
+      '2023-11-14T20:00:00.000Z',
+    );
+  });
+
+  it('refuses a `since` it cannot read rather than falling back to the default', async () => {
+    // Ignoring it would answer about the last day while the caller believes it
+    // asked about the last month.
+    for (const since of ['', 'yesterday', '2023-02-30', '2023-11-14T25:00:00Z', 1_700_000_000]) {
+      await expect(queried([], { since })).rejects.toThrow('"since" must be an ISO 8601');
+    }
+  });
+
+  it('narrows to one user, and asks the system to narrow too', async () => {
+    const { ctx, call } = fakeSystem({ ['audit.query']: [entry()] });
+    await auditLogQuery.handler(ctx, { user: 'alice' });
+    expect(call.mock.calls[0][0]).toBe('audit.query');
+    expect(call.mock.calls[0][1][0]).toMatchObject({
+      'query-filters': [['username', '=', 'alice']],
+      'query-options': { limit: 101, order_by: ['-message_timestamp'] },
+    });
+  });
+
+  it('checks the user filter again on what came back', async () => {
+    // An unrecognised query parameter is dropped rather than refused, so a
+    // middleware that did not apply the filter would otherwise answer about
+    // every account while looking exactly like an answer about one.
+    const rows = [entry(), entry({ username: 'bob' }), entry({ username: '' })];
+    expect((await listed(rows, { user: 'alice' })).map((row) => row['user'])).toEqual(['alice']);
+  });
+
+  it('checks the service filter again on what came back', async () => {
+    const rows = [entry(), entry({ service: 'SMB' }), entry({ service: null })];
+    expect((await listed(rows, { service: 'SMB' })).map((row) => row['service'])).toEqual(['SMB']);
+  });
+
+  it('names the trail to search only where the client lists it', async () => {
+    const { ctx, call } = fakeSystem({ ['audit.query']: [] });
+    await auditLogQuery.handler(ctx, { service: 'SMB' });
+    expect(call.mock.calls[0][1][0]).toMatchObject({
+      services: ['SMB'],
+      'query-filters': [['service', '=', 'SMB']],
+    });
+    // A service a later release adds is still asked for through the filter,
+    // which is untyped, rather than refused.
+    const later = fakeSystem({ ['audit.query']: [] });
+    await auditLogQuery.handler(later.ctx, { service: 'NFS' });
+    expect(later.call.mock.calls[0][1][0]).not.toHaveProperty('services');
+    expect(later.call.mock.calls[0][1][0]).toMatchObject({
+      'query-filters': [['service', '=', 'NFS']],
+    });
+  });
+
+  it('refuses a filter it cannot read', async () => {
+    await expect(queried([], { user: '' })).rejects.toThrow('"user" must be a non-empty string');
+    await expect(queried([], { service: 7 })).rejects.toThrow(
+      '"service" must be a non-empty string',
+    );
+    // Absent is not unreadable, and is what the unfiltered result is for.
+    expect(await listed([entry()], { user: null, service: undefined })).toHaveLength(1);
+  });
+
+  it('orders the entries newest first, with an unreadable time last', async () => {
+    const rows = [
+      entry({ timestamp: { $date: NOW - 3000 }, event_data: { method: 'middle' } }),
+      entry({ timestamp: 'not a time', event_data: { method: 'unplaced' } }),
+      entry({ timestamp: { $date: NOW - 1000 }, event_data: { method: 'newest' } }),
+      entry({ timestamp: null, event_data: { method: 'also-unplaced' } }),
+      entry({ timestamp: { $date: NOW - 5000 }, event_data: { method: 'oldest' } }),
+    ];
+    // Two entries neither of which can be placed keep the order the system sent
+    // them in, rather than being reordered against each other on nothing.
+    expect((await listed(rows)).map((row) => row['method'])).toEqual([
+      'newest',
+      'middle',
+      'oldest',
+      'unplaced',
+      'also-unplaced',
+    ]);
+  });
+
+  it('bounds the result at 100 and says so, dropping the oldest of what matched', async () => {
+    // 101 entries, a second apart and shuffled, so the bound has to be applied
+    // after the ordering for the oldest to be the one that goes.
+    const rows = Array.from({ length: 101 }, (unused, index) =>
+      entry({
+        timestamp: { $date: NOW - index * 1000 },
+        event_data: { method: `call-${index}` },
+      }),
+    ).reverse();
+    const result = await queried(rows);
+    expect(result.truncated).toBe(true);
+    expect(result.entries).toHaveLength(100);
+    expect(result.entries[0]['method']).toBe('call-0');
+    expect(result.entries.map((row) => row['method'])).not.toContain('call-100');
+  });
+
+  it('is not truncated by entries the window itself removed', async () => {
+    // 101 entries, all but two of them older than the window: the system held
+    // more than fit, and no more MATCHED than fit.
+    const rows = Array.from({ length: 101 }, (unused, index) =>
+      entry({ timestamp: { $date: index < 2 ? NOW - index * 1000 : WINDOW_START - 1000 } }),
+    );
+    const result = await queried(rows);
+    expect(result.truncated).toBe(false);
+    expect(result.entries).toHaveLength(2);
+  });
+
+  it('reports truncation it cannot rule out when the system ignored a filter', async () => {
+    // 101 entries in the window, of which the system should have returned only
+    // the two matching ones and returned every one instead: the entries it
+    // sent in place of the ones it filtered out stand between this result and
+    // however many further matches lie beyond the bound, and nothing here can
+    // count them.
+    const rows = Array.from({ length: 101 }, (unused, index) =>
+      entry({ timestamp: { $date: NOW - index * 1000 }, username: index < 2 ? 'alice' : 'bob' }),
+    );
+    const result = await queried(rows, { user: 'alice' });
+    expect(result.entries).toHaveLength(2);
+    expect(result.truncated).toBe(true);
+    // The same ignored filter over a trail that fitted whole is not truncated:
+    // everything the system holds was seen, whoever it belonged to.
+    expect((await queried(rows.slice(0, 100), { user: 'alice' })).truncated).toBe(false);
+  });
+
+  it('refuses an answer that is not a list of entries', async () => {
+    // `count: true` answers a number and `get: true` a single entry. Neither is
+    // asked for, and an empty result would read as an answer about the trail.
+    for (const answer of [3, entry(), null, undefined]) {
+      await expect(queried(answer)).rejects.toThrow(
+        'audit.query did not answer with a list of audit entries',
+      );
+    }
+  });
+
+  it('fails rather than answering empty when the trail could not be read', async () => {
+    // An empty list is an answer about the trail — nothing matched — and a
+    // trail that could not be read is not that answer.
+    const { ctx } = failingSystem({}, { ['audit.query']: new Error('audit dataset not mounted') });
+    await expect(auditLogQuery.handler(ctx, {})).rejects.toThrow('audit dataset not mounted');
+  });
+
+  it('never mutates: it reads the trail and nothing else', async () => {
+    const { ctx, call, query } = fakeSystem({ ['audit.query']: [entry()] });
+    await auditLogQuery.handler(ctx, {});
+    expect(call.mock.calls.map((args) => args[0])).toEqual(['audit.query']);
+    expect(query).not.toHaveBeenCalled();
   });
 });
 

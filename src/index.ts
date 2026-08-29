@@ -62,6 +62,7 @@ export {
   createDefaultCatalog,
   systemInfo,
   updateStatus,
+  auditLogQuery,
   poolStatus,
   poolTopology,
   scrubHistory,
