@@ -490,10 +490,11 @@ export const auditLogQuery: ReadOnlyTool = {
     'service the system is not auditing records nothing at all and so returns ' +
     'nothing here, which is indistinguishable from a quiet system: this tool ' +
     'reads the trail and cannot say whether a service is being written to it. ' +
-    'A trail that could not be read at all is an error naming what the system ' +
-    'said, not an empty list. This tool reads the audit trail. It does not ' +
-    'change what is audited, how long entries are kept, or anything else — ' +
-    'that is configuration, and it is not in this catalog.',
+    '`audit_config` reads the settings behind that question. A trail that ' +
+    'could not be read at all is an error naming what the system said, not an ' +
+    'empty list. This tool reads the audit trail. It does not change what is ' +
+    'audited, how long entries are kept, or anything else — that is ' +
+    'configuration, and `audit_config` reads it without changing it either.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -659,25 +660,40 @@ function scopeNames(value: unknown): string[] | null {
 }
 
 /**
- * What the system is configured to audit, as it reports it, or null where it
- * sent no configuration this tool could read.
+ * The services the system keeps audit configuration for, with what it listed
+ * beside each — or null where it sent no service configuration this tool could
+ * read.
+ *
+ * This is deliberately NOT read as "the services being audited", and the field
+ * it becomes is not named that way. The pinned client declares `MIDDLEWARE`,
+ * `SMB` and `SUDO` as required members of `enabled_services`, so all three are
+ * present on a system auditing none of them: presence is the middleware
+ * enumerating what it can audit, and it does not establish that any of it is
+ * switched on. Naming the field for the setting would state exactly the
+ * guarantee the read cannot deliver, which is what `app/CLAUDE.md` records as
+ * this repository's most common defect — and what `fleet_compliance_report`
+ * avoided by naming its own field `recording` after the evidence.
  *
  * A service is reported under the name the system spelled it with, so a service
  * a later TrueNAS release begins auditing is answerable here without a change —
  * these are values rather than fields, and the allowlist this file keeps is over
  * the fields of the result.
  *
+ * A name the system sent that this tool cannot read nulls the whole list, on
+ * the same all-or-nothing reading {@link scopeNames} takes of a scope and for
+ * the same reason: a list quietly one service shorter reads as a service the
+ * system does not audit, which is more than the read established.
+ *
  * Sorted by name, because the middleware sends a keyed object and the order of
  * its keys means nothing; leaving it alone would make the result differ between
  * two reads of the same unchanged configuration.
  */
-function enabledServices(value: unknown): { service: string; scope: string[] | null }[] | null {
+function configuredServices(value: unknown): { service: string; scope: string[] | null }[] | null {
   const services = recordOrNull(value);
   if (services === null) return null;
-  return Object.keys(services)
-    .filter((name) => name.length > 0)
-    .sort()
-    .map((service) => ({ service, scope: scopeNames(services[service]) }));
+  const names = Object.keys(services);
+  if (names.some((name) => name.length === 0)) return null;
+  return names.sort().map((service) => ({ service, scope: scopeNames(services[service]) }));
 }
 
 /**
@@ -705,22 +721,26 @@ export const auditConfig: ReadOnlyTool = {
     'reading one for the other is the mistake this tool exists to prevent — an ' +
     'empty trail cannot establish that a service is unaudited, because a ' +
     'service nobody audits and a service nobody has used both record nothing. ' +
-    '`enabled_services` is what the system lists under its audit ' +
-    'configuration, one entry per service, sorted by name. `service` is the ' +
-    'name as the system spelled it — `MIDDLEWARE` for the API the web UI, the ' +
-    'CLI and this tool all call, `SMB` for file share access, `SUDO` for ' +
-    'commands run as another user, and a name a later TrueNAS release adds is ' +
-    'passed through as the system spelled it. `scope` is what the system ' +
-    'listed beside that service, such as the SMB shares being audited; it is ' +
-    'an empty list where the system listed nothing beside it, and null where ' +
-    'it listed something this tool could not read as names. AN EMPTY `scope` ' +
-    'IS NOT "NOT AUDITED" — (unconfirmed) whether a service listing nothing is ' +
-    'auditing everything or nothing is not established by this read, and only ' +
-    'a non-empty `scope` says which named things are covered. ' +
-    '`enabled_services` ITSELF IS NULL WHERE THE SYSTEM REPORTED NO SERVICE ' +
-    'CONFIGURATION THIS TOOL COULD READ, and an empty list means the system ' +
-    'reported the configuration and listed no services in it — those are ' +
-    'different answers and null is never to be read as the empty one. ' +
+    '`services` is one entry per service the system keeps audit configuration ' +
+    'for, sorted by name. `service` is the name as the system spelled it — ' +
+    '`MIDDLEWARE` for the API the web UI, the CLI and this tool all call, ' +
+    '`SMB` for file share access, `SUDO` for commands run as another user, and ' +
+    'a name a later TrueNAS release adds is passed through as the system ' +
+    'spelled it. BEING LISTED HERE IS NOT "THIS SERVICE IS AUDITED": the ' +
+    'system enumerates every service it CAN audit, and reports all of them ' +
+    'whether or not any is switched on, so this tool cannot tell you from this ' +
+    'field alone that a service is being audited. `scope` is what the system ' +
+    'listed beside that service, such as the SMB shares being audited. A ' +
+    'NON-EMPTY `scope` IS THE ONE POSITIVE ANSWER HERE — it names things the ' +
+    'system says it audits for that service. An empty `scope` is the system ' +
+    'listing nothing beside it, and (unconfirmed) that establishes neither ' +
+    'that the service audits everything nor that it audits nothing. `scope` is ' +
+    'null where the system listed something this tool could not read as names, ' +
+    'which is not an empty scope. `services` ITSELF IS NULL WHERE THE SYSTEM ' +
+    'REPORTED NO SERVICE CONFIGURATION THIS TOOL COULD READ, and an empty list ' +
+    'means the system reported the configuration and named no services in it — ' +
+    'those are different answers and null is never to be read as the empty ' +
+    'one. ' +
     '`remote_logging_enabled` is whether audit records are also sent to a ' +
     'remote destination, and it is THREE-VALUED: true, false, or null where ' +
     'the system reported no value this tool could read. Null is NOT false — ' +
@@ -753,7 +773,7 @@ export const auditConfig: ReadOnlyTool = {
     // configuration does not appear in this result without a change here.
     const space = recordOrNull(settings['space']);
     return {
-      enabled_services: enabledServices(settings['enabled_services']),
+      services: configuredServices(settings['enabled_services']),
       // Not defaulted to false: a system that reported no value has not been
       // shown to be keeping its audit records on the box.
       remote_logging_enabled:

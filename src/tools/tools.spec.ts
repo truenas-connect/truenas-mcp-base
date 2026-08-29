@@ -941,11 +941,11 @@ describe('audit_config', () => {
 
   /** The services of a result, which is what most cases here are about. */
   const services = async (enabled: unknown): Promise<unknown> =>
-    (await read({ enabled_services: enabled }))['enabled_services'];
+    (await read({ enabled_services: enabled }))['services'];
 
   it('reports the settings through named fields and drops the rest', async () => {
     expect(await read()).toEqual({
-      enabled_services: [
+      services: [
         { service: 'MIDDLEWARE', scope: [] },
         { service: 'SMB', scope: ['audited-share'] },
         { service: 'SUDO', scope: [] },
@@ -988,8 +988,23 @@ describe('audit_config', () => {
     expect(await services({ SMB: 'audited-share' })).toEqual([{ service: 'SMB', scope: null }]);
   });
 
-  it('does not report a service the system named with nothing', async () => {
-    expect(await services({ '': [], SMB: [] })).toEqual([{ service: 'SMB', scope: [] }]);
+  it('nulls the whole list rather than dropping a service it could not name', async () => {
+    // The same all-or-nothing reading a scope takes: a list quietly one service
+    // shorter reads as a service the system does not audit.
+    expect(await services({ '': [], SMB: [] })).toBeNull();
+  });
+
+  it('does not claim a listed service is audited', async () => {
+    // The middleware enumerates what it CAN audit — the pinned client declares
+    // all three members required — so presence is not enablement, and the
+    // description says so rather than the field name implying otherwise.
+    const listed = await services({ MIDDLEWARE: [], SMB: [], SUDO: [] });
+    expect(listed).toEqual([
+      { service: 'MIDDLEWARE', scope: [] },
+      { service: 'SMB', scope: [] },
+      { service: 'SUDO', scope: [] },
+    ]);
+    expect(auditConfig.description).toContain('BEING LISTED HERE IS NOT "THIS SERVICE IS AUDITED"');
   });
 
   it('reports remote logging three-valued, and never defaults it to false', async () => {
