@@ -3777,13 +3777,17 @@ describe('iscsi_list', () => {
     ...over,
   });
 
-  /** An extent as `iscsi.extent.query` reports one. */
+  /**
+   * An extent as `iscsi.extent.query` reports one. A `DISK` extent carries
+   * BOTH `disk` and `path` — the system reports the device node in `path` too,
+   * so `path` is not evidence that an extent is file-backed.
+   */
   const extent = (over: Record<string, unknown> = {}) => ({
     id: 7,
     name: 'vmstore',
     type: 'DISK',
     disk: 'zvol/tank/vmstore',
-    path: null,
+    path: '/dev/zvol/tank/vmstore',
     enabled: true,
     locked: false,
     naa: '0x6589cfc000000',
@@ -3858,7 +3862,7 @@ describe('iscsi_list', () => {
               lun: 0,
               name: 'vmstore',
               type: 'DISK',
-              path: null,
+              path: '/dev/zvol/tank/vmstore',
               disk: 'zvol/tank/vmstore',
               enabled: true,
               locked: false,
@@ -3937,7 +3941,7 @@ describe('iscsi_list', () => {
     ]);
   });
 
-  it('reports a FILE extent by its path and a DISK extent by its device', async () => {
+  it('reports the backing store of a DISK extent and of a FILE one', async () => {
     const extents = (
       await onlyTarget({
         ['iscsi.extent.query']: [
@@ -3947,7 +3951,13 @@ describe('iscsi_list', () => {
         ['iscsi.targetextent.query']: [mapping(), mapping({ id: 5, extent: 8, lunid: 1 })],
       })
     )['extents'] as Record<string, unknown>[];
-    expect(extents[0]).toMatchObject({ type: 'DISK', disk: 'zvol/tank/vmstore', path: null });
+    // `path` is set on both kinds, so it is `disk` and `type` that separate
+    // them — a caller reading a set `path` as "file-backed" would be wrong.
+    expect(extents[0]).toMatchObject({
+      type: 'DISK',
+      disk: 'zvol/tank/vmstore',
+      path: '/dev/zvol/tank/vmstore',
+    });
     expect(extents[1]).toMatchObject({ type: 'FILE', disk: null, path: '/mnt/tank/iscsi/logs' });
   });
 
@@ -4139,19 +4149,25 @@ describe('iscsi_list', () => {
     expect(listing.unattributed_initiators).toMatchObject([{ target: 'tgt0' }]);
   });
 
-  it('issues every read without waiting on another', async () => {
+  it('issues every read before awaiting any of them', async () => {
     const { ctx, query } = fakeIscsi({
       ['iscsi.target.query']: [target()],
       ['iscsi.extent.query']: [extent()],
       ['iscsi.targetextent.query']: [mapping()],
       ['iscsi.global.sessions']: [session()],
     });
-    await iscsiList.handler(ctx, {});
+    const listing = iscsiList.handler(ctx, {});
+    // Asserted before the handler is awaited at all, which is what makes this
+    // about concurrency rather than order: every read is subscribed while the
+    // handler still holds the thread, so a handler that awaited one read
+    // before starting the next would have made one call by this point. The
+    // same assertion after the await passes either way.
     expect(query.mock.calls.map((one) => one[0])).toEqual([
       'iscsi.target.query',
       'iscsi.extent.query',
       'iscsi.targetextent.query',
       'iscsi.global.sessions',
     ]);
+    await listing;
   });
 });

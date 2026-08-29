@@ -202,8 +202,12 @@ export const iscsiList: ReadOnlyTool = {
     'stores mapped onto the target: `lun` is the logical unit number the ' +
     'initiator addresses it by, `id` the extent\'s numeric identity, `name` its ' +
     'name, and `type` `DISK` or `FILE` — a zvol or a file on a dataset. `disk` ' +
-    'is the backing device of a `DISK` extent and `path` the backing file of a ' +
-    '`FILE` extent, and each is null on the kind it does not apply to. ' +
+    'is the backing device and applies to a `DISK` extent alone, so it is null ' +
+    'on a `FILE` one. `path` is the backing store as a filesystem path and is ' +
+    'NOT limited to `FILE` extents: on a `DISK` extent the system reports the ' +
+    'device node there as well, so `path` being set does not make an extent ' +
+    'file-backed — `type` is what says that. Both are reported as the system ' +
+    'sent them, and either is null where it sent no value. ' +
     '`enabled` is whether the extent is switched on and `locked` whether its ' +
     'dataset is locked; a locked or disabled extent is mapped but serves no ' +
     'data, and both are null where the system reported no value. An extent ' +
