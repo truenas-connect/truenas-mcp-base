@@ -69,5 +69,6 @@ export {
   disksList,
   appsList,
   alertsList,
+  snapshotsList,
   createSnapshot,
 } from '@/tools/index';
