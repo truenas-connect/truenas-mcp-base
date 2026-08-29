@@ -1601,11 +1601,12 @@ export const reportingSpaceTrends: ReadOnlyTool = {
     'of them was observed at, which means the summed figures cover windows ' +
     'that may differ between datasets; and `datasets_observed` against ' +
     '`datasets_total`, which is how far the sum covers the pool at all. THAT ' +
-    'SUM IS NOT THE CHANGE IN THE POOL\'S USED SPACE and is a lower bound on ' +
-    'it: it omits every dataset not reported, every dataset with too few ' +
-    'snapshots, and space held only by snapshots of deleted data, which is ' +
-    'space a pool loses nothing by keeping and gains nothing by counting here. ' +
-    'Read it as the direction the datasets it names are moving in, and read ' +
+    'SUM IS NOT THE CHANGE IN THE POOL\'S USED SPACE, and is not a bound on it ' +
+    'in either direction: it omits every dataset not reported and every dataset ' +
+    'with too few snapshots — EACH OF WHICH MAY HAVE GROWN OR SHRUNK, so the ' +
+    'sum can fall on either side of the pool\'s own change — and it omits space ' +
+    'held only by snapshots of data since deleted. Read it as the direction the ' +
+    'datasets it names are moving in, against `datasets_observed`, and read ' +
     '`used_percent` for how full the pool is now. `unavailable` is null on an ' +
     'entry with a change to report and otherwise names why there is none — the ' +
     'system holds no snapshot of that dataset in the range, or none at two ' +
