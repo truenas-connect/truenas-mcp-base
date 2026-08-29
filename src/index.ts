@@ -61,6 +61,7 @@ export type { ConfirmationGate, ConfirmationServiceOptions } from '@/execution/c
 export {
   createDefaultCatalog,
   systemInfo,
+  updateStatus,
   poolStatus,
   poolTopology,
   scrubHistory,

@@ -28,6 +28,7 @@ import {
   snapshotsList,
   snapshotTasksList,
   tasksRecentRuns,
+  updateStatus,
   usersList,
   vmsList,
 } from '@/tools/index';
@@ -74,9 +75,10 @@ function failingSystem(
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the twenty-seven sketch tools', () => {
+  it('registers the twenty-eight sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
+      'system_update_status',
       'storage_pool_status',
       'storage_pool_topology',
       'storage_scrub_history',
@@ -104,6 +106,12 @@ describe('createDefaultCatalog', () => {
       'alert_settings',
       'snapshots_create',
     ]);
+  });
+
+  it('advertises system_update_status to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'system_update_status',
+    );
   });
 
   it('advertises alert_settings to a read-only credential', () => {
@@ -224,6 +232,221 @@ describe('createDefaultCatalog', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
       'network_config',
     );
+  });
+});
+
+describe('system_update_status', () => {
+  /** `update.status` as the middleware sends it on a system with an update. */
+  const report = (over: Record<string, unknown> = {}) => ({
+    code: 'NORMAL',
+    status: {
+      current_version: {
+        train: 'TrueNAS-SCALE-Fangtooth',
+        profile: 'GENERAL',
+        matches_profile: true,
+      },
+      new_version: {
+        version: '25.04.1',
+        manifest: {},
+        release_notes: null,
+        release_notes_url: 'https://example.invalid/notes',
+      },
+    },
+    error: null,
+    update_download_progress: null,
+    ...over,
+  });
+
+  /** The status of a check that reached the update server and found nothing. */
+  const upToDate = () => report({ status: { ...report().status, new_version: null } });
+
+  const reported = async (
+    rows: Partial<Record<string, unknown>> = {},
+    failures: Partial<Record<string, unknown>> = {},
+  ): Promise<Record<string, unknown>> => {
+    const { ctx } = failingSystem(
+      {
+        ['update.status']: report(),
+        ['system.version']: 'TrueNAS-SCALE-25.04.0',
+        ...rows,
+      },
+      failures,
+    );
+    return (await updateStatus.handler(ctx, {})) as Record<string, unknown>;
+  };
+
+  it('reports the candidate version, the train and the running version', async () => {
+    expect(await reported()).toEqual({
+      update_available: true,
+      current_version: 'TrueNAS-SCALE-25.04.0',
+      new_version: '25.04.1',
+      train: 'TrueNAS-SCALE-Fangtooth',
+      check_error: null,
+      version_error: null,
+    });
+  });
+
+  it('reports a system already up to date as an explicit no', async () => {
+    // Not an empty result: false is an answer, and it is the answer that has to
+    // stay distinct from the null below.
+    expect(await reported({ ['update.status']: upToDate() })).toEqual({
+      update_available: false,
+      current_version: 'TrueNAS-SCALE-25.04.0',
+      new_version: null,
+      train: 'TrueNAS-SCALE-Fangtooth',
+      check_error: null,
+      version_error: null,
+    });
+  });
+
+  it('distinguishes a check that could not run from a system with no update', async () => {
+    expect(
+      await reported({
+        ['update.status']: report({
+          code: 'ERROR',
+          status: null,
+          error: { errname: 'ENETUNREACH', reason: 'could not reach the update server' },
+        }),
+      }),
+    ).toEqual({
+      // Null rather than false: nothing has been established about this system.
+      update_available: null,
+      // The version read is separate and is unaffected by the failed check.
+      current_version: 'TrueNAS-SCALE-25.04.0',
+      new_version: null,
+      train: null,
+      check_error: 'could not reach the update server',
+      version_error: null,
+    });
+  });
+
+  it('does not read a status the system sent beside its own error', async () => {
+    // `code` is the system's verdict on its own check. A status behind an
+    // `ERROR` may be stale, and reporting it would answer "up to date" for a
+    // system that was never successfully asked.
+    expect(await reported({ ['update.status']: report({ code: 'ERROR' }) })).toMatchObject({
+      update_available: null,
+      new_version: null,
+      train: null,
+      check_error: 'the system reported no reason',
+    });
+  });
+
+  it('names the error name where the failure carried no reason', async () => {
+    expect(
+      await reported({
+        ['update.status']: report({
+          code: 'ERROR',
+          status: null,
+          error: { errname: 'ENOTCONN', reason: '' },
+        }),
+      }),
+    ).toMatchObject({ update_available: null, check_error: 'ENOTCONN' });
+  });
+
+  it('reports a check that failed while saying nothing as a failure', async () => {
+    expect(
+      await reported({
+        ['update.status']: report({
+          code: 'ERROR',
+          status: null,
+          error: { errname: '', reason: '' },
+        }),
+      }),
+    ).toMatchObject({ update_available: null, check_error: 'the system reported no reason' });
+  });
+
+  it('reports a system that answered normally with no status at all', async () => {
+    // Nothing went wrong that the system admits to, and there is still no
+    // answer in the payload — which is not "no update available".
+    expect(await reported({ ['update.status']: report({ status: null }) })).toMatchObject({
+      update_available: null,
+      check_error: 'the system reported no update status',
+    });
+  });
+
+  it('reports a train the system sent as empty as null', async () => {
+    expect(
+      await reported({
+        ['update.status']: report({
+          status: { ...report().status, current_version: { train: '' } },
+        }),
+      }),
+    ).toMatchObject({ update_available: true, train: null });
+  });
+
+  it('reports a candidate the system named with no version as null', async () => {
+    // Still an update available: the system said there is one, and only its
+    // name is missing.
+    expect(
+      await reported({
+        ['update.status']: report({
+          status: { ...report().status, new_version: { version: '' } },
+        }),
+      }),
+    ).toMatchObject({ update_available: true, new_version: null });
+  });
+
+  it('keeps the update answer when the running version could not be read', async () => {
+    expect(
+      await reported({}, { ['system.version']: new Error('connection reset') }),
+    ).toMatchObject({
+      update_available: true,
+      new_version: '25.04.1',
+      current_version: null,
+      version_error: 'connection reset',
+    });
+  });
+
+  it('names a version failure however the client rejected', async () => {
+    const reasons: [unknown, string][] = [
+      [{ reason: 'system.version failed' }, 'system.version failed'],
+      [{ message: 'connection reset' }, 'connection reset'],
+      ['ENOTCONN', 'ENOTCONN'],
+      [new Error(''), 'the system reported no reason'],
+      [{ code: 42 }, 'the system reported no reason'],
+      [null, 'the system reported no reason'],
+    ];
+    for (const [reason, expected] of reasons) {
+      expect((await reported({}, { ['system.version']: reason }))['version_error']).toBe(expected);
+    }
+  });
+
+  it('reports a version the system sent as empty as null, and not as a failure', async () => {
+    expect(await reported({ ['system.version']: '' })).toMatchObject({
+      current_version: null,
+      version_error: null,
+    });
+  });
+
+  it('returns no field a later release adds', async () => {
+    const result = await reported({
+      ['update.status']: report({
+        future_field: 'added by a later release',
+        status: {
+          ...report().status,
+          future_field: 'added by a later release',
+        },
+      }),
+    });
+    expect(Object.keys(result)).toEqual([
+      'update_available',
+      'current_version',
+      'new_version',
+      'train',
+      'check_error',
+      'version_error',
+    ]);
+    expect(JSON.stringify(result)).not.toContain('added by a later release');
+  });
+
+  it('never mutates: it checks for an update and does not apply one', async () => {
+    const { ctx, call } = failingSystem({
+      ['update.status']: report(),
+      ['system.version']: 'TrueNAS-SCALE-25.04.0',
+    });
+    await updateStatus.handler(ctx, {});
+    expect(call.mock.calls.map((args) => args[0])).toEqual(['update.status', 'system.version']);
   });
 });
 
