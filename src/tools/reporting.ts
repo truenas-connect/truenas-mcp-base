@@ -1587,8 +1587,9 @@ export const reportingSpaceTrends: ReadOnlyTool = {
     'reading them — and `truncated_datasets` is true when the system has more. ' +
     'At most a thousand snapshots are read per dataset, and no order is asked ' +
     'for, so they are an arbitrary thousand; `truncated_snapshots` is true ' +
-    'when some dataset had more, and the window observed for it is then ' +
-    'narrower than the range. Such a dataset that yielded no change SAYS SO IN ' +
+    'when some dataset had more, and the window observed for it may then be ' +
+    'narrower than the range — how much narrower is not knowable, since which ' +
+    'thousand were read is not. Such a dataset that yielded no change SAYS SO IN ' +
     '`unavailable` rather than reporting that the system holds no snapshot of ' +
     'it — the part not read cannot be spoken for. `pools` holds one entry per ' +
     'pool, each ' +
@@ -1615,8 +1616,11 @@ export const reportingSpaceTrends: ReadOnlyTool = {
     'reported for it yielded a change — each of those names its own reason — ' +
     'or that none of its datasets is among the ones reported at all, which the ' +
     'ten-dataset cap can do to a pool holding only small ones. ' +
-    'WHERE IT IS NON-NULL EVERY FIGURE DERIVED FROM THE HISTORY IS NULL, and ' +
-    'that is never a dataset that did not change: nothing was measured. ' +
+    'WHERE IT IS NON-NULL EVERY MEASUREMENT IS NULL — the two referenced ' +
+    'figures, the change, the rate and both instants — and that is never a ' +
+    'dataset that did not change: nothing was measured. `snapshots_observed` ' +
+    'is still reported there, and is what says whether the reason was none at ' +
+    'all or too few. ' +
     '`used_bytes` and the pool levels are read separately and are reported ' +
     'whatever `unavailable` says. Entries fail independently, so one dataset ' +
     'can report while another cannot. `start` and `end` are the range asked ' +
