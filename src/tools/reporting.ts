@@ -1,6 +1,13 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+// `system_health_report` is composite: it calls these four handlers rather than
+// the API, so that what it reports is by construction what those tools report.
+// None of the four imports this file, so there is no cycle.
+import { alertsList } from '@/tools/alerts';
+import { poolTopology } from '@/tools/pools';
+import { poolStatus } from '@/tools/storage';
+import { updateStatus } from '@/tools/system';
 
 /**
  * Reporting family: how busy a system was over a time range, rather than how
@@ -2091,6 +2098,679 @@ export const reportingAppVmUsage: ReadOnlyTool = {
       failures: [apps.failure, vms.failure, instances.failure].filter(
         (failure): failure is UsageFailure => failure !== null,
       ),
+    };
+  },
+};
+
+/**
+ * `system_health_report`: the requirements' own first question, answered in one
+ * call — "review all my TrueNAS systems' health and let me know of any
+ * potential issues or capacity concerns".
+ *
+ * It is COMPOSITE: it calls four existing tool handlers and adds no endpoint of
+ * its own. `storage_pool_status` gives pool health and capacity,
+ * `storage_pool_topology` the state of each device beneath those pools,
+ * `alerts_list` what the system is complaining about, and
+ * `system_update_status` whether it is behind. Answering the question from
+ * those four separately costs four round trips and an LLM deciding which four;
+ * this makes the headline feature reliable rather than emergent.
+ *
+ * Three properties are what the design is actually for, and each is a rule the
+ * code below follows rather than an implementation detail.
+ *
+ * **A section that failed is present and says so.** A health report that throws
+ * because one subsystem is unreachable is useless precisely when it is needed,
+ * so every read is caught and its section carries `unavailable` naming the
+ * reason. Nothing here rejects.
+ *
+ * **Counts and reasons are computed over everything; only the detail lists are
+ * capped.** {@link MAX_LISTED} bounds how many pools, alerts and devices are
+ * named individually, so the response has a size ceiling regardless of the
+ * system. It can therefore drop the line describing a finding — it can never
+ * drop the finding, which is in `reasons` and in the counts either way.
+ *
+ * **`OK` means every section was read and none of them raised anything.** A
+ * section that could not be read, an alert at a severity this report does not
+ * rank, a pool that reported no capacity: each is a reason of its own at
+ * `unknown`, which makes the verdict `UNKNOWN` rather than letting an absence
+ * of evidence read as evidence of health. That is the same distinction
+ * `system_update_status` and `ha_status` each keep, applied to the verdict.
+ *
+ * **The fields are re-normalized here rather than passed through.** A composed
+ * handler is typed `Promise<unknown>`, so every field is read back through a
+ * guard and named explicitly — which is also what keeps a field one of those
+ * four tools grows later out of this result without a change to this file.
+ */
+
+/**
+ * How many pools, alerts and devices the report names individually.
+ *
+ * The cap is on the DETAIL LISTS ONLY — see the note above. Ten is chosen
+ * against the systems this is asked about rather than as a round number: a
+ * TrueNAS system has a handful of pools, and ten of the worst alerts and ten
+ * failed devices are already more than a reader acts on in one sitting. Each
+ * list carries a `truncated` flag saying whether it left anything out.
+ */
+const MAX_LISTED = 10;
+
+/**
+ * The fill levels this report treats as capacity pressure.
+ *
+ * Both are read off ZFS's own behaviour rather than chosen here: allocation
+ * performance falls away as a pool approaches full, and TrueNAS raises its own
+ * `ZpoolCapacityWarning` at 80%. 90% is where the remaining headroom stops
+ * being enough to resolve the problem comfortably — a pool that full cannot
+ * always be relieved by deleting snapshots, because freeing space in ZFS
+ * briefly needs some.
+ */
+const CAPACITY_WARNING_PERCENT = 80;
+const CAPACITY_CRITICAL_PERCENT = 90;
+
+/**
+ * The alert severities TrueNAS raises, LEAST SEVERE FIRST. The same vocabulary
+ * and the same ordering `alert_settings` states for its `minimum_level`, which
+ * is the field that decides whether an alert is sent anywhere; this file reads
+ * the level off the alert itself.
+ *
+ * The list is the ordering AND the banding: position is the rank, and the two
+ * constants below name where each band starts, so there is one place a level
+ * can be added and no map that can disagree with the order.
+ */
+const ALERT_LEVELS = [
+  'INFO',
+  'NOTICE',
+  'WARNING',
+  'ERROR',
+  'CRITICAL',
+  'ALERT',
+  'EMERGENCY',
+] as const;
+
+/** Where the critical band starts. `ERROR` and above is something already broken. */
+const CRITICAL_FROM = ALERT_LEVELS.indexOf('ERROR');
+
+/** Where the warning band starts. Below it — `NOTICE`, `INFO` — is informational. */
+const WARNING_FROM = ALERT_LEVELS.indexOf('WARNING');
+
+/** The one ZFS device state that is healthy on any vdev. */
+const DEVICE_ONLINE = 'ONLINE';
+
+/**
+ * The two states that are healthy on a SPARE and nowhere else: `AVAIL` is an
+ * idle spare standing by, `INUSE` one that has been swapped in for a failed
+ * disk. Neither is a fault in the spare — and `INUSE` loses nothing, because
+ * the disk it stood in for is itself a leaf of the same tree and is counted
+ * there in whatever failed state it is in.
+ */
+const SPARE_STATES = ['AVAIL', 'INUSE'];
+
+/**
+ * The ZFS device states that make a pool unhealthy, as
+ * `storage_pool_topology`'s own description names them.
+ *
+ * Listed rather than derived from "not ONLINE", so that a state a later TrueNAS
+ * release adds is counted as UNRANKED rather than silently as a failure or
+ * silently as health. Unranked is its own count and its own reason: this report
+ * says it does not know what that state means, which is the answer that can be
+ * checked.
+ */
+const DEVICE_FAILED = ['FAULTED', 'DEGRADED', 'OFFLINE', 'UNAVAIL', 'REMOVED'];
+
+/** How severe a finding is. `unknown` is "not established", never "fine". */
+type Severity = 'critical' | 'warning' | 'unknown';
+
+/** The four sections of the report, each backed by exactly one composed tool. */
+type SectionName = 'pools' | 'alerts' | 'disks' | 'updates';
+
+/** One thing the report found, and which section found it. */
+interface Reason {
+  section: SectionName;
+  severity: Severity;
+  detail: string;
+}
+
+/** The verdict, worst first. `OK` is last because it is the narrowest claim. */
+type Verdict = 'CRITICAL' | 'WARNING' | 'UNKNOWN' | 'OK';
+
+/** A boolean the system reported, or null where it reported anything else. */
+function booleanOrNull(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
+/** `1 alert` / `2 alerts`, so that a reason reads as English at either count. */
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+/** A section that was read, or the reason it could not be. */
+interface SectionRead<T> {
+  value: T | null;
+  unavailable: string | null;
+}
+
+/**
+ * One composed tool's result, normalized, with a failure named rather than
+ * thrown. This is the whole of why the report cannot fail because one
+ * subsystem did.
+ *
+ * The read is passed as a thunk so that the call is made inside the `try`, which
+ * keeps this correct for a handler that throws before it returns a promise at
+ * all — the same reason `alerts.ts` passes its own supplementary read that way.
+ *
+ * `shape` runs inside the same `try`, deliberately. The composed handlers are
+ * typed `Promise<unknown>`, so each reader below takes the container it is given
+ * on the evidence of the tool it reads — an array of rows, or a record — and
+ * reads every FIELD within it through a guard. A handler that one day answers
+ * some other container makes its reader throw, and it lands in this same catch
+ * and is stated as the same kind of gap. One mechanism rather than two, and no
+ * branch here that no test can reach.
+ */
+async function section<T>(
+  read: () => Promise<unknown>,
+  shape: (answer: unknown) => T,
+): Promise<SectionRead<T>> {
+  try {
+    return { value: shape(await read()), unavailable: null };
+  } catch (reason) {
+    return { value: null, unavailable: errorText(reason) };
+  }
+}
+
+/** One pool, as this report states it. */
+interface PoolEntry {
+  name: string | null;
+  status: string | null;
+  healthy: boolean | null;
+  size_bytes: number | null;
+  allocated_bytes: number | null;
+  used_percent: number | null;
+}
+
+/**
+ * The pools `storage_pool_status` reported, with the one figure this report
+ * derives: how full each pool is, as a percentage of its own size.
+ *
+ * Null where it cannot be stated rather than zero — an unreadable size, an
+ * unreadable allocation, or a size of zero, none of which is a pool with room to
+ * spare. A pool whose capacity cannot be stated gets a reason of its own below.
+ */
+function poolEntries(answer: unknown): PoolEntry[] {
+  return (answer as Record<string, unknown>[]).map((row) => {
+    const size = numberOrNull(row['size_bytes']);
+    const allocated = numberOrNull(row['allocated_bytes']);
+    return {
+      name: textOrNull(row['name']),
+      status: textOrNull(row['status']),
+      healthy: booleanOrNull(row['healthy']),
+      size_bytes: size,
+      allocated_bytes: allocated,
+      used_percent:
+        size !== null && allocated !== null && size > 0
+          ? round1((allocated / size) * 100)
+          : null,
+    };
+  });
+}
+
+/** How a pool with no name of its own is referred to in a reason. */
+const UNNAMED_POOL = 'a pool the system did not name';
+
+/** What the pools section finds, over every pool and not only the listed ones. */
+function poolReasons(entries: PoolEntry[]): Reason[] {
+  const reasons: Reason[] = [];
+  for (const pool of entries) {
+    const named = pool.name ?? UNNAMED_POOL;
+    if (pool.healthy === false) {
+      reasons.push({
+        section: 'pools',
+        severity: 'critical',
+        detail: `pool ${named} is not healthy; the system reports its status as ${
+          pool.status ?? 'nothing this report could read'
+        }`,
+      });
+    } else if (pool.healthy === null) {
+      reasons.push({
+        section: 'pools',
+        severity: 'unknown',
+        detail: `pool ${named} did not report whether it is healthy`,
+      });
+    }
+    if (pool.used_percent === null) {
+      reasons.push({
+        section: 'pools',
+        severity: 'unknown',
+        detail: `pool ${named} reported no size and allocation this report could read, so how full it is is not established`,
+      });
+    } else if (pool.used_percent >= CAPACITY_CRITICAL_PERCENT) {
+      reasons.push({
+        section: 'pools',
+        severity: 'critical',
+        detail: `pool ${named} is ${pool.used_percent}% full`,
+      });
+    } else if (pool.used_percent >= CAPACITY_WARNING_PERCENT) {
+      reasons.push({
+        section: 'pools',
+        severity: 'warning',
+        detail: `pool ${named} is ${pool.used_percent}% full`,
+      });
+    }
+  }
+  return reasons;
+}
+
+/** One active alert, as this report states it. */
+interface AlertEntry {
+  level: string | null;
+  klass: string | null;
+  formatted: string | null;
+  dismissed: boolean | null;
+}
+
+/** The alerts `alerts_list` reported, read back through this report's own guards. */
+function alertEntries(answer: unknown): AlertEntry[] {
+  return (answer as Record<string, unknown>[]).map((row) => ({
+    level: textOrNull(row['level']),
+    klass: textOrNull(row['klass']),
+    formatted: textOrNull(row['formatted']),
+    dismissed: booleanOrNull(row['dismissed']),
+  }));
+}
+
+/**
+ * Where a level sits in {@link ALERT_LEVELS}, or -1 for one this report does not
+ * rank — a level the system spelled some other way, a level a later release
+ * adds, or no level at all.
+ */
+function alertRank(level: string | null): number {
+  return level === null ? -1 : ALERT_LEVELS.indexOf(level as (typeof ALERT_LEVELS)[number]);
+}
+
+/**
+ * How severe alerts at a rank are, or null where they are informational and
+ * produce no finding at all.
+ *
+ * An UNRANKED level is `unknown` rather than ignored. Reading a severity this
+ * report does not recognise as harmless is the fail-open worth avoiding: the
+ * system raised something, and what it raised has not been established.
+ */
+function alertSeverity(rank: number): Severity | null {
+  if (rank < 0) return 'unknown';
+  if (rank >= CRITICAL_FROM) return 'critical';
+  if (rank >= WARNING_FROM) return 'warning';
+  return null;
+}
+
+/** How many alerts stand at each level, most severe first. */
+function alertCounts(entries: AlertEntry[]): { level: string | null; count: number }[] {
+  const counts = new Map<string | null, number>();
+  for (const alert of entries) counts.set(alert.level, (counts.get(alert.level) ?? 0) + 1);
+  return [...counts.entries()]
+    .map(([level, count]) => ({ level, count }))
+    .sort(
+      (a, b) =>
+        alertRank(b.level) - alertRank(a.level) ||
+        (a.level ?? '').localeCompare(b.level ?? ''),
+    );
+}
+
+/** How a level the system did not name is referred to in a reason. */
+const UNNAMED_LEVEL = 'a severity the system did not name';
+
+/**
+ * What the alerts section finds — one reason per level that has any alerts at
+ * it, computed from the complete counts rather than from the listed alerts, so
+ * the cap on `most_severe` cannot hide a level.
+ */
+function alertReasons(counts: { level: string | null; count: number }[]): Reason[] {
+  const reasons: Reason[] = [];
+  for (const { level, count } of counts) {
+    const severity = alertSeverity(alertRank(level));
+    if (severity === null) continue;
+    reasons.push({
+      section: 'alerts',
+      severity,
+      detail:
+        severity === 'unknown'
+          ? `the system has raised ${plural(count, 'alert')} at ${
+              level ?? UNNAMED_LEVEL
+            }, a severity this report does not rank`
+          : `the system has raised ${plural(count, `${level} alert`)}`,
+    });
+  }
+  return reasons;
+}
+
+/** One device beneath a pool, as this report states it. */
+interface DeviceEntry {
+  pool: string | null;
+  name: string | null;
+  disk: string | null;
+  status: string | null;
+}
+
+/** What the walk over every pool's vdev tree accumulates. */
+interface DeviceTally {
+  total: number;
+  healthy: number;
+  unhealthy: number;
+  unranked: number;
+  /** Every device that is not healthy, in the order the tree was walked. */
+  notable: DeviceEntry[];
+}
+
+/**
+ * Whether a device's state is healthy, a failure, or one this report does not
+ * rank. `category` is the vdev role the device sits under, which is what makes
+ * a spare's own two states readable — see {@link SPARE_STATES}.
+ */
+function deviceState(
+  status: string | null,
+  category: string | null,
+): 'healthy' | 'unhealthy' | 'unranked' {
+  if (status === null) return 'unranked';
+  if (status === DEVICE_ONLINE) return 'healthy';
+  if (category === 'spare' && SPARE_STATES.includes(status)) return 'healthy';
+  if (DEVICE_FAILED.includes(status)) return 'unhealthy';
+  return 'unranked';
+}
+
+/** Add one device to the tally, and to `notable` where it is not healthy. */
+function countDevice(tally: DeviceTally, entry: DeviceEntry, category: string | null): void {
+  tally.total += 1;
+  const state = deviceState(entry.status, category);
+  if (state === 'healthy') {
+    tally.healthy += 1;
+    return;
+  }
+  if (state === 'unhealthy') tally.unhealthy += 1;
+  else tally.unranked += 1;
+  tally.notable.push(entry);
+}
+
+/**
+ * Walk one node of a vdev tree, counting its LEAVES.
+ *
+ * Only leaves are counted, and that is the whole reading: a grouping vdev
+ * carries a status of its own, but a DEGRADED mirror is degraded BECAUSE of a
+ * member, so counting both would report one failed disk as two problems. The
+ * member is where the answer is, and it is what `storage_pool_topology` exists
+ * to expose.
+ *
+ * A device being replaced nests under a `replacing` vdev, and a leaf whose disk
+ * the system can no longer resolve carries a null `disk` — both are ordinary
+ * here: the first is two leaves, and the second is a leaf located by its `name`
+ * in the tree rather than by a disk there is none of.
+ *
+ * A node carrying no readable `devices` is a leaf, which is the reading that
+ * makes this total: a node whose fields cannot be read at all still counts as
+ * one device, at `unranked`, rather than dropping out of the total silently.
+ */
+function walkDevices(
+  node: Record<string, unknown>,
+  category: string | null,
+  pool: string | null,
+  tally: DeviceTally,
+): void {
+  const children = node['devices'] as Record<string, unknown>[];
+  if (children.length > 0) {
+    for (const child of children) walkDevices(child, category, pool, tally);
+    return;
+  }
+  countDevice(
+    tally,
+    {
+      pool,
+      name: textOrNull(node['name']),
+      disk: textOrNull(node['disk']),
+      status: textOrNull(node['status']),
+    },
+    category,
+  );
+}
+
+/** Every device under every pool `storage_pool_topology` reported. */
+function deviceTally(answer: unknown): DeviceTally {
+  const tally: DeviceTally = { total: 0, healthy: 0, unhealthy: 0, unranked: 0, notable: [] };
+  for (const pool of answer as Record<string, unknown>[]) {
+    const name = textOrNull(pool['name']);
+    for (const vdev of pool['vdevs'] as Record<string, unknown>[]) {
+      walkDevices(vdev, textOrNull(vdev['category']), name, tally);
+    }
+  }
+  return tally;
+}
+
+/** What the disks section finds, from the complete counts rather than the list. */
+function deviceReasons(tally: DeviceTally): Reason[] {
+  const reasons: Reason[] = [];
+  if (tally.unhealthy > 0) {
+    reasons.push({
+      section: 'disks',
+      severity: 'critical',
+      detail: `ZFS reports ${plural(tally.unhealthy, 'device')} beneath the pools in a state it treats as a failure`,
+    });
+  }
+  if (tally.unranked > 0) {
+    reasons.push({
+      section: 'disks',
+      severity: 'unknown',
+      detail: `${plural(tally.unranked, 'device')} beneath the pools reported a state this report does not rank`,
+    });
+  }
+  return reasons;
+}
+
+/** Whether the system is behind, as this report states it. */
+interface UpdateReport {
+  update_available: boolean | null;
+  current_version: string | null;
+  new_version: string | null;
+  check_error: string | null;
+}
+
+/** What `system_update_status` reported, read back through this report's guards. */
+function updateReport(answer: unknown): UpdateReport {
+  const row = answer as Record<string, unknown>;
+  return {
+    update_available: booleanOrNull(row['update_available']),
+    current_version: textOrNull(row['current_version']),
+    new_version: textOrNull(row['new_version']),
+    check_error: textOrNull(row['check_error']),
+  };
+}
+
+/**
+ * What the updates section finds — which is NOTHING when the check worked,
+ * whichever answer it gave.
+ *
+ * An available update is reported in the section and is deliberately not a
+ * finding: being one release behind is not a fault, and a verdict that read
+ * `WARNING` on every well-run system with a pending update would stop carrying
+ * information within a week. A check that did NOT complete is the opposite and
+ * is `unknown` — that system may have been unchecked for months, which is the
+ * distinction `system_update_status` exists to keep and the one worth
+ * surfacing.
+ */
+function updateReasons(report: UpdateReport): Reason[] {
+  if (report.update_available !== null) return [];
+  return [
+    {
+      section: 'updates',
+      severity: 'unknown',
+      detail: `the update check did not complete, so whether this system is up to date is not established: ${
+        report.check_error ?? NO_REASON
+      }`,
+    },
+  ];
+}
+
+/**
+ * The verdict, from the reasons and from nothing else — which is what makes it
+ * follow from its own sections.
+ *
+ * `OK` is reachable only with no reason of any kind, and every section carries a
+ * reason when it could not be read, so `OK` states that everything was looked at
+ * and nothing was found. `UNKNOWN` outranks it and is outranked by both real
+ * findings: a problem that HAS been established is more actionable than one that
+ * has not, and the unknowns stay in `reasons` at every verdict so that a
+ * `CRITICAL` report still says which parts of it are incomplete.
+ */
+function verdictOf(reasons: Reason[]): Verdict {
+  if (reasons.some((reason) => reason.severity === 'critical')) return 'CRITICAL';
+  if (reasons.some((reason) => reason.severity === 'warning')) return 'WARNING';
+  if (reasons.some((reason) => reason.severity === 'unknown')) return 'UNKNOWN';
+  return 'OK';
+}
+
+/** The reason a section that could not be read contributes to the verdict. */
+function unavailableReason(name: SectionName, unavailable: string): Reason {
+  return {
+    section: name,
+    severity: 'unknown',
+    detail: `the ${name} section could not be read, so nothing about it is established: ${unavailable}`,
+  };
+}
+
+export const systemHealthReport: ReadOnlyTool = {
+  name: 'system_health_report',
+  description:
+    "One call that answers \"review this TrueNAS system's health and tell me " +
+    'about any issues or capacity concerns". It composes four read-only tools ' +
+    'and adds nothing of its own: `storage_pool_status` for pool health and ' +
+    'capacity, `storage_pool_topology` for the state of the devices beneath ' +
+    'those pools, `alerts_list` for what the system is complaining about, and ' +
+    '`system_update_status` for whether it is behind. Each of those tools ' +
+    'reports its subject in far more detail; this reports enough of each to ' +
+    'reach a verdict, and naming a finding here is the cue to call that tool ' +
+    'for the rest. `verdict` is the headline: `CRITICAL` where something is ' +
+    'already broken, `WARNING` where something needs attention before it ' +
+    'breaks, `UNKNOWN` where nothing bad was found AND SOMETHING COULD NOT BE ' +
+    'ESTABLISHED, and `OK` — which is the narrow claim that EVERY SECTION WAS ' +
+    'READ AND NONE OF THEM RAISED ANYTHING. `UNKNOWN` IS NEVER "HEALTHY": it ' +
+    'is a report with a hole in it, and `reasons` names the hole. `reasons` is ' +
+    'every finding that produced the verdict, and the verdict is derived from ' +
+    'it and from nothing else — `severity` is `critical`, `warning` or ' +
+    '`unknown`, `section` is which of `pools`, `alerts`, `disks` and `updates` ' +
+    'found it, and `detail` states it in words. FINDINGS AT `unknown` ARE ' +
+    'PRESENT AT EVERY VERDICT, so a `CRITICAL` report still says which parts ' +
+    'of itself are incomplete. `reasons` IS EMPTY ONLY WHEN `verdict` IS `OK`. ' +
+    'Each of the four sections carries `unavailable`: null where it was read, ' +
+    'and otherwise the reason it could not be, IN WHICH CASE EVERY OTHER FIELD ' +
+    'OF THAT SECTION IS NULL — null there means "not read", never "nothing to ' +
+    'report". THIS TOOL NEVER FAILS BECAUSE ONE SUBSYSTEM DID; a report that ' +
+    'throws when part of a system is unreachable is useless exactly when it is ' +
+    'needed. `pools.entries` is one entry per pool with the `name`, `status` ' +
+    'and `healthy` of `storage_pool_status`, its `size_bytes` and ' +
+    '`allocated_bytes`, and `used_percent` — how full it is, to one decimal ' +
+    'place, and null where that cannot be computed rather than zero. A pool at ' +
+    `or above ${CAPACITY_WARNING_PERCENT}% is a warning and one at or above ` +
+    `${CAPACITY_CRITICAL_PERCENT}% is critical. \`pools.reported\` is how many ` +
+    'pools the system reported. `alerts.total` is how many alerts are active ' +
+    'and `alerts.by_level` counts them per severity, most severe first, over ' +
+    'ALL of them; `alerts.most_severe` lists the worst of them individually ' +
+    'with the `level`, `klass`, `formatted` message and `dismissed` flag of ' +
+    '`alerts_list`. A DISMISSED ALERT IS STILL AN ACTIVE CONDITION and is ' +
+    'counted. `ERROR`, `CRITICAL`, `ALERT` and `EMERGENCY` are critical, ' +
+    '`WARNING` is a warning, `INFO` and `NOTICE` produce no finding, and a ' +
+    'level this tool does not recognise is reported at `unknown` RATHER THAN ' +
+    'IGNORED. `disks` counts the LEAF devices beneath every pool — a grouping ' +
+    'vdev is not counted, because a degraded mirror is degraded because of a ' +
+    'member and counting both would report one failed disk twice. `total`, ' +
+    '`healthy`, `unhealthy` and `unranked` are those counts, and `worst` names ' +
+    'the devices that are not healthy, each with the `pool` it is in, its ' +
+    '`name` in the vdev tree, the `disk` it sits on — null where the system can ' +
+    'no longer resolve one, which is what a pulled or dead device looks like — ' +
+    'and its `status`. `FAULTED`, `DEGRADED`, `OFFLINE`, `UNAVAIL` and ' +
+    '`REMOVED` are failures; `ONLINE` is healthy, as are `AVAIL` and `INUSE` ON ' +
+    'A SPARE, where they mean an idle spare and one swapped in for a failed ' +
+    'disk — THE DISK IT REPLACED IS COUNTED SEPARATELY IN WHATEVER STATE IT IS ' +
+    'IN. Any other state is `unranked`, which is this report saying it does not ' +
+    'know what that state means. THIS SECTION IS NOT SMART DATA: it is what ZFS ' +
+    'says about devices that are in a pool, so a disk attached to the system ' +
+    'and belonging to no pool does not appear here at all, and a disk failing ' +
+    'in a way ZFS has not yet noticed reads as `ONLINE`. `updates` carries ' +
+    '`update_available`, `current_version`, `new_version` and `check_error` ' +
+    'exactly as `system_update_status` reports them; AN AVAILABLE UPDATE IS ' +
+    'DELIBERATELY NOT A FINDING and does not move the verdict, because being a ' +
+    'release behind is not a fault, while a check that did not complete IS a ' +
+    'finding at `unknown` — that system may have gone unchecked for months. ' +
+    'EVERY COUNT AND EVERY REASON IS COMPUTED OVER EVERYTHING THE SECTION READ, ' +
+    `and only the three lists are capped, at ${MAX_LISTED} entries each with a ` +
+    '`truncated` flag saying whether anything was left out. So truncation can ' +
+    'drop the line describing a finding and can never drop the finding, which ' +
+    'is in `reasons` and in the counts either way. `pools` and `disks` come ' +
+    'from two SEPARATE reads of the pools, taken at slightly different ' +
+    'instants, so a pool imported or exported between them can appear in one ' +
+    'and not the other. This tool only reads. It does not scrub, replace a ' +
+    'disk, dismiss an alert, free space or install an update. NO field beyond ' +
+    'those named here is returned, whatever a later TrueNAS release adds to any ' +
+    'of the four underlying responses.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler(ctx) {
+    // All four reads are issued before any is awaited, so none waits on the
+    // others, and each is caught: no section may fail the report.
+    const [pools, alerts, disks, updates] = await Promise.all([
+      section(() => poolStatus.handler(ctx, {}), poolEntries),
+      section(() => alertsList.handler(ctx, {}), alertEntries),
+      section(() => poolTopology.handler(ctx, {}), deviceTally),
+      section(() => updateStatus.handler(ctx, {}), updateReport),
+    ]);
+
+    const counts = alerts.value === null ? null : alertCounts(alerts.value);
+    // Ordered here rather than in the section, because this ordering is what
+    // makes the cap below honest: the entries that survive it are the worst
+    // ones. `sort` is stable, so alerts at the same level keep the order the
+    // system listed them in.
+    const bySeverity =
+      alerts.value === null
+        ? null
+        : [...alerts.value].sort((a, b) => alertRank(b.level) - alertRank(a.level));
+
+    const reasons: Reason[] = [
+      ...(pools.unavailable === null ? [] : [unavailableReason('pools', pools.unavailable)]),
+      ...(pools.value === null ? [] : poolReasons(pools.value)),
+      ...(alerts.unavailable === null ? [] : [unavailableReason('alerts', alerts.unavailable)]),
+      ...(counts === null ? [] : alertReasons(counts)),
+      ...(disks.unavailable === null ? [] : [unavailableReason('disks', disks.unavailable)]),
+      ...(disks.value === null ? [] : deviceReasons(disks.value)),
+      ...(updates.unavailable === null ? [] : [unavailableReason('updates', updates.unavailable)]),
+      ...(updates.value === null ? [] : updateReasons(updates.value)),
+    ];
+
+    return {
+      verdict: verdictOf(reasons),
+      reasons,
+      pools: {
+        unavailable: pools.unavailable,
+        reported: pools.value === null ? null : pools.value.length,
+        entries: pools.value === null ? null : pools.value.slice(0, MAX_LISTED),
+        truncated: pools.value === null ? null : pools.value.length > MAX_LISTED,
+      },
+      alerts: {
+        unavailable: alerts.unavailable,
+        total: alerts.value === null ? null : alerts.value.length,
+        by_level: counts,
+        most_severe: bySeverity === null ? null : bySeverity.slice(0, MAX_LISTED),
+        truncated: bySeverity === null ? null : bySeverity.length > MAX_LISTED,
+      },
+      disks: {
+        unavailable: disks.unavailable,
+        total: disks.value?.total ?? null,
+        healthy: disks.value?.healthy ?? null,
+        unhealthy: disks.value?.unhealthy ?? null,
+        unranked: disks.value?.unranked ?? null,
+        worst: disks.value === null ? null : disks.value.notable.slice(0, MAX_LISTED),
+        truncated: disks.value === null ? null : disks.value.notable.length > MAX_LISTED,
+      },
+      updates: {
+        unavailable: updates.unavailable,
+        update_available: updates.value?.update_available ?? null,
+        current_version: updates.value?.current_version ?? null,
+        new_version: updates.value?.new_version ?? null,
+        check_error: updates.value?.check_error ?? null,
+      },
     };
   },
 };
