@@ -12,6 +12,7 @@ import {
   disksList,
   iscsiList,
   listDatasets,
+  networkConfig,
   networkInterfaces,
   nvmeofList,
   poolStatus,
@@ -69,7 +70,7 @@ function failingSystem(
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the twenty-two sketch tools', () => {
+  it('registers the twenty-three sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'storage_pool_status',
@@ -92,6 +93,7 @@ describe('createDefaultCatalog', () => {
       'users_list',
       'directory_services_status',
       'network_interfaces',
+      'network_config',
       'snapshots_create',
     ]);
   });
@@ -185,6 +187,12 @@ describe('createDefaultCatalog', () => {
   it('advertises network_interfaces to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
       'network_interfaces',
+    );
+  });
+
+  it('advertises network_config to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'network_config',
     );
   });
 });
@@ -5828,5 +5836,355 @@ describe('network_interfaces', () => {
     const { ctx, query } = fakeSystem({ ['interface.query']: [] });
     await networkInterfaces.handler(ctx, {});
     expect(query).toHaveBeenCalledWith('interface.query');
+  });
+});
+
+describe('network_config', () => {
+  /**
+   * The configured side, as `network.configuration.config` sends it. The fields
+   * this tool does not name are here on purpose — the middleware sends them on
+   * every call, and the test that nothing beyond the named fields survives is
+   * only worth anything against a fixture that carries some.
+   */
+  const CONFIG = {
+    id: 1,
+    hostname: 'nas',
+    domain: 'example.com',
+    domains: ['lab.example.com'],
+    ipv4gateway: '192.168.1.1',
+    ipv6gateway: '',
+    nameserver1: '192.168.1.1',
+    nameserver2: '',
+    nameserver3: '',
+    httpproxy: 'http://proxy.invalid:3128',
+    hosts: ['10.0.0.9 buildbox'],
+    service_announcement: { netbios: false, mdns: true, wsd: true },
+  };
+
+  /** The effective side, as `network.general.summary` sends it. */
+  const SUMMARY = {
+    ips: { eno1: { IPV4: ['192.168.1.10/24'] } },
+    default_routes: ['192.168.1.1'],
+    nameservers: ['192.168.1.1'],
+  };
+
+  const route = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    destination: '10.0.0.0/8',
+    gateway: '192.168.1.254',
+    ...over,
+  });
+
+  /**
+   * The three reads, canned. `config` and `summary` are spread over their
+   * defaults so a test naming one field keeps the rest; passing `null` for the
+   * summary is how a test says the system answered with nothing this tool can
+   * read, which is a different case from a summary missing one field.
+   */
+  const read = async (
+    config: Record<string, unknown> = {},
+    summary: Record<string, unknown> | null = {},
+    routes: unknown = [route()],
+  ): Promise<Record<string, unknown>> => {
+    const { ctx } = fakeSystem({
+      ['network.configuration.config']: { ...CONFIG, ...config },
+      ['network.general.summary']: summary === null ? null : { ...SUMMARY, ...summary },
+      ['staticroute.query']: routes,
+    });
+    return (await networkConfig.handler(ctx, {})) as Record<string, unknown>;
+  };
+
+  /** The same three reads, with the named ones rejecting instead. */
+  const readFailing = async (
+    failures: Partial<Record<string, unknown>>,
+  ): Promise<Record<string, unknown>> => {
+    const { ctx } = failingSystem(
+      {
+        ['network.configuration.config']: CONFIG,
+        ['network.general.summary']: SUMMARY,
+        ['staticroute.query']: [route()],
+      },
+      failures,
+    );
+    return (await networkConfig.handler(ctx, {})) as Record<string, unknown>;
+  };
+
+  it('reports the hostname, DNS, gateways and static routes from both sides', async () => {
+    expect(await read()).toEqual({
+      hostname: 'nas',
+      domain: 'example.com',
+      search_domains: ['lab.example.com'],
+      ipv4_gateway: { configured: '192.168.1.1', in_effect: '192.168.1.1', source: 'STATIC' },
+      // Nothing configured and no IPv6 default route in effect: the family is
+      // absent rather than unreadable, which is what a null source says.
+      ipv6_gateway: { configured: null, in_effect: null, source: null },
+      nameservers: [{ address: '192.168.1.1', source: 'STATIC', in_effect: true }],
+      static_routes: [{ destination: '10.0.0.0/8', gateway: '192.168.1.254' }],
+      failures: [],
+    });
+  });
+
+  it('returns no field the tool does not name, from either side', async () => {
+    const result = await read(
+      { future_field: 'added by a later release' },
+      { future_field: 'added by a later release' },
+    );
+    expect(Object.keys(result)).toEqual([
+      'hostname',
+      'domain',
+      'search_domains',
+      'ipv4_gateway',
+      'ipv6_gateway',
+      'nameservers',
+      'static_routes',
+      'failures',
+    ]);
+    // Against the whole serialized result rather than its top-level keys: a
+    // field that reached a gateway, nameserver or route entry would pass a key
+    // check and still be in front of the caller. The proxy, the hosts entries,
+    // the service announcement and the row id are all fields the middleware
+    // sends and this tool does not name.
+    const serialized = JSON.stringify(result);
+    for (const dropped of [
+      'added by a later release',
+      'proxy.invalid',
+      'buildbox',
+      'netbios',
+      'IPV4',
+    ]) {
+      expect(serialized).not.toContain(dropped);
+    }
+  });
+
+  it('reports a value in effect and not configured here as automatic', async () => {
+    // The DHCP case: nothing set on this system, and a gateway and two
+    // nameservers in use regardless.
+    expect(
+      await read(
+        { ipv4gateway: '', nameserver1: '', nameserver2: '', nameserver3: '' },
+        { default_routes: ['192.168.1.254'], nameservers: ['1.1.1.1', '8.8.8.8'] },
+      ),
+    ).toMatchObject({
+      ipv4_gateway: { configured: null, in_effect: '192.168.1.254', source: 'AUTOMATIC' },
+      // In the order the system reported them: resolution is tried in that
+      // order, so it is a fact rather than a presentation.
+      nameservers: [
+        { address: '1.1.1.1', source: 'AUTOMATIC', in_effect: true },
+        { address: '8.8.8.8', source: 'AUTOMATIC', in_effect: true },
+      ],
+    });
+  });
+
+  it('reports a configured value that nothing is using as static and not in effect', async () => {
+    // A configuration that has not been applied: `source` is decided by the
+    // configured side alone, and `in_effect` is what shows it is not the value
+    // the system is actually using.
+    expect(
+      await read(
+        { ipv4gateway: '192.168.1.1', nameserver1: '9.9.9.9' },
+        { default_routes: ['10.0.0.1'], nameservers: ['1.1.1.1'] },
+      ),
+    ).toMatchObject({
+      ipv4_gateway: { configured: '192.168.1.1', in_effect: '10.0.0.1', source: 'STATIC' },
+      nameservers: [
+        { address: '1.1.1.1', source: 'AUTOMATIC', in_effect: true },
+        { address: '9.9.9.9', source: 'STATIC', in_effect: false },
+      ],
+    });
+  });
+
+  it('splits the default routes it is given by address family', async () => {
+    // One list carrying both, which is how the summary reports them.
+    expect(
+      await read(
+        { ipv4gateway: '', ipv6gateway: 'fe80::1' },
+        { default_routes: ['192.168.1.254', 'fe80::1'] },
+      ),
+    ).toMatchObject({
+      ipv4_gateway: { configured: null, in_effect: '192.168.1.254', source: 'AUTOMATIC' },
+      ipv6_gateway: { configured: 'fe80::1', in_effect: 'fe80::1', source: 'STATIC' },
+    });
+  });
+
+  it('reports an IPv6 gateway in effect and not configured here as automatic', async () => {
+    // DHCPv6 or a router advertisement — the tool cannot tell those apart and
+    // names neither.
+    expect(await read({}, { default_routes: ['2001:db8::1'] })).toMatchObject({
+      ipv6_gateway: { configured: null, in_effect: '2001:db8::1', source: 'AUTOMATIC' },
+    });
+  });
+
+  it('cannot confirm a configured value where the effective side says nothing', async () => {
+    // Null rather than false: a server whose use cannot be confirmed must not
+    // report as one that is definitely unused, and a gateway that is configured
+    // is still configured.
+    expect(await read({ nameserver1: '9.9.9.9' }, null)).toMatchObject({
+      ipv4_gateway: { configured: '192.168.1.1', in_effect: null, source: 'STATIC' },
+      nameservers: [{ address: '9.9.9.9', source: 'STATIC', in_effect: null }],
+    });
+  });
+
+  it('names an effective read that failed, and reports nothing as automatic', async () => {
+    expect(await readFailing({ ['network.general.summary']: new Error('summary refused') })).toMatchObject(
+      {
+        ipv4_gateway: { configured: '192.168.1.1', in_effect: null, source: 'STATIC' },
+        nameservers: [{ address: '192.168.1.1', source: 'STATIC', in_effect: null }],
+        failures: [{ source: 'effective_values', error: 'summary refused' }],
+      },
+    );
+  });
+
+  it('names a static route read that failed, and reports the routes as unreadable', async () => {
+    // Null rather than the empty list of a system with no static route: the two
+    // readings are opposite and only one of them is true here.
+    expect(await readFailing({ ['staticroute.query']: new Error('routes refused') })).toMatchObject({
+      static_routes: null,
+      failures: [{ source: 'static_routes', error: 'routes refused' }],
+    });
+  });
+
+  it('reports both failures where both supplementary reads fail', async () => {
+    const result = await readFailing({
+      ['network.general.summary']: new Error('summary refused'),
+      ['staticroute.query']: new Error('routes refused'),
+    });
+    expect(result['failures']).toEqual([
+      { source: 'effective_values', error: 'summary refused' },
+      { source: 'static_routes', error: 'routes refused' },
+    ]);
+    // And the configured side is still answered in full, which is the whole
+    // point of not letting either failure take the tool down.
+    expect(result).toMatchObject({ hostname: 'nas', domain: 'example.com' });
+  });
+
+  it('fails the tool where the configuration itself cannot be read', async () => {
+    // The one read that is the answer rather than a sharpening of it.
+    const { ctx } = failingSystem({}, { ['network.configuration.config']: new Error('denied') });
+    await expect(networkConfig.handler(ctx, {})).rejects.toThrow('denied');
+  });
+
+  it('states a reason for a failure however the client rejected', async () => {
+    // A rejection is not necessarily an Error: the client rejects with whatever
+    // the transport gave it, and a middleware error carries `reason` where a
+    // JSON-RPC one carries `message`.
+    const reasons = await Promise.all(
+      [
+        new Error('an error'),
+        { reason: 'a middleware error' },
+        { message: 'a json-rpc error' },
+        'a bare string',
+        new Error(''),
+        {},
+        null,
+      ].map(async (rejection) => {
+        const result = await readFailing({ ['staticroute.query']: rejection });
+        return (result['failures'] as { error: string }[])[0].error;
+      }),
+    );
+    expect(reasons).toEqual([
+      'an error',
+      'a middleware error',
+      'a json-rpc error',
+      'a bare string',
+      'the system reported no reason',
+      'the system reported no reason',
+      'the system reported no reason',
+    ]);
+  });
+
+  it('reports no static route configured as an empty list', async () => {
+    expect(await read({}, {}, [])).toMatchObject({ static_routes: [], failures: [] });
+  });
+
+  it('reports a route listing sent as something other than a list as unreadable', async () => {
+    // The read completed, so there is no failure to name — it simply answered
+    // nothing this tool can read, and null says exactly that.
+    expect(await read({}, {}, 'not a listing')).toMatchObject({
+      static_routes: null,
+      failures: [],
+    });
+  });
+
+  it('reports a route destination or gateway the system did not name as null', async () => {
+    expect(
+      await read({}, {}, [route({ destination: '', gateway: null }), 'not a route']),
+    ).toMatchObject({
+      static_routes: [
+        { destination: null, gateway: null },
+        { destination: null, gateway: null },
+      ],
+    });
+  });
+
+  it('keeps no search domains apart from no search domain list at all', async () => {
+    expect(await read({ domains: [] })).toMatchObject({ search_domains: [] });
+    expect(await read({ domains: 'lab.example.com' })).toMatchObject({ search_domains: null });
+  });
+
+  it('drops a search domain the system did not name', async () => {
+    expect(await read({ domains: ['lab.example.com', '', 7, null] })).toMatchObject({
+      search_domains: ['lab.example.com'],
+    });
+  });
+
+  it('reports a nameserver the system named twice once', async () => {
+    expect(
+      await read({ nameserver1: '' }, { nameservers: ['1.1.1.1', '1.1.1.1'] }),
+    ).toMatchObject({
+      nameservers: [{ address: '1.1.1.1', source: 'AUTOMATIC', in_effect: true }],
+    });
+  });
+
+  it('reports a system with no DNS server at all as having none', async () => {
+    expect(
+      await read({ nameserver1: '', nameserver2: '', nameserver3: '' }, { nameservers: [] }),
+    ).toMatchObject({ nameservers: [] });
+  });
+
+  it('reads every numbered nameserver slot, whichever are filled', async () => {
+    // A third slot filled with the second left empty is ordinary rather than a
+    // malformed configuration.
+    expect(
+      await read(
+        { nameserver1: '1.1.1.1', nameserver2: '', nameserver3: '9.9.9.9' },
+        { nameservers: [] },
+      ),
+    ).toMatchObject({
+      nameservers: [
+        { address: '1.1.1.1', source: 'STATIC', in_effect: false },
+        { address: '9.9.9.9', source: 'STATIC', in_effect: false },
+      ],
+    });
+  });
+
+  it('reports a hostname or domain the system did not name as null', async () => {
+    expect(await read({ hostname: '', domain: null })).toMatchObject({
+      hostname: null,
+      domain: null,
+    });
+  });
+
+  it('reports an effective list sent as something other than a list as unread', async () => {
+    // The summary is a record and its two fields are not lists: nothing can be
+    // said about what is in effect, which is not the same as nothing being in
+    // effect.
+    expect(
+      await read({}, { default_routes: '192.168.1.1', nameservers: '192.168.1.1' }),
+    ).toMatchObject({
+      ipv4_gateway: { configured: '192.168.1.1', in_effect: null, source: 'STATIC' },
+      nameservers: [{ address: '192.168.1.1', source: 'STATIC', in_effect: null }],
+    });
+  });
+
+  it('asks for the configuration, the summary and the static routes', async () => {
+    const { ctx, call, query } = fakeSystem({
+      ['network.configuration.config']: CONFIG,
+      ['network.general.summary']: SUMMARY,
+      ['staticroute.query']: [],
+    });
+    await networkConfig.handler(ctx, {});
+    expect(call).toHaveBeenCalledWith('network.configuration.config');
+    expect(call).toHaveBeenCalledWith('network.general.summary');
+    expect(query).toHaveBeenCalledWith('staticroute.query');
   });
 });
