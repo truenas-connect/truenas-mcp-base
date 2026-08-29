@@ -3157,13 +3157,23 @@ describe('share_access', () => {
     }
   });
 
-  it('drops a restriction that is not text, and reports an unreadable list as null', async () => {
+  it('reports a restriction list it could not read whole as null, never in part', async () => {
+    // Reporting the readable entries alone would answer with a narrower
+    // restriction than the export carries, and dropping all of them would
+    // answer `[]` — which here means the opposite, that nothing is restricted.
     const result = await answered(
       { share: '/mnt/tank/backups' },
       { ['sharing.nfs.query']: [nfsExport({ hosts: ['10.0.0.5', '', 42], networks: 'everyone' })] },
     );
-    expect(result['hosts']).toEqual(['10.0.0.5']);
+    expect(result['hosts']).toBeNull();
     expect(result['networks']).toBeNull();
+
+    const allDropped = await answered(
+      { share: '/mnt/tank/backups' },
+      { ['sharing.nfs.query']: [nfsExport({ hosts: [42], networks: [''] })] },
+    );
+    expect(allDropped['hosts']).toBeNull();
+    expect(allDropped['networks']).toBeNull();
   });
 
   it('states why a share that serves no path here has no ACL', async () => {
@@ -3373,9 +3383,18 @@ describe('share_access', () => {
   });
 
   it('keeps an entry naming no permission apart from one whose permissions it could not read', async () => {
-    // The second is not evidence that the entry grants nothing.
-    expect((await oneEntry({ perms: {} }))['permissions']).toEqual([]);
+    // A POSIX `OTHER` entry really does carry an all-false permission set, and
+    // that is what an empty list means. The second is not evidence that the
+    // entry grants nothing.
+    expect(
+      (await oneEntry({ perms: { READ: false, WRITE: false, EXECUTE: false } }))['permissions'],
+    ).toEqual([]);
     for (const unreadable of [null, undefined, 'FULL_CONTROL']) {
+      expect((await oneEntry({ perms: unreadable }))['permissions']).toBeNull();
+    }
+    // A set naming no permission this tool can read at all is unreadable, not
+    // an entry that holds nothing.
+    for (const unreadable of [{}, { READ: 'yes' }]) {
       expect((await oneEntry({ perms: unreadable }))['permissions']).toBeNull();
     }
     // A preset is known to grant something, and what it grants is exactly what

@@ -293,15 +293,21 @@ function principalId(value: unknown): number | null {
  *
  * An absent list and an empty one are the same answer from the middleware — the
  * export carries no restriction of that kind — so both map to `[]` rather than
- * one of them becoming a null that would read as unreadable. Only a value that
- * is not a list at all is unreadable, and entries that are not text are dropped
- * because a restriction that cannot be read as a host or a network restricts
- * nothing this tool can report.
+ * one of them becoming a null that would read as unreadable.
+ *
+ * Everything else is unreadable, and the list is reported whole or not at all:
+ * dropping the entries that could not be read would answer with a narrower
+ * restriction than the export carries, and dropping all of them would answer
+ * `[]`, which here means the OPPOSITE — no restriction, and any machine may
+ * mount it.
  */
 function restrictionList(value: unknown): string[] | null {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) return null;
-  return value.filter((item): item is string => typeof item === 'string' && item.length > 0);
+  const restrictions = value.filter(
+    (item): item is string => typeof item === 'string' && item.length > 0,
+  );
+  return restrictions.length === value.length ? restrictions : null;
 }
 
 /**
@@ -314,9 +320,13 @@ function restrictionList(value: unknown): string[] | null {
  * POSIX one (`{ READ: true, WRITE: false, EXECUTE: true }`). The last two are
  * the same shape, so one pass over the true keys covers both.
  *
- * An empty list is an entry that names no permission, which is not the same as
- * a permission set that could not be read — a caller reviewing access must not
- * see the second as the first and conclude the entry grants nothing.
+ * An empty list is an entry that names permissions and holds none of them —
+ * `{ READ: false, WRITE: false, EXECUTE: false }`, which a POSIX `OTHER` entry
+ * really does carry. That is not the same as a permission set that could not be
+ * read, and a caller reviewing access must not see the second as the first and
+ * conclude the entry grants nothing. So a set naming no permission this tool
+ * can read AT ALL — an empty object, or one whose every value is something
+ * other than a boolean — is unreadable rather than empty.
  */
 function permissionNames(perms: unknown): string[] | null {
   if (perms === null || typeof perms !== 'object') return null;
@@ -328,7 +338,9 @@ function permissionNames(perms: unknown): string[] | null {
     const basic = textOrNull(record['BASIC']);
     return basic === null ? null : [basic];
   }
-  return Object.keys(record).filter((name) => record[name] === true);
+  const names = Object.keys(record);
+  if (!names.some((name) => typeof record[name] === 'boolean')) return null;
+  return names.filter((name) => record[name] === true);
 }
 
 /**
@@ -529,8 +541,10 @@ export const shareAccess: ReadOnlyTool = {
     'UNRESTRICTED — an empty `hosts` and an empty `networks` together mean any ' +
     'machine that can reach this server may mount it, which is the opposite of ' +
     'nobody. Both are null on an SMB share, where the protocol has no such ' +
-    'restriction, and null on an NFS export only where the system reported ' +
-    'something that could not be read as a list; `protocol` tells those two ' +
+    'restriction, and null on an NFS export where the system reported ' +
+    'something that could not be read as a list of hosts or networks — ' +
+    'including a list holding an entry that is not one, since a restriction ' +
+    'reported in part is a different restriction; `protocol` tells those two ' +
     'apart. `acl` is the filesystem ACL on `path`, which is what decides what ' +
     'each principal may do once connected — over SMB it is the whole answer, ' +
     'and over NFS it applies to the ids arriving from a machine the ' +
@@ -550,9 +564,12 @@ export const shareAccess: ReadOnlyTool = {
     'where the tag IS the principal. On a POSIX ACL it is `USER` or `GROUP`, ' +
     'or `USER_OBJ`, `GROUP_OBJ` and `OTHER` — the path\'s owner, its owning ' +
     'group, and everyone else — or `MASK`, which is NOT a principal at all but ' +
-    'a ceiling on the others, described under `permissions`. `name` and `id` ' +
-    'are BOTH null on every tag that is its own principal, and on `MASK`, by ' +
-    'construction rather than because nothing resolved. On a `USER` or `GROUP` ' +
+    'a ceiling on the others, described under `permissions`. `id` is ALWAYS ' +
+    'null on a tag that is its own principal and on `MASK`: the system writes ' +
+    '-1 there, which is reported as null because no account holds it. `name` ' +
+    'is null on those tags too, since they name no separate account for the ' +
+    'system to resolve — a null on one of them is the tag\'s nature rather ' +
+    'than a principal that would not resolve. On a `USER` or `GROUP` ' +
     'entry `name` is the resolved account or group name and `id` is its raw ' +
     'numeric id; an id that resolved to no name is reported as `id` beside a ' +
     'null `name` and IS NEVER DROPPED, so only a `USER` or `GROUP` entry with ' +
@@ -565,9 +582,10 @@ export const shareAccess: ReadOnlyTool = {
     'THAT IS NOT YET THE EFFECTIVE RIGHT: a `USER`, `GROUP` or `GROUP_OBJ` ' +
     'entry grants only what it and the `MASK` entry both name, so the two are ' +
     'read together and an entry can appear to hold more than it does. NFS4 has ' +
-    'no mask and no such step. An empty list is an entry that names no ' +
-    'permission; null is one whose permissions could not be read, and is not ' +
-    'evidence that it grants nothing. `children_only` true means the ' +
+    'no mask and no such step. An empty list is an entry that names ' +
+    'permissions and holds none of them; null is one whose permissions could ' +
+    'not be read, and is not evidence that it grants nothing. ' +
+    '`children_only` true means the ' +
     'entry GRANTS NOTHING ON THIS PATH and exists to be inherited by what is ' +
     'created inside it, so its principal does not have the access it appears to ' +
     'have; null is an entry whose inheritance could not be read. This tool ' +
