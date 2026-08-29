@@ -346,8 +346,10 @@ export const vmsList: ReadOnlyTool = {
  * reason. `FileContentError` never quotes the download URL, which carries a
  * single-use token, and puts the adapter's own message — which can name that
  * URL — on `cause` instead. `errorText` reads `message` and never `cause`, so
- * the token cannot arrive in a result through here. A reader of `cause` added
- * to this file would break that, not merely a test.
+ * the token cannot arrive in a result through here. That guard now lives in
+ * `common.ts` rather than in this file, so it is a reader of `cause` added
+ * THERE that would break this, not merely a test — and it would break it for
+ * every tool at once.
  */
 
 /** Lines returned when the caller names no bound. */

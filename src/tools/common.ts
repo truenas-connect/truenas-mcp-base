@@ -93,6 +93,13 @@ export const NO_REASON = 'the system reported no reason';
  * failure report as having said nothing. Anything else still becomes a stated
  * absence rather than `"[object Object]"`, and the result is never empty: a
  * failure with no text still has to read as a failure.
+ *
+ * IT READS `message` AND NEVER `cause`, AND THAT IS A CREDENTIAL BOUNDARY.
+ * `FileContentError` keeps the minted download URL — which carries a single-use
+ * auth token — off its own message and puts the adapter's message, which can
+ * name that URL, on `cause`. `vm_logs` returns what this function produces, and
+ * tool results are recorded verbatim in the audit trail. Adding a `cause`
+ * reader here would put that token in a result, for every tool at once.
  */
 export function errorText(reason: unknown): string {
   if (reason instanceof Error) return textOrNull(reason.message) ?? NO_REASON;
