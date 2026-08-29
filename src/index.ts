@@ -80,5 +80,6 @@ export {
   nvmeofList,
   usersList,
   directoryServicesStatus,
+  networkInterfaces,
   createSnapshot,
 } from '@/tools/index';
