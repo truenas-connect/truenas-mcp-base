@@ -100,16 +100,24 @@ interface Extent {
   locked: boolean | null;
 }
 
-/** One initiator with an open session, as the running service reports it. */
+/** The fields of a live session this tool reads. */
+interface Session {
+  initiator: string;
+  initiator_addr: string;
+  initiator_alias: string | null;
+  target: string;
+}
+
+/** One initiator with at least one open session, and where it reaches from. */
 interface Initiator {
   initiator: string;
-  address: string;
+  addresses: string[];
   alias: string | null;
 }
 
 /**
- * A session this tool could not attribute to any target it listed, carrying the
- * target string the system spelled so a caller can see what was not matched.
+ * An initiator this tool could not attribute to any target it listed, carrying
+ * the target string the system spelled so a caller can see what was not matched.
  */
 interface UnattributedInitiator extends Initiator {
   target: string;
@@ -154,17 +162,55 @@ async function readExtents(system: SystemHandle): Promise<Map<number, Extent[]>>
   return byTarget;
 }
 
-/** One session, mapped field by field. */
-function initiator(session: {
-  initiator: string;
-  initiator_addr: string;
-  initiator_alias: string | null;
-}): Initiator {
-  return {
-    initiator: session.initiator,
-    address: session.initiator_addr,
-    alias: textOrNull(session.initiator_alias),
-  };
+/**
+ * One entry per initiator, rather than one per session.
+ *
+ * A multipathed initiator opens a session down each path — that is what
+ * multipath is — and the running service reports each of them, with a different
+ * address every time. Passing those through one-to-one would make a single host
+ * with two NICs read as two hosts connected to the target, so the sessions are
+ * grouped under the initiator name that is common to them and every address it
+ * reaches the target from is kept beside it. That is also what makes the count
+ * of this list the number of initiators the caller asked for.
+ *
+ * `alias` is taken from the first session that carries one: it is a property of
+ * the initiator rather than of the path, so a service that reports it on one
+ * session and not another is describing the same host either way.
+ */
+function groupInitiators(sessions: Session[]): Initiator[] {
+  const byName = new Map<string, Initiator>();
+  for (const session of sessions) {
+    const seen = byName.get(session.initiator);
+    if (seen === undefined) {
+      byName.set(session.initiator, {
+        initiator: session.initiator,
+        addresses: [session.initiator_addr],
+        alias: textOrNull(session.initiator_alias),
+      });
+      continue;
+    }
+    if (!seen.addresses.includes(session.initiator_addr)) {
+      seen.addresses.push(session.initiator_addr);
+    }
+    seen.alias ??= textOrNull(session.initiator_alias);
+  }
+  return [...byName.values()];
+}
+
+/**
+ * The unattributable sessions, grouped by the target string they named and then
+ * by initiator, so that a multipathed initiator counts once here too.
+ */
+function groupUnattributed(sessions: Session[]): UnattributedInitiator[] {
+  const byTargetString = new Map<string, Session[]>();
+  for (const session of sessions) {
+    const named = byTargetString.get(session.target);
+    if (named === undefined) byTargetString.set(session.target, [session]);
+    else named.push(session);
+  }
+  return [...byTargetString.entries()].flatMap(([target, group]) =>
+    groupInitiators(group).map((one) => ({ ...one, target })),
+  );
 }
 
 /**
@@ -198,7 +244,13 @@ export const iscsiList: ReadOnlyTool = {
     'Every iSCSI target the system serves, the extents mapped onto it, and the ' +
     'initiators currently connected to it. `id` is the target\'s numeric ' +
     'identity, `name` the target name clients connect to, and `alias` the ' +
-    'label it was given, null where it has none. `extents` are the backing ' +
+    'label it was given, null where it has none. `mode` is how the target is ' +
+    'served — `ISCSI`, `FC` for Fibre Channel, or `BOTH` — and is null where ' +
+    'the system reported no value. READ IT BEFORE READING AN EMPTY ' +
+    '`initiators` AS AN IDLE TARGET: an `FC` target is not served over iSCSI ' +
+    'at all, so it holds no iSCSI session by definition and an empty list ' +
+    'there says nothing about whether it is in use. Fibre Channel sessions are ' +
+    'not visible to this tool. `extents` are the backing ' +
     'stores mapped onto the target: `lun` is the logical unit number the ' +
     'initiator addresses it by, `id` the extent\'s numeric identity, `name` its ' +
     'name, and `type` `DISK` or `FILE` — a zvol or a file on a dataset. `disk` ' +
@@ -216,16 +268,23 @@ export const iscsiList: ReadOnlyTool = {
     'carries a name, so a null `name` says the mapping points at an extent this ' +
     'tool could not resolve rather than one with nothing set. `initiators` are ' +
     'the initiators holding an open session on that target right now, each with ' +
-    'its `initiator` name, `address`, and `alias` where it has one. AN EMPTY ' +
+    'its `initiator` name, its `alias` where it has one, and `addresses`, every ' +
+    'address it is reaching the target from. There is ONE ENTRY PER INITIATOR ' +
+    'rather than one per session: a multipathed initiator opens a session down ' +
+    'each path, and those are reported as one initiator with several ' +
+    '`addresses` rather than as several initiators, so the length of this list ' +
+    'is the number of distinct initiators connected. AN EMPTY ' +
     '`initiators` AND A NULL ONE ARE DIFFERENT ANSWERS: empty means the ' +
-    'sessions were read and none is on this target, which is a target nothing ' +
-    'is currently using; null means the sessions could not be read at all, and ' +
+    'sessions were read and none is on this target, which for an `ISCSI` or ' +
+    '`BOTH` target is one nothing is currently using; null means the sessions ' +
+    'could not be read at all, and ' +
     'says nothing about whether anything is connected. `extents` is null in the ' +
     'same way and for the same reason. `failures` names each read that failed, ' +
     'as `source` — `extents` or `initiators` — and `error`, and is empty when ' +
-    'both were read. `unattributed_initiators` holds sessions whose `target` ' +
-    'string matched none of the targets listed, or matched more than one; it ' +
-    'carries that string so the mismatch is visible. WHILE IT IS NOT EMPTY THE ' +
+    'both were read. `unattributed_initiators` holds initiators whose sessions ' +
+    'named a `target` matching none of the targets listed, or matching more ' +
+    'than one; each carries that string as `target` so the mismatch is ' +
+    'visible, and is grouped by initiator in the same way. WHILE IT IS NOT EMPTY THE ' +
     'PER-TARGET `initiators` LISTS ARE INCOMPLETE, and a target reporting an ' +
     'empty list may in fact be in use. This tool reads only iSCSI: NVMe-oF ' +
     'subsystems and Fibre Channel ports are served separately and are not ' +
@@ -248,17 +307,17 @@ export const iscsiList: ReadOnlyTool = {
     ]);
 
     const byName = new Map(targets.map((target) => [target.name, target.id]));
-    const byTarget = new Map<number, Initiator[]>();
-    const unattributed: UnattributedInitiator[] = [];
+    const byTarget = new Map<number, Session[]>();
+    const unattributed: Session[] = [];
     for (const session of sessions.value ?? []) {
       const id = targetOf(session.target, byName);
       if (id === null) {
-        unattributed.push({ ...initiator(session), target: session.target });
+        unattributed.push(session);
         continue;
       }
       const attached = byTarget.get(id);
-      if (attached === undefined) byTarget.set(id, [initiator(session)]);
-      else attached.push(initiator(session));
+      if (attached === undefined) byTarget.set(id, [session]);
+      else attached.push(session);
     }
 
     const failures: Failure[] = [];
@@ -270,14 +329,20 @@ export const iscsiList: ReadOnlyTool = {
         id: target.id,
         name: target.name,
         alias: textOrNull(target.alias),
+        // Reported because it decides whether an empty `initiators` means
+        // anything: an `FC` target is not served over iSCSI at all, so it can
+        // never hold a session, and without this field that reads identically
+        // to an `ISCSI` target nothing is using.
+        mode: target.mode ?? null,
         // Null for a read that failed, and an empty list for one that succeeded
         // and found none — the distinction the description promises, and the
         // reason neither defaults to the other.
         extents: extents.value === null ? null : (extents.value.get(target.id) ?? []),
-        initiators: sessions.value === null ? null : (byTarget.get(target.id) ?? []),
+        initiators:
+          sessions.value === null ? null : groupInitiators(byTarget.get(target.id) ?? []),
       })),
       failures,
-      unattributed_initiators: unattributed,
+      unattributed_initiators: groupUnattributed(unattributed),
     };
   },
 };

@@ -3856,6 +3856,7 @@ describe('iscsi_list', () => {
           id: 1,
           name: 'tgt0',
           alias: 'VMware datastore',
+          mode: 'ISCSI',
           extents: [
             {
               id: 7,
@@ -3871,7 +3872,7 @@ describe('iscsi_list', () => {
           initiators: [
             {
               initiator: 'iqn.1998-01.com.vmware:esx1',
-              address: '10.0.0.20',
+              addresses: ['10.0.0.20'],
               alias: 'esx1',
             },
           ],
@@ -3893,6 +3894,7 @@ describe('iscsi_list', () => {
       'id',
       'name',
       'alias',
+      'mode',
       'extents',
       'initiators',
     ]);
@@ -3907,7 +3909,7 @@ describe('iscsi_list', () => {
       'locked',
     ]);
     expect(Object.keys((listing.targets[0]['initiators'] as Record<string, unknown>[])[0])).toEqual(
-      ['initiator', 'address', 'alias'],
+      ['initiator', 'addresses', 'alias'],
     );
   });
 
@@ -4038,7 +4040,14 @@ describe('iscsi_list', () => {
       },
     );
     expect(listing.targets).toEqual([
-      { id: 1, name: 'tgt0', alias: 'VMware datastore', extents: null, initiators: null },
+      {
+        id: 1,
+        name: 'tgt0',
+        alias: 'VMware datastore',
+        mode: 'ISCSI',
+        extents: null,
+        initiators: null,
+      },
     ]);
     expect(listing.failures).toEqual([
       { source: 'extents', error: 'denied' },
@@ -4091,6 +4100,94 @@ describe('iscsi_list', () => {
     ]);
   });
 
+  it('counts a multipathed initiator once, keeping every path it reaches from', async () => {
+    // Two sessions, one initiator down two paths. Two entries would make one
+    // host with two NICs read as two hosts attached to the target.
+    const initiators = (
+      await onlyTarget({
+        ['iscsi.global.sessions']: [
+          session(),
+          session({ initiator_addr: '10.0.1.20' }),
+          session({ initiator_addr: '10.0.0.20' }),
+        ],
+      })
+    )['initiators'] as Record<string, unknown>[];
+    expect(initiators).toEqual([
+      {
+        initiator: 'iqn.1998-01.com.vmware:esx1',
+        addresses: ['10.0.0.20', '10.0.1.20'],
+        alias: 'esx1',
+      },
+    ]);
+  });
+
+  it('takes an initiator alias from whichever session carries one', async () => {
+    const initiators = (
+      await onlyTarget({
+        ['iscsi.global.sessions']: [
+          session({ initiator_alias: null }),
+          session({ initiator_addr: '10.0.1.20', initiator_alias: 'esx1' }),
+        ],
+      })
+    )['initiators'] as Record<string, unknown>[];
+    expect(initiators[0]).toMatchObject({ alias: 'esx1' });
+  });
+
+  it('keeps two different initiators on one target apart', async () => {
+    const initiators = (
+      await onlyTarget({
+        ['iscsi.global.sessions']: [
+          session(),
+          session({ initiator: 'iqn.1998-01.com.vmware:esx2', initiator_addr: '10.0.0.21' }),
+        ],
+      })
+    )['initiators'] as Record<string, unknown>[];
+    expect(initiators.map((one) => one['initiator'])).toEqual([
+      'iqn.1998-01.com.vmware:esx1',
+      'iqn.1998-01.com.vmware:esx2',
+    ]);
+  });
+
+  it('reports how a target is served, so an FC target is not read as idle', async () => {
+    // An FC target holds no iSCSI session by definition, so without `mode` its
+    // empty initiator list is indistinguishable from an idle iSCSI target.
+    const listing = await listed({
+      ['iscsi.target.query']: [
+        target({ id: 2, name: 'fctgt', mode: 'FC' }),
+        target({ id: 3, name: 'bothtgt', mode: 'BOTH' }),
+        target({ mode: undefined }),
+      ],
+      ['iscsi.global.sessions']: [],
+    });
+    expect(listing.targets.map((entry) => [entry['name'], entry['mode'], entry['initiators']])).toEqual(
+      [
+        ['fctgt', 'FC', []],
+        ['bothtgt', 'BOTH', []],
+        ['tgt0', null, []],
+      ],
+    );
+  });
+
+  it('groups mappings under the target each names', async () => {
+    const listing = await listed({
+      ['iscsi.target.query']: [target(), target({ id: 2, name: 'tgt1' })],
+      ['iscsi.extent.query']: [extent(), extent({ id: 8, name: 'logs' })],
+      ['iscsi.targetextent.query']: [
+        mapping(),
+        mapping({ id: 5, target: 2, extent: 8, lunid: 0 }),
+      ],
+    });
+    expect(
+      listing.targets.map((entry) => [
+        entry['name'],
+        (entry['extents'] as Record<string, unknown>[]).map((one) => one['name']),
+      ]),
+    ).toEqual([
+      ['tgt0', ['vmstore']],
+      ['tgt1', ['logs']],
+    ]);
+  });
+
   it('reports a session it could not attribute rather than dropping it', async () => {
     const listing = await listed({
       ['iscsi.global.sessions']: [session({ target: 'some-other-spelling' })],
@@ -4101,10 +4198,32 @@ describe('iscsi_list', () => {
     expect(listing.unattributed_initiators).toEqual([
       {
         initiator: 'iqn.1998-01.com.vmware:esx1',
-        address: '10.0.0.20',
+        addresses: ['10.0.0.20'],
         alias: 'esx1',
         target: 'some-other-spelling',
       },
+    ]);
+  });
+
+  it('groups unattributed sessions by target and initiator, as attributed ones are', async () => {
+    const listing = await listed({
+      ['iscsi.global.sessions']: [
+        session({ target: 'unknown-a' }),
+        session({ target: 'unknown-a', initiator_addr: '10.0.1.20' }),
+        session({ target: 'unknown-b' }),
+        session({ target: 'unknown-a', initiator: 'iqn.1998-01.com.vmware:esx2' }),
+      ],
+    });
+    expect(
+      listing.unattributed_initiators.map((one) => [
+        one['target'],
+        one['initiator'],
+        one['addresses'],
+      ]),
+    ).toEqual([
+      ['unknown-a', 'iqn.1998-01.com.vmware:esx1', ['10.0.0.20', '10.0.1.20']],
+      ['unknown-a', 'iqn.1998-01.com.vmware:esx2', ['10.0.0.20']],
+      ['unknown-b', 'iqn.1998-01.com.vmware:esx1', ['10.0.0.20']],
     ]);
   });
 
@@ -4125,7 +4244,10 @@ describe('iscsi_list', () => {
       ['iscsi.global.sessions']: [session({ target: 'x:tgt0' })],
     });
     expect(listing.targets.map((entry) => [entry['name'], entry['initiators']])).toEqual([
-      ['x:tgt0', [{ initiator: 'iqn.1998-01.com.vmware:esx1', address: '10.0.0.20', alias: 'esx1' }]],
+      [
+        'x:tgt0',
+        [{ initiator: 'iqn.1998-01.com.vmware:esx1', addresses: ['10.0.0.20'], alias: 'esx1' }],
+      ],
       ['tgt0', []],
     ]);
     expect(listing.unattributed_initiators).toEqual([]);
