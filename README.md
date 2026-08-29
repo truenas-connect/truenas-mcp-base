@@ -16,7 +16,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
   operations are rejected at registration by policy. Read-only family:
   `system_info`, `storage_pool_status`, `storage_pool_topology`,
   `storage_scrub_history`, `storage_list_datasets`, `datasets_quota_report`,
-  `disks_list`, `apps_list`, `alerts_list`, `snapshots_list`.
+  `disks_list`, `apps_list`, `alerts_list`, `snapshots_list`,
+  `replication_status`.
 - **System registry** — 1..N named systems, each owning its own
   `@truenas/api-client` instance and credentials; `systems` selector
   (name / list / `all`, defaulting when one system is registered).
