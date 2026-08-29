@@ -1,6 +1,6 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
-import { ReadOnlyTool } from '@/catalog/tool';
+import { ApiSurface, ReadOnlyTool } from '@/catalog/tool';
 
 /**
  * Virtual machines a system runs, with the state each is in and the CPU and
@@ -128,6 +128,26 @@ async function attempt<T>(source: VmSource, read: () => Promise<T>): Promise<Att
 /** MiB to bytes, the one unit conversion this file makes. */
 const BYTES_PER_MIB = 1024 * 1024;
 
+/**
+ * The row each stack answers with, taken from the API surface the tools are
+ * typed against rather than named or restated here.
+ *
+ * Derived rather than declared so that the field names below are checked
+ * against the generated client. Reading a row as a bare `Record<string,
+ * unknown>` would compile whatever it was asked for, so a regenerated client
+ * that renames a field — which is how these types have moved before — would
+ * turn every value read under the old name into a null, with no build error
+ * and with tests that pass because their fixtures are written by hand against
+ * the same old names.
+ *
+ * The values are still read through the guards below rather than trusted. The
+ * types describe what the middleware is documented to send, and a tool that
+ * throws because a system sent something else is worse than one that reports
+ * the field it could not read.
+ */
+type VmEntry = ApiSurface['call']['vm.query']['entity'];
+type VirtInstanceEntry = ApiSurface['call']['virt.instance.query']['entity'];
+
 /** One virtual machine, in the shape this tool reports it, whichever stack it
  * was read from. */
 interface VmRow {
@@ -177,29 +197,34 @@ function totalVcpus(sockets: unknown, cores: unknown, threads: unknown): number 
  * guaranteed that much and may be given up to `memory`, so reporting the
  * maximum alone would overstate what the VM is actually holding.
  */
-function fromVmStack(entry: object): VmRow {
-  const row = entry as Record<string, unknown>;
-  const status = recordOrNull(row['status']);
-  const memory = numberOrNull(row['memory']);
-  const minMemory = numberOrNull(row['min_memory']);
+function fromVmStack(entry: VmEntry): VmRow {
+  // The type declares `status` present and non-null; a system that reported
+  // neither must answer null states rather than throw. Read back as a partial
+  // of its own type so that the two names below are checked too.
+  const status = (recordOrNull(entry.status) ?? {}) as Partial<VmEntry['status']>;
+  const memory = numberOrNull(entry.memory);
+  const minMemory = numberOrNull(entry.min_memory);
   return {
     source: 'vm',
-    id: numberOrNull(row['id']),
-    name: textOrNull(row['name']),
+    id: numberOrNull(entry.id),
+    name: textOrNull(entry.name),
     // The middleware's own word for the state. `domain_state` beside it is
     // libvirt's, and the two are reported separately rather than merged
     // because they are different vocabularies and a caller cannot tell which
     // one arrived once they share a field.
-    state: textOrNull(status?.['state']),
-    domain_state: textOrNull(status?.['domain_state']),
-    vcpus: totalVcpus(row['vcpus'], row['cores'], row['threads']),
-    // A CPU set is a `virt.instance` notion; this stack pins with `cpuset`,
-    // which is a different field and is not reported. Null keeps the column
-    // meaning one thing across both stacks.
+    state: textOrNull(status.state),
+    domain_state: textOrNull(status.domain_state),
+    vcpus: totalVcpus(entry.vcpus, entry.cores, entry.threads),
+    // This stack has a `cpuset` of its own, and it is deliberately not
+    // reported here: on this stack pinning is a separate fact from the vCPU
+    // count, which `vcpus` above always states, whereas `cpu_set` exists to
+    // say that a count could not be stated BECAUSE a set was given instead.
+    // Filling it from `cpuset` would make the column mean two things. Which
+    // host CPUs a VM is pinned to is a question this tool does not answer.
     cpu_set: null,
     memory_bytes: memory === null ? null : memory * BYTES_PER_MIB,
     min_memory_bytes: minMemory === null ? null : minMemory * BYTES_PER_MIB,
-    autostart: booleanOrNull(row['autostart']),
+    autostart: booleanOrNull(entry.autostart),
   };
 }
 
@@ -217,23 +242,22 @@ function fromVmStack(entry: object): VmRow {
  * memory floor in this record, so `min_memory_bytes` is null — which is the
  * absence of a range rather than an unreadable one, and the description says so.
  */
-function fromVirtStack(entry: object): VmRow {
-  const row = entry as Record<string, unknown>;
-  const cpu = textOrNull(row['cpu']);
+function fromVirtStack(entry: VirtInstanceEntry): VmRow {
+  const cpu = textOrNull(entry.cpu);
   const plainCount = cpu !== null && /^\d+$/.test(cpu) ? Number(cpu) : null;
   return {
     source: 'virt_instance',
-    id: textOrNull(row['id']),
-    name: textOrNull(row['name']),
-    state: textOrNull(row['status']),
+    id: textOrNull(entry.id),
+    name: textOrNull(entry.name),
+    state: textOrNull(entry.status),
     // libvirt's domain state has no counterpart on this stack; `status` above
     // already distinguishes ERROR from STOPPED on its own.
     domain_state: null,
     vcpus: plainCount,
     cpu_set: plainCount === null ? cpu : null,
-    memory_bytes: numberOrNull(row['memory']),
+    memory_bytes: numberOrNull(entry.memory),
     min_memory_bytes: null,
-    autostart: booleanOrNull(row['autostart']),
+    autostart: booleanOrNull(entry.autostart),
   };
 }
 
