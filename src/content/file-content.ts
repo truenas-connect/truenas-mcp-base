@@ -124,15 +124,13 @@ export function createDownloadContentReader(
       // front of it. `stat.size` is the size a moment ago: a log file that
       // rotated or was appended to since will land the window somewhere other
       // than its exact end, which `truncated` already covers.
-      const from = Math.max(0, stat.size - maxBytes);
-      // One byte earlier than the tail proper, where there is one. That byte
-      // says whether the window opens on a line boundary: if it is a newline
-      // the window's first line is whole, and without it a window that happens
-      // to start exactly at a boundary would lose a whole line to the
-      // fragment rule in `toTail`. It comes out of the same `maxBytes`
-      // budget rather than extending it.
-      const window = await readWindow(fetch, url, path, from > 0 ? from - 1 : 0, maxBytes);
-      return toTail(path, window, from > 0, maxLines);
+      // The window is the last `maxBytes` of the file: discard that many bytes
+      // fewer than its size, then keep everything to the end. It has to reach
+      // the end — a window stopping short would drop the newest line, which is
+      // the one a tail exists to show.
+      const skip = Math.max(0, stat.size - maxBytes);
+      const window = await readWindow(fetch, url, path, skip, maxBytes);
+      return toTail(path, window, skip > 0, maxLines);
     },
   };
 }
@@ -291,10 +289,11 @@ function toTail(path: string, window: ByteWindow, partial: boolean, maxLines: nu
   if (candidates[candidates.length - 1] === '') {
     candidates.pop();
   }
-  // A window that began mid-file opens on the boundary byte read for that
-  // purpose: either a newline, which splits to a leading empty element, or the
-  // tail of the line before, which is a fragment. Both are dropped by the same
-  // shift, and what follows is a whole line either way.
+  // A window that began mid-file begins mid-line, and there is no byte before
+  // it to say otherwise — so its first element is dropped unread. Where the
+  // window happened to open exactly on a line boundary that costs one whole
+  // line, which is the conservative direction: every line returned is a whole
+  // one, and `truncated` already says content was skipped.
   if (partial) {
     candidates.shift();
   }

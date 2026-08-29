@@ -170,23 +170,45 @@ describe('createDownloadContentReader', () => {
   });
 
   describe('the byte bound', () => {
-    // 15 bytes; a 10-byte ceiling puts the window at byte 5, which is exactly
-    // where "bbbb" begins — the case a boundary-blind reader loses a line to.
     const THREE = 'aaaa\nbbbb\ncccc\n';
 
-    it('keeps whole lines when the window opens exactly on a boundary', async () => {
-      const { files } = readerFor(THREE, { maxBytes: 10 });
+    it('drops the partial line a window opening mid-line begins with', async () => {
+      // 15 bytes, an 8-byte ceiling: the window opens inside "bbbb", and half
+      // a line is not a line.
+      const { files } = readerFor(THREE, { maxBytes: 8 });
       await expect(files.readTail('/var/log/app.log', 10)).resolves.toEqual({
         path: '/var/log/app.log',
-        lines: ['bbbb', 'cccc'],
+        lines: ['cccc'],
         truncated: true,
       });
     });
 
-    it('drops the partial line a window opening mid-line begins with', async () => {
-      const { files } = readerFor(THREE, { maxBytes: 8 });
+    it('drops the first line of a window that opens exactly on a boundary too', async () => {
+      // A 10-byte ceiling opens the window exactly where "bbbb" begins. There
+      // is no byte before it to prove that, so "bbbb" goes unread rather than
+      // being reported as whole on an assumption.
+      const { files } = readerFor(THREE, { maxBytes: 10 });
       await expect(files.readTail('/var/log/app.log', 10)).resolves.toMatchObject({
         lines: ['cccc'],
+        truncated: true,
+      });
+    });
+
+    it('reads to the end of a bounded file whose last line has no newline', async () => {
+      // The newest line is the one a tail is for: a window that stopped even a
+      // byte short of the end would silently shorten it.
+      const { files } = readerFor('aaaa\nbbbb\nlast', { maxBytes: 9 });
+      await expect(files.readTail('/var/log/app.log', 10)).resolves.toMatchObject({
+        lines: ['last'],
+        truncated: true,
+      });
+    });
+
+    it('answers no lines, truncated, for a line longer than the ceiling', async () => {
+      const { files } = readerFor('x'.repeat(40) + '\n', { maxBytes: 8 });
+      await expect(files.readTail('/var/log/app.log', 10)).resolves.toEqual({
+        path: '/var/log/app.log',
+        lines: [],
         truncated: true,
       });
     });

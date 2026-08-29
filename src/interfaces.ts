@@ -111,9 +111,13 @@ export interface FileTail {
   /** The path that was read, echoed back. */
   path: string;
   /**
-   * The lines, oldest first, at most the `maxLines` asked for. Empty means the
-   * file held no content — never an error, and never a failure to read (those
-   * throw).
+   * The lines, oldest first, at most the `maxLines` asked for. Never an error
+   * and never a failure to read — those throw.
+   *
+   * Empty means no whole line was found: a file of no content, or, where
+   * `truncated` is also true, a file whose last line is longer than the byte
+   * ceiling the reader was built with. The two are distinguishable by that
+   * flag; neither is a failure.
    */
   lines: string[];
   /**
