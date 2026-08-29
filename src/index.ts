@@ -79,5 +79,6 @@ export {
   iscsiList,
   nvmeofList,
   usersList,
+  directoryServicesStatus,
   createSnapshot,
 } from '@/tools/index';

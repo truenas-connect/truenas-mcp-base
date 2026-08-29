@@ -3,20 +3,29 @@ import { Role } from '@/interfaces';
 import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
 
 /**
- * Accounts family: who has an account on this system, and what each belongs to.
+ * Accounts family: who has an account on this system, what each belongs to, and
+ * whether the directory service the non-local ones come from is joined.
  *
- * Two middleware namespaces answer it. `user.query` lists the accounts, local
- * and directory-provided alike, and each account carries its primary group
- * whole; `group.query` lists the groups. The second read is what the auxiliary
- * memberships are resolved against — an account names those by group record id
- * and by nothing else, so without the listing they are numbers with no meaning.
+ * `users_list` reads two middleware namespaces. `user.query` lists the
+ * accounts, local and directory-provided alike, and each account carries its
+ * primary group whole; `group.query` lists the groups. The second read is what
+ * the auxiliary memberships are resolved against — an account names those by
+ * group record id and by nothing else, so without the listing they are numbers
+ * with no meaning.
  *
- * The account record is the one place in this library where over-returning is a
- * hazard rather than a cost: it holds `unixhash`, `smbhash`, `sshpubkey` and
- * `password_history`, and passing a row through would put every one of them in
- * front of an LLM. Every field that survives is named here, so a credential a
- * later TrueNAS release adds to the record cannot reach a caller without a
- * change to this file.
+ * `directory_services_status` reads two more. `directoryservices.status` is the
+ * live join state, and it is the tool; `directoryservices.config` is where the
+ * domain and the bind method are read from, and it is reported rather than
+ * fatal for the reason `readConfig` gives.
+ *
+ * Both payloads are ones where over-returning is a hazard rather than a cost.
+ * The account record holds `unixhash`, `smbhash`, `sshpubkey` and
+ * `password_history`; the directory services configuration embeds the
+ * credential the system binds with — a Kerberos `password`, an LDAP `bindpw`.
+ * Passing either row through would put every one of them in front of an LLM.
+ * Every field that survives is named here, so a credential a later TrueNAS
+ * release adds to either record cannot reach a caller without a change to this
+ * file.
  */
 
 /**
@@ -318,6 +327,129 @@ export const usersList: ReadOnlyTool = {
       groups_truncated: groups.truncated,
       groups_error: groups.error,
       limit,
+    };
+  },
+};
+
+/** What `directoryservices.config` contributes, when it could be read. */
+interface DirectoryConfig {
+  enabled: boolean;
+  domain: string | null;
+  server_urls: string[] | null;
+  kerberos_realm: string | null;
+  credential_type: string | null;
+}
+
+/** The directory services configuration, or the failure that stopped it. */
+interface ConfigAttempt {
+  values: DirectoryConfig | null;
+  error: string | null;
+}
+
+/**
+ * What the system is configured to join, with a failure named rather than
+ * thrown.
+ *
+ * Reported rather than fatal for the reason `readGroups` is: the two reads fail
+ * independently, and the question the tool is asked — is the directory service
+ * joined and healthy — is answered by `directoryservices.status` on its own.
+ * The status read is the one that may fail the tool, because a domain with no
+ * state beside it says nothing about whether the join works.
+ *
+ * NO CREDENTIAL IS TAKEN OUT OF THIS PAYLOAD. `credential` embeds the secret
+ * the system binds with — `password` on a Kerberos user, `bindpw` on an LDAP
+ * plain bind — and only its `credential_type` discriminant is read, which names
+ * HOW the system binds and never WITH WHAT.
+ */
+async function readConfig(system: SystemHandle): Promise<ConfigAttempt> {
+  try {
+    const entry = await firstValueFrom(system.client.api.call('directoryservices.config'));
+    // The per-service configuration is a union carrying no discriminant of its
+    // own, so each field is narrowed by the presence of the field itself: an
+    // Active Directory or IPA configuration holds `domain` and an LDAP one does
+    // not; an LDAP one holds `server_urls` and the other two do not.
+    const configuration = entry.configuration ?? null;
+    return {
+      values: {
+        enabled: entry.enable,
+        domain:
+          configuration !== null && 'domain' in configuration
+            ? textOrNull(configuration.domain)
+            : null,
+        server_urls:
+          configuration !== null && 'server_urls' in configuration
+            ? configuration.server_urls
+            : null,
+        kerberos_realm: textOrNull(entry.kerberos_realm),
+        credential_type: entry.credential?.credential_type ?? null,
+      },
+      error: null,
+    };
+  } catch (reason) {
+    return { values: null, error: errorText(reason) };
+  }
+}
+
+export const directoryServicesStatus: ReadOnlyTool = {
+  name: 'directory_services_status',
+  description:
+    'Whether this system is joined to a directory service — Active Directory, ' +
+    'IPA or LDAP — and whether that join is currently working. `service_type` ' +
+    'is which one is configured, and NULL MEANS NONE IS: a system with no ' +
+    'directory service is the ordinary case and is not a failure. `status` is ' +
+    'the live state of the join, one of `HEALTHY` (joined and working), ' +
+    '`FAULTED` (configured and NOT working), `JOINING` or `LEAVING` (a join or ' +
+    'a departure is in progress), and `DISABLED` (configured but switched ' +
+    'off); it is null where the system reported no state, WHICH IS NOT THE ' +
+    'SAME AS HEALTHY. So "no directory service" is `service_type` null, and ' +
+    '"a directory service that is not working" is `service_type` set with ' +
+    '`status` `FAULTED` — the two never have to be told apart by reading ' +
+    'prose. `status_message` is what the system said about that state, which ' +
+    'is where the reason for a `FAULTED` join appears, and is null where it ' +
+    'said nothing. `enabled` is whether the configured service is switched on, ' +
+    'which is the setting rather than the state: a service can be enabled and ' +
+    '`FAULTED` at the same time. `domain` is the Active Directory or IPA ' +
+    'domain, and IS NULL FOR AN LDAP SERVICE, WHICH HAS NO DOMAIN — an LDAP ' +
+    'directory is identified by `server_urls` instead, which is in turn null ' +
+    'for Active Directory and IPA. `kerberos_realm` is the realm the join ' +
+    'authenticates against, null where none is set. `credential_type` names ' +
+    'HOW the system binds — a Kerberos user or principal, an anonymous, plain ' +
+    'or certificate LDAP bind — and is null where no credential is ' +
+    'configured. NO PASSWORD, BIND PASSWORD, KEYTAB OR CERTIFICATE IS ' +
+    'RETURNED BY THIS TOOL under any circumstances: only the fields named here ' +
+    'are returned, whatever else a later TrueNAS release adds to the ' +
+    'configuration. `config_error` names what the system said when the ' +
+    'configuration could not be read at all, and WHILE IT IS NON-NULL ' +
+    '`enabled`, `domain`, `server_urls`, `kerberos_realm` and ' +
+    '`credential_type` ARE ALL NULL BECAUSE THEY COULD NOT BE READ, not ' +
+    'because they are unset — `service_type`, `status` and `status_message` ' +
+    'come from a separate read and are unaffected. This tool reports the join; ' +
+    'it does not join, leave or reconfigure anything, and it does not list the ' +
+    'accounts the directory provides — that is `users_list`.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }) {
+    // Both reads are issued before either is awaited, so neither waits on the
+    // other. Only the status read may fail the tool, for the reason
+    // `readConfig` gives.
+    const [status, config] = await Promise.all([
+      firstValueFrom(system.client.api.call('directoryservices.status')),
+      readConfig(system),
+    ]);
+
+    return {
+      service_type: status.type,
+      // Not defaulted to a state: a status the system did not report must not
+      // read as one it did.
+      status: status.status ?? null,
+      status_message: textOrNull(status.status_msg),
+      enabled: config.values?.enabled ?? null,
+      domain: config.values?.domain ?? null,
+      server_urls: config.values?.server_urls ?? null,
+      kerberos_realm: config.values?.kerberos_realm ?? null,
+      credential_type: config.values?.credential_type ?? null,
+      config_error: config.error,
     };
   },
 };
