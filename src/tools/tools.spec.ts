@@ -949,10 +949,9 @@ describe('datasets_quota_report', () => {
   it('asks the middleware for the two limits and the two usages they cap', async () => {
     const { ctx, query } = fakeSystem({ ['pool.dataset.query']: [] });
     await quotaReport.handler(ctx, {});
-    // `referenced` is requested by name though the generated entry type does
-    // not declare it: it is the property `refquota` caps, and without it the
-    // refquota percentage could only be computed against `used`, which caps
-    // nothing of the sort.
+    // `referenced` is requested by name because it is the property `refquota`
+    // caps; without it the refquota percentage could only be computed against
+    // `used`, which caps nothing of the sort.
     expect(query).toHaveBeenCalledWith('pool.dataset.query', [], {
       extra: {
         retrieve_children: true,

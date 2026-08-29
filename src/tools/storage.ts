@@ -102,11 +102,14 @@ function propertyBytes(property: unknown): number | null {
  * worth avoiding.
  *
  * `0` is what ZFS itself reports for "no limit" rather than a sentinel chosen
- * here, and the client types the same field `number | (0 | null)` on the
- * dataset payload. So a null is that same spelling wherever it appears — as
- * the property itself, or as its `parsed` value — and both report as `0`. Only
- * a property that is absent, that is not an object at all, or that carries no
- * `parsed` value is unreadable.
+ * here. Null is read as that same "no limit" wherever it appears — as the
+ * property itself, or as its `parsed` value — on the evidence that the client
+ * types this field `number | (0 | null)` on the dataset create and update
+ * payloads: the API treats the two as one meaning on the side it does type.
+ * The query response is typed `Record<string, unknown>` and settles nothing
+ * either way, so this is a reading rather than a guarantee. Only a property
+ * that is absent, that is not an object at all, or that carries no `parsed`
+ * value is unreadable.
  */
 function quotaLimit(property: unknown): number | null {
   if (property === null) return 0;
@@ -195,12 +198,13 @@ export const quotaReport: ReadOnlyTool = {
       system.client.api.query('pool.dataset.query', [], {
         extra: {
           retrieve_children: true,
-          // `referenced` is a core ZFS property and the one `refquota` caps,
-          // but the generated entry type does not declare it — that type is an
-          // allowlist of the fields the generator saw, with an index signature
-          // for everything else. It is requested by name like the others, and
-          // a middleware that does not return it leaves the refquota
-          // percentage null rather than computing a wrong one against `used`.
+          // `referenced` is a core ZFS property and the one `refquota` caps.
+          // The client declares no dataset field at all — `pool.dataset.query`
+          // answers `Record<string, unknown>` — so asking for it by name is no
+          // less grounded than asking for `used`, and equally unconfirmed
+          // against a live middleware. One that does not return it leaves the
+          // refquota percentage null rather than computing a wrong one against
+          // `used`, which caps nothing of the sort.
           properties: ['used', 'referenced', 'quota', 'refquota'],
         },
       }),
