@@ -636,10 +636,11 @@ export const nvmeofList: ReadOnlyTool = {
     'naming no host to report, which is the one kind that names a subsystem ' +
     'and still cannot be listed under it. WHILE EITHER LIST IS NOT EMPTY THE ' +
     'PER-SUBSYSTEM `namespaces` AND `hosts` LISTS ARE INCOMPLETE, and an empty ' +
-    'one there is not a subsystem with nothing on it. Both are empty when a ' +
-    'read failed, because nothing was read to place — `failures` is what says ' +
-    'so, and is also what tells a list that could not be read from one that ' +
-    'could not be attributed. This tool reads only ' +
+    'one there is not a subsystem with nothing on it. EACH list is empty when ' +
+    'the read that would fill it failed, because nothing was read to place, ' +
+    'and the other list is unaffected — `failures` names which read that was, ' +
+    'and is also what tells a list that could not be read from one that could ' +
+    'not be attributed. This tool reads only ' +
     'NVMe-oF: iSCSI targets are `iscsi_list`, and SMB or NFS shares are ' +
     '`shares_list`. It does not report which ports a subsystem is published ' +
     'on, so a subsystem listed here is not necessarily reachable over the ' +
