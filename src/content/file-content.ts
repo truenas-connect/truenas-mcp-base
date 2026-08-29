@@ -63,8 +63,13 @@ export interface DownloadContentReaderOptions {
   client: TrueNasApiClient<ApiSurface>;
   /**
    * Origin the minted download URL is resolved against, e.g.
-   * `https://nas.local`. The client knows the hostname it connected to but
-   * keeps it `protected`, so the caller that built the client supplies it.
+   * `https://nas.local`. Fixed for the life of the reader, so it must name the
+   * host the client is actually talking to rather than the first of the
+   * configured hostnames: a client that connected over a fallback would
+   * otherwise have every download fetched from a host that never minted the
+   * token. `client.connection.hostname$` is public and is where a caller can
+   * read that; what the client keeps `protected` is `hostnames`, the
+   * configured list, which does not say which one won.
    */
   baseUrl: string;
   fetch: ContentFetcher;

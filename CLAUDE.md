@@ -86,6 +86,11 @@ optional `ContentReaderFactory`; without one every `SystemHandle.files` is
 factory is handed the system's name and hostnames and not its `SystemSpec` —
 the content seam has no business holding the API key.
 
+The `baseUrl` a factory builds must name the host the client actually
+connected to, which `client.connection.hostname$` reports; the configured
+`hostnames` list does not say which of them won a failover, and a download
+fetched from a host that did not mint the token fails.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
