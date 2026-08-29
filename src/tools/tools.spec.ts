@@ -11132,6 +11132,42 @@ describe('fleet_compliance_report', () => {
     });
   });
 
+  it('does not read a join with no state as one that works', async () => {
+    const result = await report({ ['directoryservices.status']: status({ status: null }) });
+    expect(result.directory_service['status']).toBeNull();
+    expect(result.unreadable).toEqual([
+      {
+        system: 'nas',
+        section: 'directory_service',
+        detail:
+          'the system reported no state for its directory service, so whether the join works ' +
+          'is not established — which is not the same as a join that works',
+      },
+    ]);
+  });
+
+  it('does not read a configuration that would not say whether the service is on as off', async () => {
+    const result = await report({ ['directoryservices.config']: config({ enable: 'sure' }) });
+    expect(result.directory_service['enabled']).toBeNull();
+    expect(result.directory_service['config_error']).toBeNull();
+    expect(result.unreadable).toEqual([
+      {
+        system: 'nas',
+        section: 'directory_service',
+        detail:
+          'the directory service configuration was read and did not say whether the service ' +
+          'is switched on, so that is not established — which is not the same as switched off',
+      },
+    ]);
+  });
+
+  it('names a failed configuration read once, not twice for the fields it took down', async () => {
+    const result = await report({}, { ['directoryservices.config']: new Error('permission denied') });
+    // `enabled` is null here too, and the entry above already says why.
+    expect(result.directory_service['enabled']).toBeNull();
+    expect(result.unreadable).toHaveLength(1);
+  });
+
   it('reports what is exposed and over which protocol, switched-on shares first', async () => {
     const result = await report({
       ['sharing.smb.query']: [

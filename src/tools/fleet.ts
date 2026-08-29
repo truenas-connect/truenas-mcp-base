@@ -693,16 +693,53 @@ function certificateUnreadable(read: CertificateRead, system: string): Unreadabl
   ];
 }
 
-/** What the directory-service section could not establish. */
+/**
+ * What the directory-service section could not establish: the configuration read
+ * that failed, and the two fields that can come back unread with no error beside
+ * them at all.
+ *
+ * `status` and `enabled` are those two, and `directory_services_status` says why
+ * each matters: a state the system did not report IS NOT `HEALTHY`, and a switch
+ * it reported no value for is NOT `false`. Both are the same fact the shares and
+ * certificates sections report about a field that would not read, and they are
+ * here so that an empty `unreadable` keeps meaning what this tool's description
+ * offers it as — that every fact below was actually read.
+ *
+ * `service_type` is deliberately NOT one of them. Null there is documented as
+ * "no directory service is configured", which is an answer about the system
+ * rather than a hole in the report, and reporting the ordinary case as an
+ * unestablished fact would bury the real ones.
+ */
 function directoryUnreadable(read: DirectoryRead, system: string): Unreadable[] {
-  if (read.config_error === null) return [];
-  return [
-    {
+  const facts: Unreadable[] = [];
+  if (read.config_error !== null) {
+    facts.push({
       system,
       section: 'directory_service',
       detail: `the directory service configuration could not be read, so what this system is joined to is not established: ${read.config_error}`,
-    },
-  ];
+    });
+  }
+  if (read.status === null) {
+    facts.push({
+      system,
+      section: 'directory_service',
+      detail:
+        'the system reported no state for its directory service, so whether the join works is ' +
+        'not established — which is not the same as a join that works',
+    });
+  }
+  // Only where the configuration itself was read: where it was not, the entry
+  // above already says so, and this would report the same gap twice.
+  if (read.config_error === null && read.enabled === null) {
+    facts.push({
+      system,
+      section: 'directory_service',
+      detail:
+        'the directory service configuration was read and did not say whether the service is ' +
+        'switched on, so that is not established — which is not the same as switched off',
+    });
+  }
+  return facts;
 }
 
 /** How a protocol whose own name could not be read is referred to. */
@@ -823,13 +860,20 @@ export const fleetComplianceReport: ReadOnlyTool = {
     '`entries_seen` is how many entries came ' +
     'back inside the window and `by_service` counts them per trail, busiest ' +
     'first, so a trail that IS recording can be named — `MIDDLEWARE`, `SMB`, ' +
-    '`SUDO`, `SYSTEM`, or a name a later TrueNAS release adds. A SERVICE ' +
-    'MISSING FROM `by_service` IS NOT A SERVICE THAT IS NOT AUDITED; it is one ' +
-    'that recorded nothing in the window. `window_start` is the instant the ' +
-    'trail was read from — the last 24 hours — so an empty result is readable ' +
-    'against the window it was taken from, and `truncated` says the system ' +
-    'holds more entries than were counted, which lowers `entries_seen` and ' +
-    'never raises it. NO AUDIT ENTRY ITSELF IS RETURNED: those name people and ' +
+    '`SUDO`, `SYSTEM`, or a name a later TrueNAS release adds; `service` is ' +
+    'null on entries whose own trail the system did not name, which is one ' +
+    'count and not a missing one. A SERVICE MISSING FROM `by_service` IS NEVER ' +
+    'EVIDENCE THAT IT IS NOT AUDITED, and what its absence DOES mean depends on ' +
+    '`truncated`. `window_start` is the instant the ' +
+    'trail was read from — the last 24 hours — and `truncated` says the trail ' +
+    'holds more entries in that window than were counted, because the read ' +
+    'stops at a fixed bound. WHILE `truncated` IS TRUE, `entries_seen` AND ' +
+    'EVERY COUNT IN `by_service` ARE FLOORS, and a service missing from it may ' +
+    'simply not have fitted — a busy `MIDDLEWARE` trail can fill the bound on ' +
+    'its own and push every `SMB` entry out of the answer. ONLY WHERE ' +
+    '`truncated` IS FALSE does a missing service mean it recorded nothing ' +
+    'inside the window. Call `audit_log_query` narrowed to one service to ' +
+    'settle it either way. NO AUDIT ENTRY ITSELF IS RETURNED: those name people and ' +
     'what they did, which is `audit_log_query`\'s answer and not this one. ' +
     '`certificates` reports expiry. `reported` is how many certificates the ' +
     'system holds; `expired` how many have already lapsed, `expiring_soon` how ' +
@@ -847,14 +891,20 @@ export const fleetComplianceReport: ReadOnlyTool = {
     '`days_until_expiry` — negative where it has already expired, by that many ' +
     'days — and `expired`, WHICH IS THE SYSTEM\'S OWN VERDICT and can disagree ' +
     'with the day count beside it, in which case both are worth reading and ' +
-    'neither is corrected here. NO CERTIFICATE OR PRIVATE KEY MATERIAL IS ' +
+    'neither is corrected here; `expired` is null where the system gave no ' +
+    'verdict, WHICH IS NOT "NOT EXPIRED" — the day count beside it is then the ' +
+    'only reading there is. NO CERTIFICATE OR PRIVATE KEY MATERIAL IS ' +
     'RETURNED. `directory_service` reports where this system gets its ' +
     'identities. `service_type` is which of Active Directory, IPA or LDAP is ' +
     'configured and NULL MEANS NONE IS, which is the ordinary case and is not a ' +
     'fault; `status` is the live state of the join — `HEALTHY`, `FAULTED`, ' +
     '`JOINING`, `LEAVING` or `DISABLED` — and `status_message` what the system ' +
-    'said about it. `enabled` is the SETTING rather than the state, and a ' +
-    'service can be enabled and `FAULTED` at once. `domain`, `server_urls` and ' +
+    'said about it. A NULL `status` IS NOT `HEALTHY`: the system reported no ' +
+    'state, and `unreadable` says so. `enabled` is the SETTING rather than the ' +
+    'state, and a service can be enabled and `FAULTED` at once; A NULL ' +
+    '`enabled` IS NOT `false`, and where it is null with `config_error` null ' +
+    'the configuration was read and did not say — again named in `unreadable`. ' +
+    '`domain`, `server_urls` and ' +
     '`kerberos_realm` name the directory: `domain` is null for LDAP, which is ' +
     'identified by `server_urls` instead, and `server_urls` is null for Active ' +
     'Directory and IPA. `server_urls` IS REPORTED WHOLE OR NOT AT ALL — a list ' +
