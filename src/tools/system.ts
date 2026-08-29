@@ -740,3 +740,130 @@ export const auditConfig: ReadOnlyTool = {
     };
   },
 };
+
+/** One reason the system gave for needing a restart, as this tool reports it. */
+interface RebootReason {
+  code: string | null;
+  reason: string | null;
+}
+
+/**
+ * The reasons the system listed, or null where it reported no list this tool
+ * could read.
+ *
+ * Those are different answers and this tool turns on keeping them apart: an
+ * empty list is the system saying nothing is pending, and no list at all is the
+ * system having said nothing about it.
+ *
+ * An entry that could not be read is kept as a pair of nulls rather than
+ * dropped, which is the opposite of the all-or-nothing reading
+ * {@link scopeNames} takes and is the same argument arriving at the other
+ * answer. There, a list one name shorter understates what is audited and the
+ * whole list is nulled to say so. Here, a list one reason shorter runs towards
+ * EMPTY — and empty is this tool's one positive finding, "nothing is pending".
+ * A reason this tool cannot read is still a reason the system raised, so it
+ * stays and it counts.
+ */
+function rebootReasons(value: unknown): RebootReason[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.map((entry) => {
+    const held = recordOrNull(entry);
+    return {
+      code: held === null ? null : textOrNull(held['code']),
+      reason: held === null ? null : textOrNull(held['reason']),
+    };
+  });
+}
+
+/**
+ * Whether the system is waiting to be restarted, and what made it necessary.
+ *
+ * This is the state a system sits in after an update or a configuration change
+ * that needs a restart — running, but not running what it is configured to run
+ * — and nothing else in this catalog reports it. `system_update_status` answers
+ * whether an update is AVAILABLE, and a system that has already taken one and
+ * not been restarted answers that with an honest "no": it is up to date, and it
+ * is not yet running what it updated to. An assistant summarising such a system
+ * from the tools that existed before this one describes it as current.
+ *
+ * `system.reboot.info` takes no arguments and its payload is already shaped for
+ * a reader — a list of reasons, each carrying a code and prose written for a
+ * person — so there is almost no normalization to do. What is left is the
+ * question of absence, and it is the sharp one here: the middleware's EMPTY
+ * list is the answer on a healthy system, so it has to read as a finding rather
+ * than as a result the caller is left to interpret. Hence `reboot_required`,
+ * derived from the list rather than reported beside it.
+ *
+ * WHAT THIS TOOL DELIBERATELY DOES NOT DO:
+ *
+ * - **It does not reboot anything, or schedule or cancel one.** `system.reboot`
+ *   exists and is mutating; no tool here is.
+ * - **It does not read the other node of an HA pair.**
+ *   `failover.reboot.info` answers the same question about the peer, and
+ *   `ha_status` is the tool that would grow it.
+ */
+export const rebootInfo: ReadOnlyTool = {
+  name: 'system_reboot_info',
+  description:
+    'Whether a TrueNAS system is waiting to be restarted, and what made it ' +
+    'necessary. This is the state a system sits in AFTER an update or a ' +
+    'configuration change that needs a restart — running, but not yet running ' +
+    'what it is configured to run — and NOTHING ELSE IN THIS CATALOG REPORTS ' +
+    'IT: `system_update_status` says whether an update is AVAILABLE, and a ' +
+    'system that has already taken one and not been restarted reports as up to ' +
+    'date, because it is. `reboot_required` is true when the system listed at ' +
+    'least one reason it needs restarting, false when it listed none, and NULL ' +
+    'WHERE THE SYSTEM REPORTED NO LIST OF REASONS THIS TOOL COULD READ. False ' +
+    'is a positive finding — the system was asked and said nothing is pending ' +
+    '— and null is not that: nothing has been established, and a null must ' +
+    'never be read as "no restart needed". `reasons` is one entry per reason, ' +
+    'and is the list `reboot_required` is derived from: AN EMPTY `reasons` IS ' +
+    'THAT SAME POSITIVE FINDING, nothing pending, and a null `reasons` is the ' +
+    'same unreadable answer that makes `reboot_required` null. Each entry ' +
+    'carries `code`, the system\'s own identifier for the reason — a symbol to ' +
+    'match on rather than prose to show — and `reason`, the human-readable ' +
+    'text the system wrote for it, which is what to show and what says why. ' +
+    'Either is null where the system reported no value this tool could read, ' +
+    'and AN ENTRY WHOSE FIELDS ARE BOTH NULL IS STILL A REASON THE SYSTEM ' +
+    'RAISED: it is kept, and it still makes `reboot_required` true, because a ' +
+    'reason this tool cannot read is not a reason that is not there. `boot_id` ' +
+    'IS AN OPAQUE IDENTIFIER FOR THE BOOT THE SYSTEM IS CURRENTLY RUNNING. It ' +
+    'is not a version, a time, or anything to show a person, and it means ' +
+    'nothing on its own — do not display it or reason about its contents. Its ' +
+    'one use is comparing two reads of the same system: a `boot_id` that has ' +
+    'changed between them is a system that restarted in between, and a reason ' +
+    'still listed after it changed is one the restart did not clear. It is ' +
+    'null where the system reported no identifier this tool could read. ' +
+    'Reboot information that could not be read AT ALL is an error naming what ' +
+    'the system said, not a result of nulls. This tool only reports. It does ' +
+    'not restart the system, schedule a restart or cancel one, and it does not ' +
+    'download or apply the update behind a pending restart. It answers about ' +
+    'THIS system only: on a two-node HA pair the other node is asked ' +
+    'separately and is not read here, which is `ha_status`\'s question. NO ' +
+    'field beyond the three named here is returned, whatever a later TrueNAS ' +
+    'release adds to the payload.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }) {
+    const info = await firstValueFrom(system.client.api.call('system.reboot.info'));
+    // Guarded rather than reached into, for the reason `audit_config` gives: a
+    // system answering with something that is not reboot information would
+    // otherwise throw naming a property, and the caller would see the name of a
+    // field rather than the read that failed.
+    const payload = recordOrNull(info);
+    if (payload === null) {
+      throw new Error('system.reboot.info did not answer with reboot information');
+    }
+    const reasons = rebootReasons(payload['reboot_required_reasons']);
+    return {
+      // Derived rather than read: the middleware states the answer by the
+      // length of a list, and a caller should not have to know that. Null where
+      // the list was unreadable, which is the one case that is neither yes nor
+      // no.
+      reboot_required: reasons === null ? null : reasons.length > 0,
+      reasons,
+      boot_id: textOrNull(payload['boot_id']),
+    };
+  },
+};

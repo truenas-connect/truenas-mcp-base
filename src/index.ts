@@ -79,6 +79,7 @@ export {
   createDefaultCatalog,
   systemInfo,
   updateStatus,
+  rebootInfo,
   auditLogQuery,
   auditConfig,
   poolStatus,

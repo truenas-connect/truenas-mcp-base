@@ -284,6 +284,24 @@ would report 100% for fixtures and move the global percentages without a line of
 the library being tested any better — the same reason `src/index.ts` is already
 excluded there.
 
+### An unreadable list entry is nulled or kept by which way it moves the summary (#93)
+
+`audit_config`'s `scopeNames` nulls its WHOLE list when one entry cannot be read;
+`system_reboot_info`'s `rebootReasons` KEEPS such an entry, as a pair of nulls.
+Both are the null/empty/unreadable convention below, and they disagree because
+the convention alone does not decide this — what decides it is the direction the
+shorter list moves the answer.
+
+Ask what an entry silently disappearing would make the result say. A scope one
+name shorter says the system does not audit that share, which is more than the
+read established, so the list is nulled to refuse the claim. A reason list one
+entry shorter runs towards EMPTY, and empty is `system_reboot_info`'s one
+positive finding — "nothing is pending" — so the entry stays and still counts
+towards `reboot_required`. **Drop towards a claim and you must null; drop towards
+a fact the tool asserts and you must keep.** Neither answer is the safe default,
+and a tool that copies whichever sibling it read first will land on the wrong one
+about half the time.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

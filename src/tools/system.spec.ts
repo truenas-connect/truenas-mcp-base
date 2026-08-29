@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeSystem, failingSystem } from '@/testing/fake-systems';
-import { auditConfig, auditLogQuery, updateStatus } from '@/tools/index';
+import { auditConfig, auditLogQuery, rebootInfo, updateStatus } from '@/tools/index';
 
 describe('system_update_status', () => {
   /** `update.status` as the middleware sends it on a system with an update. */
@@ -744,6 +744,132 @@ describe('audit_config', () => {
     const { ctx, call, query } = fakeSystem({ ['audit.config']: config() });
     await auditConfig.handler(ctx, {});
     expect(call.mock.calls.map((args) => args[0])).toEqual(['audit.config']);
+    expect(query).not.toHaveBeenCalled();
+  });
+});
+
+describe('system_reboot_info', () => {
+  /** `system.reboot.info` as the middleware sends it on a system with a reboot pending. */
+  const info = (over: Record<string, unknown> = {}) => ({
+    boot_id: '0f1c2d3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f',
+    reboot_required_reasons: [
+      { code: 'FIPS', reason: 'FIPS mode was changed and requires a reboot' },
+    ],
+    ...over,
+  });
+
+  // Required rather than defaulted to `info()`: one of the cases below is a
+  // system answering with `undefined`, which a default would swallow.
+  const reported = async (answer: unknown): Promise<Record<string, unknown>> => {
+    const { ctx } = fakeSystem({ ['system.reboot.info']: answer });
+    return (await rebootInfo.handler(ctx, {})) as Record<string, unknown>;
+  };
+
+  /** The result for a payload differing only in the fields the case is about. */
+  const forInfo = async (over: Record<string, unknown>): Promise<Record<string, unknown>> =>
+    reported(info(over));
+
+  it('reports a pending reboot with the code and the text of each reason', async () => {
+    expect(await reported(info())).toEqual({
+      reboot_required: true,
+      reasons: [{ code: 'FIPS', reason: 'FIPS mode was changed and requires a reboot' }],
+      boot_id: '0f1c2d3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f',
+    });
+  });
+
+  it('reports every reason the system listed, in the order it listed them', async () => {
+    const result = await forInfo({
+      reboot_required_reasons: [
+        { code: 'FIPS', reason: 'FIPS mode was changed and requires a reboot' },
+        { code: 'SED', reason: 'A self-encrypting drive password was set' },
+      ],
+    });
+    expect(result['reasons']).toEqual([
+      { code: 'FIPS', reason: 'FIPS mode was changed and requires a reboot' },
+      { code: 'SED', reason: 'A self-encrypting drive password was set' },
+    ]);
+  });
+
+  it('reports a system with nothing pending as an explicit no', async () => {
+    // The whole point of `reboot_required`: the middleware states this by the
+    // length of a list, and false is a finding rather than an empty result the
+    // caller is left to interpret.
+    expect(await forInfo({ reboot_required_reasons: [] })).toEqual({
+      reboot_required: false,
+      reasons: [],
+      boot_id: '0f1c2d3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f',
+    });
+  });
+
+  it('keeps "nothing pending" and "could not be read" apart', async () => {
+    // The pair this tool exists to distinguish. Above, false with an empty
+    // list; here, null with a null list — never the same answer.
+    for (const unreadable of [null, undefined, 'FIPS', 7, {}]) {
+      expect(await forInfo({ reboot_required_reasons: unreadable })).toMatchObject({
+        reboot_required: null,
+        reasons: null,
+      });
+    }
+  });
+
+  it('keeps a reason it could not read rather than dropping it towards empty', async () => {
+    // Dropping it would shorten the list towards empty, and empty is this
+    // tool's one positive finding. A reason it cannot read is still a reason.
+    const result = await forInfo({ reboot_required_reasons: ['FIPS', null, 7, []] });
+    expect(result['reasons']).toEqual([
+      { code: null, reason: null },
+      { code: null, reason: null },
+      { code: null, reason: null },
+      { code: null, reason: null },
+    ]);
+    expect(result['reboot_required']).toBe(true);
+  });
+
+  it('reports a code or a text it could not read as null, keeping the other', async () => {
+    const result = await forInfo({
+      reboot_required_reasons: [
+        { code: 'FIPS', reason: '' },
+        { code: null, reason: 'Something changed' },
+        { code: 7, reason: 7 },
+      ],
+    });
+    expect(result['reasons']).toEqual([
+      { code: 'FIPS', reason: null },
+      { code: null, reason: 'Something changed' },
+      { code: null, reason: null },
+    ]);
+  });
+
+  it('reports a boot id it could not read as null', async () => {
+    for (const unreadable of [null, undefined, '', 7]) {
+      expect(await forInfo({ boot_id: unreadable })).toMatchObject({ boot_id: null });
+    }
+  });
+
+  it('carries no field the tool does not name, including one a later release adds', async () => {
+    const result = await forInfo({ other_node: null, reboot_scheduled_at: '2026-08-29T09:00:00Z' });
+    expect(Object.keys(result)).toEqual(['reboot_required', 'reasons', 'boot_id']);
+  });
+
+  it('fails rather than answering nulls when the payload is not reboot information', async () => {
+    // Reached into rather than guarded, this would throw naming a property
+    // rather than the read that failed.
+    for (const answer of [null, undefined, 'rebooting', 7, []]) {
+      await expect(reported(answer)).rejects.toThrow(
+        'system.reboot.info did not answer with reboot information',
+      );
+    }
+  });
+
+  it('fails rather than answering "nothing pending" when the read could not be made', async () => {
+    const { ctx } = failingSystem({}, { ['system.reboot.info']: new Error('connection reset') });
+    await expect(rebootInfo.handler(ctx, {})).rejects.toThrow('connection reset');
+  });
+
+  it('never mutates: it reads the reboot information and nothing else', async () => {
+    const { ctx, call, query } = fakeSystem({ ['system.reboot.info']: info() });
+    await rebootInfo.handler(ctx, {});
+    expect(call.mock.calls.map((args) => args[0])).toEqual(['system.reboot.info']);
     expect(query).not.toHaveBeenCalled();
   });
 });
