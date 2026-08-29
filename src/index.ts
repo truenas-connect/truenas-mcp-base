@@ -112,5 +112,6 @@ export {
   reportingAppVmUsage,
   haStatus,
   systemHealthReport,
+  fleetComplianceReport,
   createSnapshot,
 } from '@/tools/index';

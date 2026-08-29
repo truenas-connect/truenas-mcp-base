@@ -118,6 +118,32 @@ A composed handler is typed `Promise<unknown>`, so a composite re-reads every
 field through its own guard and names it explicitly — which is also what keeps a
 field one of those tools grows later out of the composite's result.
 
+### A composite states a verdict only about something it defines (#47)
+
+`fleet_compliance_report` is the second composite and it deliberately has **no
+`verdict` field**, where `system_health_report` leads with one. The difference is
+not style. "Healthy" is a claim this repository defines — the thresholds, the
+device states and the alert bands are all in `reporting.ts` and are all
+checkable, so a verdict follows from the sections. "Compliant" is a claim against
+a standard that lives outside this repository, in a framework or a policy or a
+customer's contract, and no tool here has been told which. So the compliance
+report states facts and names what it could not read, and any pass/fail reading
+of it is the reader's.
+
+**Ask which of the two a new composite is before designing its response.** A
+report over a subject the code defines gets a verdict, `UNKNOWN` and all; a
+report over a subject someone else defines gets facts and an `unreadable` list,
+and adding a verdict to the second is asserting a standard nobody supplied.
+
+The other half of the same rule is where a fact's real source is a setting no
+tool in this catalog reports. `fleet_compliance_report` is asked for "whether
+auditing is enabled"; the setting is `audit.config`, no tool reports it, and a
+composite adds no endpoint. So it reports what reading the trail can actually
+establish, under `auditing.recording`, named for the evidence rather than for the
+setting, true only where entries were seen and null everywhere else. **Name the
+field after what was measured, not after the question it was asked** — a
+`recording` that is null is honest, an `enabled` that is null reads as "off".
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
