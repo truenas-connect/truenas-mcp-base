@@ -114,5 +114,6 @@ export {
   haStatus,
   systemHealthReport,
   fleetComplianceReport,
+  fleetHealthRollup,
   createSnapshot,
 } from '@/tools/index';

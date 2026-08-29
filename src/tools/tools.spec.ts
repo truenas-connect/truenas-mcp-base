@@ -18,6 +18,7 @@ import {
   directoryServicesStatus,
   disksList,
   fleetComplianceReport,
+  fleetHealthRollup,
   haStatus,
   iscsiList,
   listDatasets,
@@ -87,7 +88,7 @@ function failingSystem(
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the thirty-eight sketch tools', () => {
+  it('registers the thirty-nine sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -126,8 +127,15 @@ describe('createDefaultCatalog', () => {
       'ha_status',
       'system_health_report',
       'fleet_compliance_report',
+      'fleet_health_rollup',
       'snapshots_create',
     ]);
+  });
+
+  it('advertises fleet_health_rollup to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'fleet_health_rollup',
+    );
   });
 
   it('advertises audit_config to a read-only credential', () => {
@@ -11589,5 +11597,185 @@ describe('fleet_compliance_report', () => {
     expect(fleetComplianceReport.mutating).toBe(false);
     expect(fleetComplianceReport.requiredRole).toBe(Role.ReadOnly);
     expect(fleetComplianceReport.inputSchema).toEqual({ type: 'object', properties: {} });
+  });
+});
+
+describe('fleet_health_rollup', () => {
+  /** One leaf of a vdev tree, as `pool.query` nests it under `topology`. */
+  const device = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    name: 'sda1',
+    type: 'DISK',
+    status: 'ONLINE',
+    disk: 'sda',
+    children: [],
+    ...over,
+  });
+
+  /** One pool as `pool.query` reports it, feeding both pool reads of the health report. */
+  const pool = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    name: 'tank',
+    status: 'ONLINE',
+    healthy: true,
+    size: 1000,
+    allocated: 100,
+    free: 900,
+    topology: { data: [device()] },
+    ...over,
+  });
+
+  /** One alert as `alert.list` reports it. */
+  const alert = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: '1',
+    klass: 'ZpoolCapacityWarning',
+    level: 'WARNING',
+    formatted: 'tank is filling up',
+    datetime: { $date: 0 },
+    dismissed: false,
+    ...over,
+  });
+
+  /** An `update.status` payload for a system that is already up to date. */
+  const upToDate = (): Record<string, unknown> => ({
+    code: 'NORMAL',
+    error: null,
+    status: { new_version: null, current_version: { train: 'TN-25.04' } },
+  });
+
+  /** Every method the composed health report reads, answering a healthy system. */
+  const healthy = (
+    over: Partial<Record<string, unknown>> = {},
+  ): Partial<Record<string, unknown>> => ({
+    ['pool.query']: [pool()],
+    ['alert.list']: [],
+    ['update.status']: upToDate(),
+    ['system.version']: 'TrueNAS-25.04.0',
+    ...over,
+  });
+
+  /** One system's row, typed loosely: the tool's own contract is an opaque object. */
+  interface Row {
+    system: string;
+    verdict: string | null;
+    needs_attention: boolean | null;
+    reason_counts: { critical: number; warning: number; unknown: number; unranked: number };
+    reasons_reported: number;
+    reasons: { section: string; severity: string; detail: string }[];
+    reasons_truncated: boolean;
+    sections_total: number;
+    sections_unreadable: number;
+  }
+
+  const rollup = async (
+    rows: Partial<Record<string, unknown>> = {},
+    failures: Partial<Record<string, unknown>> = {},
+  ): Promise<Row> => {
+    const { ctx } = failingSystem(healthy(rows), failures);
+    return (await fleetHealthRollup.handler(ctx, {})) as unknown as Row;
+  };
+
+  it('answers a healthy system with one verdict and no section of the report', async () => {
+    // The whole object, asserted rather than sampled: what this tool is for is
+    // being SMALLER than `system_health_report`, and the way that fails is a
+    // section of that report appearing here.
+    expect(await rollup()).toEqual({
+      system: 'nas',
+      verdict: 'OK',
+      needs_attention: false,
+      reason_counts: { critical: 0, warning: 0, unknown: 0, unranked: 0 },
+      reasons_reported: 0,
+      reasons: [],
+      reasons_truncated: false,
+      sections_total: 4,
+      sections_unreadable: 0,
+    });
+  });
+
+  it('needs attention where something is already broken', async () => {
+    const row = await rollup({ ['pool.query']: [pool({ healthy: false, status: 'DEGRADED' })] });
+    expect(row.verdict).toBe('CRITICAL');
+    expect(row.needs_attention).toBe(true);
+    expect(row.reason_counts).toEqual({ critical: 1, warning: 0, unknown: 0, unranked: 0 });
+  });
+
+  it('needs attention where something needs fixing before it breaks', async () => {
+    const row = await rollup({ ['pool.query']: [pool({ size: 100, allocated: 85 })] });
+    expect(row.verdict).toBe('WARNING');
+    expect(row.needs_attention).toBe(true);
+    expect(row.reason_counts).toEqual({ critical: 0, warning: 1, unknown: 0, unranked: 0 });
+  });
+
+  it('does not answer needs_attention either way where the verdict is UNKNOWN', async () => {
+    const row = await rollup({ ['pool.query']: [pool({ healthy: 'yes' })] });
+    expect(row.verdict).toBe('UNKNOWN');
+    // Null and NOT false: nothing about this system's health was established, and
+    // a fleet filtered on `needs_attention === true` would read it as fine.
+    expect(row.needs_attention).toBeNull();
+    expect(row.reason_counts).toEqual({ critical: 0, warning: 0, unknown: 1, unranked: 0 });
+  });
+
+  it('names the worst reasons first and counts the ones it left out', async () => {
+    const row = await rollup({
+      ['pool.query']: [
+        pool({ name: 'tank', healthy: false, status: 'DEGRADED' }),
+        pool({ name: 'slow', size: 100, allocated: 85 }),
+        pool({ name: 'odd', healthy: 'yes' }),
+      ],
+      ['alert.list']: [alert({ level: 'CRITICAL', formatted: 'a disk failed' })],
+    });
+    expect(row.verdict).toBe('CRITICAL');
+    expect(row.reasons_reported).toBe(4);
+    expect(row.reasons_truncated).toBe(true);
+    // Worst first, and stable within a severity: the pools section's critical
+    // finding stays ahead of the alerts section's, as the report ordered them.
+    expect(row.reasons.map((reason) => [reason.section, reason.severity])).toEqual([
+      ['pools', 'critical'],
+      ['alerts', 'critical'],
+      ['pools', 'warning'],
+    ]);
+    // The `unknown` finding fell off the list and is still in the counts, which
+    // is the whole of why a fixed-size row is safe to act on.
+    expect(row.reason_counts).toEqual({ critical: 2, warning: 1, unknown: 1, unranked: 0 });
+  });
+
+  it('counts a section of the report that could not be read at all', async () => {
+    const row = await rollup({}, { ['alert.list']: new Error('the middleware is not answering') });
+    expect(row.verdict).toBe('UNKNOWN');
+    expect(row.needs_attention).toBeNull();
+    expect(row.sections_unreadable).toBe(1);
+    expect(row.reasons).toEqual([
+      {
+        section: 'alerts',
+        severity: 'unknown',
+        detail:
+          'the alerts section could not be read, so nothing about it is established: the middleware is not answering',
+      },
+    ]);
+  });
+
+  it('answers for a system it could not reach, rather than leaving it out', async () => {
+    const row = await rollup(
+      {},
+      {
+        ['pool.query']: new Error('unreachable'),
+        ['alert.list']: new Error('unreachable'),
+        ['update.status']: new Error('unreachable'),
+        ['system.version']: new Error('unreachable'),
+      },
+    );
+    expect(row.verdict).toBe('UNKNOWN');
+    expect(row.needs_attention).toBeNull();
+    // Every section, and every one of them a finding — so the row says the
+    // verdict rests on nothing rather than looking like a system with no
+    // problems.
+    expect(row.sections_unreadable).toBe(row.sections_total);
+    expect(row.reason_counts).toEqual({ critical: 0, warning: 0, unknown: 4, unranked: 0 });
+    expect(row.reasons_reported).toBe(4);
+    expect(row.reasons_truncated).toBe(true);
+  });
+
+  it('is read-only and takes no arguments', () => {
+    expect(fleetHealthRollup.mutating).toBe(false);
+    expect(fleetHealthRollup.requiredRole).toBe(Role.ReadOnly);
+    expect(fleetHealthRollup.inputSchema).toEqual({ type: 'object', properties: {} });
   });
 });
