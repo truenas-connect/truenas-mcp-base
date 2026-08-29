@@ -2973,6 +2973,7 @@ describe('share_access', () => {
       networks: null,
       acl,
       acl_error: null,
+      failures: [],
     });
   });
 
@@ -2988,6 +2989,7 @@ describe('share_access', () => {
       networks: ['10.0.0.0/24'],
       acl,
       acl_error: null,
+      failures: [],
     });
   });
 
@@ -3012,6 +3014,7 @@ describe('share_access', () => {
       'networks',
       'acl',
       'acl_error',
+      'failures',
     ]);
     expect(Object.keys(result['acl'] as object)).toEqual([
       'type',
@@ -3087,6 +3090,28 @@ describe('share_access', () => {
         { ['sharing.nfs.query']: new Error('nfs is down') },
       ),
     ).rejects.toThrow('no SMB share is named "ghost" or exports that path');
+  });
+
+  it('says the answer may not be the only one when a protocol could not be searched', async () => {
+    // The check for a second match ran over a list that was never read, so the
+    // error this tool would otherwise raise is one it could not detect —
+    // presenting this as the unique answer would be a guess.
+    const result = await answered(
+      { share: '/mnt/tank/backups' },
+      {},
+      { ['sharing.smb.query']: new Error('smb is down') },
+    );
+    expect(result['protocol']).toBe('NFS');
+    expect(result['failures']).toEqual([{ protocol: 'SMB', error: 'smb is down' }]);
+  });
+
+  it('leaves failures empty when the caller excluded the protocol that failed', async () => {
+    const result = await answered(
+      { share: '/mnt/tank/backups', protocol: 'NFS' },
+      {},
+      { ['sharing.smb.query']: new Error('smb is down') },
+    );
+    expect(result['failures']).toEqual([]);
   });
 
   it('errors rather than guessing when one string matches more than one share', async () => {
@@ -3224,6 +3249,81 @@ describe('share_access', () => {
     expect(
       (await answered({ share: 'media' }, { ['filesystem.getacl']: aclOf({ acl: [] }) }))['acl'],
     ).toEqual({ ...acl, entries: [] });
+  });
+
+  it('maps a POSIX ACL, whose tags and shape are not the NFS4 ones', async () => {
+    // POSIX has its own tag vocabulary, no `type` at all, and a MASK entry
+    // that is a ceiling on the named entries rather than a principal. Every
+    // other ACL fixture here is NFS4, which shares the mapping but not the
+    // shape, so nothing else in this file would notice POSIX arriving wrong.
+    const posix = (over: Record<string, unknown>) => ({
+      perms: { READ: true, WRITE: false, EXECUTE: true },
+      default: false,
+      id: -1,
+      who: null,
+      ...over,
+    });
+    const result = await answered(
+      { share: 'media' },
+      {
+        ['filesystem.getacl']: aclOf({
+          acltype: 'POSIX1E',
+          acl: [
+            posix({ tag: 'USER_OBJ', perms: { READ: true, WRITE: true, EXECUTE: true } }),
+            posix({ tag: 'USER', id: 1001, who: 'alice' }),
+            posix({ tag: 'MASK' }),
+            posix({ tag: 'OTHER', perms: { READ: false, WRITE: false, EXECUTE: false } }),
+            posix({ tag: 'GROUP', id: 2002, who: null, default: true }),
+          ],
+        }),
+      },
+    );
+    expect(entriesOf(result)).toEqual([
+      // The tag is its own principal, so neither a name nor an id is missing.
+      {
+        tag: 'USER_OBJ',
+        name: null,
+        id: null,
+        access: null,
+        permissions: ['READ', 'WRITE', 'EXECUTE'],
+        children_only: false,
+      },
+      {
+        tag: 'USER',
+        name: 'alice',
+        id: 1001,
+        access: null,
+        permissions: ['READ', 'EXECUTE'],
+        children_only: false,
+      },
+      // Not a principal: a ceiling on what the named entries above grant.
+      {
+        tag: 'MASK',
+        name: null,
+        id: null,
+        access: null,
+        permissions: ['READ', 'EXECUTE'],
+        children_only: false,
+      },
+      {
+        tag: 'OTHER',
+        name: null,
+        id: null,
+        access: null,
+        permissions: [],
+        children_only: false,
+      },
+      // A group whose gid resolved to no name, on an entry that grants nothing
+      // on the path itself.
+      {
+        tag: 'GROUP',
+        name: null,
+        id: 2002,
+        access: null,
+        permissions: ['READ', 'EXECUTE'],
+        children_only: true,
+      },
+    ]);
   });
 
   it('reports a principal by name where it resolves and by raw id where it does not', async () => {

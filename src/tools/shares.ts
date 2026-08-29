@@ -514,7 +514,13 @@ export const shareAccess: ReadOnlyTool = {
     'share nobody can reach are opposite answers. A string matching MORE THAN ' +
     'one share is also an error, listing what it matched — one path can be ' +
     'shared over both protocols at once and the two grant access differently, ' +
-    'so there is no single answer to give. `protocol`, `id`, `name`, `path` ' +
+    'so there is no single answer to give. `failures` reports a protocol whose ' +
+    'share list could not be read, as `protocol` and `error`, and is empty ' +
+    'when both were read. WHILE IT IS NOT EMPTY THIS ANSWER MAY NOT BE THE ' +
+    'ONLY ONE: the search for a second match ran over a list that was never ' +
+    'read, so a share of the protocol named there may also answer to the ' +
+    'string given, and the error this tool would otherwise raise is one it ' +
+    'could not detect. `protocol`, `id`, `name`, `path` ' +
     'and `enabled` identify the share and mean exactly what they mean in ' +
     '`shares_list`, including that `name` is ALWAYS null on an NFS export and ' +
     'that a disabled share reaches nobody whatever the rest of this says. ' +
@@ -537,21 +543,31 @@ export const shareAccess: ReadOnlyTool = {
     '`trivial` true means the ACL grants nothing beyond the owner, the owning ' +
     'group and everyone else. `owner_user` and `owner_group` are the names of ' +
     'the path\'s owner, with `owner_uid` and `owner_gid` the raw ids, and they ' +
-    'are who the `owner@` and `group@` entries refer to. Each of `entries` is ' +
-    'one principal and what it holds. `tag` is `USER`, `GROUP`, or one of ' +
-    '`owner@`, `group@` and `everyone@`, where the tag IS the principal and ' +
-    '`name` and `id` are both null as a result rather than because nothing ' +
-    'resolved. Otherwise `name` is the resolved account or group name and `id` ' +
-    'is its raw numeric id; an id that resolved to no name is reported as `id` ' +
-    'with a null `name` and IS NEVER DROPPED, so an entry with neither a name ' +
-    'nor an id is one whose principal could not be read at all. `access` is ' +
-    '`ALLOW` or `DENY` on an NFS4 ACL and null on a POSIX one, which has no ' +
-    'deny entries. `permissions` names what the entry grants, in the ACL ' +
-    'type\'s own vocabulary — a single preset such as `FULL_CONTROL` or ' +
-    '`MODIFY`, or individual names such as `READ_DATA` and `WRITE_ACL` on NFS4 ' +
-    'and `READ`, `WRITE` and `EXECUTE` on POSIX. An empty list is an entry that ' +
-    'names no permission; null is one whose permissions could not be read, and ' +
-    'is not evidence that it grants nothing. `children_only` true means the ' +
+    'are who the `owner@`, `group@`, `USER_OBJ` and `GROUP_OBJ` entries refer ' +
+    'to. Each of `entries` is one entry of that ACL. `tag` says what kind, and ' +
+    'the two ACL types use different words for it. On an NFS4 ACL it is `USER` ' +
+    'or `GROUP`, which name a principal, or `owner@`, `group@` or `everyone@`, ' +
+    'where the tag IS the principal. On a POSIX ACL it is `USER` or `GROUP`, ' +
+    'or `USER_OBJ`, `GROUP_OBJ` and `OTHER` — the path\'s owner, its owning ' +
+    'group, and everyone else — or `MASK`, which is NOT a principal at all but ' +
+    'a ceiling on the others, described under `permissions`. `name` and `id` ' +
+    'are BOTH null on every tag that is its own principal, and on `MASK`, by ' +
+    'construction rather than because nothing resolved. On a `USER` or `GROUP` ' +
+    'entry `name` is the resolved account or group name and `id` is its raw ' +
+    'numeric id; an id that resolved to no name is reported as `id` beside a ' +
+    'null `name` and IS NEVER DROPPED, so only a `USER` or `GROUP` entry with ' +
+    'neither is one whose principal could not be read. `access` is `ALLOW` or ' +
+    '`DENY` on an NFS4 ACL and null on a POSIX one, which has no deny entries. ' +
+    '`permissions` names what THE ENTRY ITSELF carries, in the ACL type\'s own ' +
+    'vocabulary — a single preset such as `FULL_CONTROL` or `MODIFY`, or ' +
+    'individual names such as `READ_DATA` and `WRITE_ACL` on NFS4 and `READ`, ' +
+    '`WRITE` and `EXECUTE` on POSIX. ON A POSIX ACL CARRYING A `MASK` ENTRY ' +
+    'THAT IS NOT YET THE EFFECTIVE RIGHT: a `USER`, `GROUP` or `GROUP_OBJ` ' +
+    'entry grants only what it and the `MASK` entry both name, so the two are ' +
+    'read together and an entry can appear to hold more than it does. NFS4 has ' +
+    'no mask and no such step. An empty list is an entry that names no ' +
+    'permission; null is one whose permissions could not be read, and is not ' +
+    'evidence that it grants nothing. `children_only` true means the ' +
     'entry GRANTS NOTHING ON THIS PATH and exists to be inherited by what is ' +
     'created inside it, so its principal does not have the access it appears to ' +
     'have; null is an entry whose inheritance could not be read. This tool ' +
@@ -618,6 +634,12 @@ export const shareAccess: ReadOnlyTool = {
       networks: target.networks,
       acl,
       acl_error: error,
+      // A protocol that could not be listed is reported even though one share
+      // was found, because the check for a second match ran over a list that
+      // was never read: the ambiguity this tool raises rather than guesses at
+      // is exactly the thing it could not see. Dropping this would present a
+      // half-searched answer as the unique one.
+      failures,
     };
   },
 };
