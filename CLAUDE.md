@@ -35,8 +35,12 @@ src/execution/        the executor, fan-out, and plan/confirm
 src/content/          bounded file content (see the decision below)
 src/tools/            one file per family; all registered by createDefaultCatalog()
 src/tools/common.ts   the guards every family shares; not a family, not exported
+src/testing/          fixtures the specs import; not the library, not covered
 src/index.ts          the public barrel — an export here is a contract
 ```
+
+A spec sits beside the module it covers and is named for it — `src/tools/pools.spec.ts`
+covers `src/tools/pools.ts`. See the decision below for where a tool's tests go.
 
 ## Decisions
 
@@ -217,6 +221,36 @@ Where the line falls, since "shared" is not the same as "generic":
 Reaching for a private copy of something already in `common.ts` is the thing to
 notice in review. The comment that used to justify each copy — *a tool file is
 read on its own* — is what produced the drift, and is no longer the rule.
+
+### A tool's tests live in the spec named for its module (#87)
+
+`src/tools/tools.spec.ts` held every tool's tests and had grown to 11,834 lines —
+87% of the repository's test code, and growing by a block per tool with no
+stopping size. It is now one spec per tool module, named for it, sitting beside
+the source: `pools.spec.ts` covers `pools.ts`, `shares.spec.ts` covers
+`shares.ts`. **A new tool's tests go in its module's spec**, which is also the
+file a reviewer of that tool will open.
+
+Two things that rule does not decide on its own:
+
+- **A module whose spec would exceed 1,500 lines splits by tool, not by
+  bin-packing.** `reporting.ts` is the only one: its five blocks come to 2,405
+  lines, so each takes a spec named for the tool — `reporting-utilisation.spec.ts`,
+  `system-health-report.spec.ts`, and so on. Every filename then still says
+  exactly what is in it, which a `reporting-2.spec.ts` would not.
+- **The catalog-wide test is not any tool's.** The exact-list assertion over
+  `createDefaultCatalog()` is about `src/tools/index.ts`, so it lives in
+  `index.spec.ts` under the same rule as everything else. Registering a tool
+  means editing that file and the module's own spec, and nothing else.
+
+**`src/testing/` is test support, and is neither the library nor code under
+test.** `fakeSystem` and `failingSystem` were declared once at the top of the
+old file and used throughout it; they are now `src/testing/fake-systems.ts`, and
+the directory is excluded from `tsconfig.json` (the library project must not
+compile a file importing `vitest`) and from the coverage report. Counting it
+would report 100% for fixtures and move the global percentages without a line of
+the library being tested any better — the same reason `src/index.ts` is already
+excluded there.
 
 ## Conventions
 

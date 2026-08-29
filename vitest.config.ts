@@ -29,6 +29,10 @@ export default defineConfig({
         'src/index.ts',
         // Types only; no runtime exports for v8 to see.
         'src/catalog/tool.ts',
+        // Fixtures the specs import, not code under test. Counted, they would
+        // report 100% and move the global percentages without a line of the
+        // library being tested any better.
+        'src/testing/**',
       ],
       // Floors, not targets: set at the measured level so a decrease fails CI.
       // Raised by hand in the same PR that raises the coverage — never lowered,
