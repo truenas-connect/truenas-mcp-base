@@ -3,11 +3,11 @@ import { alertsList } from '@/tools/alerts';
 import { appsList } from '@/tools/apps';
 import { disksList } from '@/tools/disks';
 import { poolTopology, scrubHistory } from '@/tools/pools';
-import { createSnapshot } from '@/tools/snapshots';
+import { createSnapshot, snapshotsList } from '@/tools/snapshots';
 import { listDatasets, poolStatus, quotaReport } from '@/tools/storage';
 import { systemInfo } from '@/tools/system';
 
-/** The sketch's catalog: nine read-only tools plus one mutating tool. */
+/** The sketch's catalog: ten read-only tools plus one mutating tool. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -19,6 +19,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(disksList);
   catalog.register(appsList);
   catalog.register(alertsList);
+  catalog.register(snapshotsList);
   catalog.register(createSnapshot);
   return catalog;
 }
@@ -33,5 +34,6 @@ export {
   poolTopology,
   quotaReport,
   scrubHistory,
+  snapshotsList,
   systemInfo,
 };
