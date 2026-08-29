@@ -1,6 +1,6 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
-import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
 
 /**
  * Reporting family: how busy a system was over a time range, rather than how
@@ -1721,6 +1721,322 @@ export const reportingSpaceTrends: ReadOnlyTool = {
       datasets: reported,
       truncated_datasets: datasets.truncated,
       truncated_snapshots: histories.some((history) => history.truncated),
+    };
+  },
+};
+
+/**
+ * App and VM usage: what each application and virtual machine is consuming,
+ * attributed to the workload rather than summed over the host.
+ *
+ * "What is eating my memory" is the question, and nothing else in the catalog
+ * answers it: `reporting_utilisation` reports the host's totals over a range,
+ * and `apps_list` and `vms_list` report what each workload IS — its state, and
+ * the CPU and memory it was GIVEN — rather than what it is using.
+ *
+ * WHAT THIS API SURFACE CAN BE ASKED FOR IS NARROWER THAN THE QUESTION, and the
+ * shape of this tool is that fact rather than a choice. Three listings name the
+ * workloads — `app.query`, `vm.query` and `virt.instance.query` — and not one of
+ * those rows carries a consumption figure of any kind. What the middleware does
+ * expose is, for the most part, not reachable through the pinned client:
+ *
+ * - Per-app CPU and memory are in the `app.stats` EVENT SOURCE, which takes a
+ *   subscribe-time `interval`. The client excludes every event source from
+ *   `api.events` deliberately, and says why: `core.subscribe` is typed as one
+ *   string with no documented encoding for the arguments, so subscribing would
+ *   send the name with the arguments dropped and the server would not honour it.
+ *   There is no supported way to read it from here.
+ * - Per-VM memory on the libvirt stack is `vm.get_memory_usage`, an ordinary
+ *   call. It is the ONE consumption figure this tool can obtain.
+ * - Per-VM CPU has no method on this surface at all, and the incus stack has
+ *   neither figure: a `virt.instance.query` row carries the instance's
+ *   allocation and its status, and `container.metrics` is another event source.
+ *
+ * So every entry carries both figures, and one that could not be obtained is
+ * null beside a marker naming why — never a zero, and never omitted. A tool that
+ * dropped the fields it cannot fill would read as a complete answer to the
+ * attribution question, and one that reported the ALLOCATION under a name
+ * meaning consumption would answer it wrongly. The markers are per figure and
+ * per entry because the reasons differ that finely: on the same system a
+ * running libvirt VM reports its memory, a stopped one has none to report, and
+ * an app has none that can be read at all.
+ */
+
+/** What kind of workload an entry describes. */
+type WorkloadKind = 'app' | 'vm';
+
+/** Which listing an entry was read from. */
+type WorkloadSource = 'app' | 'vm' | 'virt_instance';
+
+/**
+ * The state word both VM stacks use for a machine that is running. Only the
+ * libvirt stack is tested against it — it is what decides whether there is a
+ * memory figure to ask for — and the incus stack uses the same word, which is
+ * why this is not spelled per stack.
+ */
+const RUNNING = 'RUNNING';
+
+/**
+ * What an app's figures are marked with. The reason is a fact about the API
+ * surface rather than about the app, so it is the same on a running app as on a
+ * stopped one: neither has a figure that can be read.
+ */
+const NO_APP_STATS =
+  'this system exposes per-app CPU and memory only through a subscription, which this tool does not open';
+
+/** What an incus-backed instance's figures are marked with, for the same kind of reason. */
+const NO_INSTANCE_STATS =
+  'this system exposes no CPU or memory consumption for an incus-backed instance that this tool can read';
+
+/** What every virtual machine's CPU figure is marked with, on both stacks. */
+const NO_VM_CPU =
+  'this system exposes no per-virtual-machine CPU consumption that this tool can read';
+
+/**
+ * What a libvirt VM that is not running is marked with.
+ *
+ * Distinct from every other marker here: this one says the workload has no
+ * consumption rather than that the figure could not be obtained, and it is what
+ * keeps a stopped VM from reading as one whose memory is unknown.
+ */
+const VM_NOT_RUNNING = 'this virtual machine is not running, so it is consuming no memory';
+
+/**
+ * What a libvirt VM the system named no identifier for is marked with. The
+ * memory read is by id, so a row without one cannot be asked about at all —
+ * which is not the same as a VM that is not running.
+ */
+const NO_VM_ID = 'the system reported no identifier for this virtual machine to read its memory by';
+
+/** What a memory read that answered something other than a number is marked with. */
+const NO_MEMORY_FIGURE = 'the system answered with no memory figure this tool could read';
+
+/**
+ * The rows each listing answers with, taken from the API surface the tools are
+ * typed against rather than restated here — for the reason `vms.ts` gives: read
+ * as bare records the field names below would compile whatever they were asked
+ * for, so a regenerated client that renames one would turn its value into a null
+ * with no build error and with hand-written fixtures that still pass.
+ */
+type AppEntry = ApiSurface['call']['app.query']['entity'];
+type VmEntry = ApiSurface['call']['vm.query']['entity'];
+type VirtInstanceEntry = ApiSurface['call']['virt.instance.query']['entity'];
+
+/** One app or virtual machine, in the shape this tool reports it. */
+interface UsageRow {
+  kind: WorkloadKind;
+  source: WorkloadSource;
+  id: string | number | null;
+  name: string | null;
+  state: string | null;
+  cpu_percent: number | null;
+  cpu_unavailable: string | null;
+  memory_used_bytes: number | null;
+  memory_unavailable: string | null;
+}
+
+/** A listing that could not be read at all, named by the source it was against. */
+interface UsageFailure {
+  source: WorkloadSource;
+  error: string;
+}
+
+/** A listing that produced rows, or the failure that stopped it. */
+interface Listing<T> {
+  rows: T[];
+  failure: UsageFailure | null;
+}
+
+/**
+ * One listing, with a failure caught and named rather than thrown.
+ *
+ * NO LISTING IS ALLOWED TO FAIL THE TOOL, as in `vms_list`: a system may
+ * legitimately have only one of the two VM stacks, and an app listing that fails
+ * must not take the VMs down with it. The read is passed as a thunk so the call
+ * is made inside the `try`, which keeps this correct for one that throws before
+ * it returns a promise at all.
+ */
+async function listing<T>(source: WorkloadSource, read: () => Promise<T[]>): Promise<Listing<T>> {
+  try {
+    return { rows: await read(), failure: null };
+  } catch (reason) {
+    return { rows: [], failure: { source, error: errorText(reason) } };
+  }
+}
+
+/** One VM's memory consumption, or the stated reason there is no figure. */
+interface MemoryRead {
+  bytes: number | null;
+  unavailable: string | null;
+}
+
+/**
+ * One libvirt VM's memory consumption, or the stated reason none was read.
+ *
+ * (unconfirmed) THE FIGURE IS BYTES. It is passed through under a name that says
+ * bytes, so a release reporting it in kibibytes would be reported a thousandfold
+ * small — wrong rather than absent, which is the same kind of assumption
+ * {@link NETWORK_UNIT} carries and is stated in the description for the same
+ * reason: a memory figure with no unit cannot be compared with anything.
+ *
+ * A VM that is not running is not asked about. The call would fail on a domain
+ * that does not exist, and "not running" is a better answer than the error text
+ * that would come back — it is the reason there is no figure, and it is a fact
+ * about the VM rather than about the read.
+ */
+async function vmMemory(system: SystemHandle, id: number | null, state: string | null): Promise<MemoryRead> {
+  if (id === null) return { bytes: null, unavailable: NO_VM_ID };
+  if (state !== RUNNING) return { bytes: null, unavailable: VM_NOT_RUNNING };
+  try {
+    const answer = await firstValueFrom(system.client.api.call('vm.get_memory_usage', [id]));
+    const bytes = numberOrNull(answer);
+    return bytes === null ? { bytes: null, unavailable: NO_MEMORY_FIGURE } : { bytes, unavailable: null };
+  } catch (reason) {
+    return { bytes: null, unavailable: errorText(reason) };
+  }
+}
+
+/** An application as `app.query` reports it. Neither figure is readable here. */
+function fromApp(entry: AppEntry): UsageRow {
+  return {
+    kind: 'app',
+    source: 'app',
+    id: textOrNull(entry.id),
+    name: textOrNull(entry.name),
+    state: textOrNull(entry.state),
+    cpu_percent: null,
+    cpu_unavailable: NO_APP_STATS,
+    memory_used_bytes: null,
+    memory_unavailable: NO_APP_STATS,
+  };
+}
+
+/**
+ * A libvirt-backed VM as `vm.query` reports it, with the memory figure already
+ * read for it.
+ *
+ * `status.state` is the middleware's own word, read the way `vms_list` reads it:
+ * the type declares `status` present and non-null, and a system that reported
+ * neither must answer a null state rather than throw.
+ */
+function fromVm(entry: VmEntry, memory: MemoryRead): UsageRow {
+  return {
+    kind: 'vm',
+    source: 'vm',
+    id: numberOrNull(entry.id),
+    name: textOrNull(entry.name),
+    state: textOrNull(property(entry.status, 'state')),
+    cpu_percent: null,
+    cpu_unavailable: NO_VM_CPU,
+    memory_used_bytes: memory.bytes,
+    memory_unavailable: memory.unavailable,
+  };
+}
+
+/** An incus-backed VM as `virt.instance.query` reports it. Neither figure is readable. */
+function fromInstance(entry: VirtInstanceEntry): UsageRow {
+  return {
+    kind: 'vm',
+    source: 'virt_instance',
+    id: textOrNull(entry.id),
+    name: textOrNull(entry.name),
+    state: textOrNull(entry.status),
+    cpu_percent: null,
+    cpu_unavailable: NO_VM_CPU,
+    memory_used_bytes: null,
+    memory_unavailable: NO_INSTANCE_STATS,
+  };
+}
+
+export const reportingAppVmUsage: ReadOnlyTool = {
+  name: 'reporting_app_vm_usage',
+  description:
+    'What each application and virtual machine on a TrueNAS system is ' +
+    'consuming right now, attributed per workload. This is what answers "which ' +
+    'app is eating my memory" — `reporting_utilisation` reports the host TOTAL ' +
+    'over a range and cannot attribute any of it, and `apps_list` and ' +
+    '`vms_list` report what each workload was GIVEN rather than what it is ' +
+    'using. `entries` holds one entry per app and per virtual machine, in one ' +
+    'list: `kind` is `app` or `vm`, and `source` is which listing it came from ' +
+    '— `app`, `vm` for the older libvirt-backed VMs, or `virt_instance` for the ' +
+    'newer incus-backed ones. Apps are listed first, then `vm` entries, then ' +
+    '`virt_instance` ones, each in the order the system listed them. `id` is ' +
+    'the identifier that listing uses and is unique only within its own ' +
+    '`source`, so two entries may share a `name` or an `id` while being ' +
+    'different things. `state` is the state word the system itself used, ' +
+    'untranslated: an app is `RUNNING`, `STOPPED`, `CRASHED`, `DEPLOYING` or ' +
+    '`STOPPING`; an incus instance one of `RUNNING`, `STOPPED`, `STARTING`, ' +
+    '`STOPPING`, `FROZEN`, `FREEZING`, `THAWED`, `ABORTING`, `ERROR` or ' +
+    '`UNKNOWN`; a libvirt VM the middleware\'s own narrower vocabulary, in ' +
+    'which a VM that died commonly reads `STOPPED` — `vms_list` is what carries ' +
+    'libvirt\'s own state beside it. `memory_used_bytes` is the memory the ' +
+    'workload is actually using, IN BYTES, and `cpu_percent` its share of CPU. ' +
+    'MOST OF THOSE FIGURES CANNOT BE READ ON THIS API, AND WHERE ONE CANNOT IT ' +
+    'IS NULL WITH `memory_unavailable` OR `cpu_unavailable` NAMING WHY — WHICH ' +
+    'IS NEVER A WORKLOAD CONSUMING NOTHING. Specifically: no CPU figure is ' +
+    'available for any workload; memory is available only for a RUNNING ' +
+    'libvirt-backed VM; and per-app CPU and memory are exposed by the system ' +
+    'only through a subscription this tool does not open, so an app reports its ' +
+    'name and state and no consumption at all. A VM that is not running says so ' +
+    'in `memory_unavailable`, and that one IS a statement that it is consuming ' +
+    'nothing. A memory read that failed carries the reason the system gave. ' +
+    'Entries fail independently, so one VM can report its memory while another ' +
+    'cannot. AN EMPTY `entries` LIST WITH AN EMPTY `failures` LIST IS A SYSTEM ' +
+    'RUNNING NO APPS AND NO VMs. `failures` names each listing that could not ' +
+    'be read at all, as `source` and the `error` the system gave, and WHILE IT ' +
+    'IS NOT EMPTY THE LIST IS INCOMPLETE — a system whose VMs all live in the ' +
+    'stack that failed reports none of them. A stack absent from a given ' +
+    'TrueNAS release appears here as a failure for that reason. Incus ' +
+    'containers are excluded, as in `vms_list`. This tool reports consumption ' +
+    'now, not over a range: `reporting_utilisation` is the host over time, ' +
+    '`reporting_disk_io` is per-disk activity, and `vms_list` and `apps_list` ' +
+    'are what a workload is allocated and what version it runs. It does not ' +
+    'report per-process usage, per-container or per-device breakdowns, disk or ' +
+    'network traffic per workload, and it starts, stops and changes nothing. NO ' +
+    'field beyond those named here is returned, whatever a later TrueNAS ' +
+    'release adds to any of the three records.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }) {
+    // All three listings are issued before any is awaited, and each is caught:
+    // see `listing` for why none of them may fail the tool.
+    const [apps, vms, instances] = await Promise.all([
+      listing('app', () => firstValueFrom(system.client.api.query('app.query'))),
+      listing('vm', () => firstValueFrom(system.client.api.query('vm.query'))),
+      listing('virt_instance', () =>
+        firstValueFrom(
+          // The filter is inlined so the call's own parameter types apply, as
+          // in `vms_list`: written to a `const` first it widens and no longer
+          // satisfies the filter tuple.
+          system.client.api.query('virt.instance.query', [['type', '=', 'VM']]),
+        ),
+      ),
+    ]);
+
+    // One read per VM, all issued together. Only a running VM with a readable
+    // id is actually asked about; the rest resolve to their stated reason
+    // without a call, which is what keeps this bounded by the RUNNING VMs
+    // rather than by every row the stack holds.
+    const memories = await Promise.all(
+      vms.rows.map((entry) =>
+        vmMemory(system, numberOrNull(entry.id), textOrNull(property(entry.status, 'state'))),
+      ),
+    );
+
+    return {
+      entries: [
+        ...apps.rows.map(fromApp),
+        ...vms.rows.map((entry, position) => fromVm(entry, memories[position])),
+        // The `type` filter above is asked of the middleware; this re-checks it
+        // on what came back, as `vms_list` does. A query parameter a release
+        // does not recognise is dropped rather than refused, and the result of
+        // that is containers in a list of virtual machines.
+        ...instances.rows.filter((entry) => entry.type === 'VM').map(fromInstance),
+      ],
+      failures: [apps.failure, vms.failure, instances.failure].filter(
+        (failure): failure is UsageFailure => failure !== null,
+      ),
     };
   },
 };
