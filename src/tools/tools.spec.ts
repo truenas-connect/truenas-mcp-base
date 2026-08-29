@@ -5500,7 +5500,18 @@ describe('network_interfaces', () => {
   it('returns no field the tool does not name, on the row or in the state', async () => {
     const result = await one(
       { future_field: 'added by a later release' },
-      { future_state_field: 'added by a later release' },
+      {
+        future_state_field: 'added by a later release',
+        // The state's three own link-address fields, all given one value that
+        // nothing else in this fixture carries. A LINK-type alias holds a
+        // hardware address too and IS returned, as the description says, so it
+        // is given a different one: what must not appear below is the address
+        // only the dropped fields carry, which a shared value could not show.
+        link_address: 'aa:bb:cc:dd:ee:ff',
+        permanent_link_address: 'aa:bb:cc:dd:ee:ff',
+        hardware_link_address: 'aa:bb:cc:dd:ee:ff',
+        aliases: [{ type: 'LINK', address: '00:11:22:33:44:55', netmask: null }],
+      },
     );
     expect(Object.keys(result)).toEqual([
       'name',
@@ -5519,9 +5530,13 @@ describe('network_interfaces', () => {
     // still be in front of the caller. The hardware address is in the fixture's
     // state and is not a field this tool names.
     const serialized = JSON.stringify(result);
-    for (const dropped of ['added by a later release', '00:11:22:33:44:55', 'BROADCAST']) {
+    for (const dropped of ['added by a later release', 'aa:bb:cc:dd:ee:ff', 'BROADCAST']) {
       expect(serialized).not.toContain(dropped);
     }
+    // And the alias that legitimately carries a hardware address survives, so
+    // the assertion above is about the fields this tool drops rather than about
+    // the fixture happening to hold no LINK alias.
+    expect(serialized).toContain('00:11:22:33:44:55');
   });
 
   it('reads the negotiated speed out of every media spelling it can', async () => {
@@ -5631,8 +5646,14 @@ describe('network_interfaces', () => {
     });
   });
 
-  it('reports an interface carrying no address as an empty list', async () => {
+  it('tells an interface carrying no address apart from one whose addresses could not be read', async () => {
+    // The empty list is a state that was read and holds no address; null is a
+    // state that named no address list at all. Reporting the second as the
+    // first would claim an interface has no address on no evidence.
     expect(await one({}, { aliases: [] })).toMatchObject({ addresses: [] });
+    expect(await one({ state: { link_state: 'LINK_STATE_UP' } })).toMatchObject({
+      addresses: null,
+    });
   });
 
   it('reports a member that is down inside an otherwise-up aggregation', async () => {
@@ -5763,7 +5784,7 @@ describe('network_interfaces', () => {
       link_media: null,
       link_speed_mbps: null,
       mtu: null,
-      addresses: [],
+      addresses: null,
       vlan_parent: null,
       vlan_tag: null,
       members: null,
@@ -5778,7 +5799,7 @@ describe('network_interfaces', () => {
     // over the default state and so cannot carry a value that is not a record.
     expect(await one({ state: [] })).toMatchObject({
       link_state: null,
-      addresses: [],
+      addresses: null,
       mtu: null,
     });
   });

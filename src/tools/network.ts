@@ -120,9 +120,17 @@ interface AddressRow {
  * nothing at all in the configured list — and an interface whose configuration
  * has not been applied has the reverse. What the interface is answering on is
  * the question this tool is asked.
+ *
+ * Null where no address list was read at all — the system reported no state, or
+ * no alias list within it — which is not the empty list of an interface that
+ * was read and is carrying no address. `members` keeps the same two apart, for
+ * the same reason: an interface whose addresses could not be read must not
+ * report as one that has none.
  */
-function addresses(state: Record<string, unknown> | null): AddressRow[] {
-  return listOf(state?.['aliases']).map((entry) => {
+function addresses(state: Record<string, unknown> | null): AddressRow[] | null {
+  const aliases = state?.['aliases'];
+  if (!Array.isArray(aliases)) return null;
+  return aliases.map((entry) => {
     const alias = recordOrNull(entry);
     const netmask = alias?.['netmask'];
     return {
@@ -165,7 +173,12 @@ interface MemberRow {
  * and never both, so at most one of the two lists is ever populated.
  */
 function memberNames(row: Record<string, unknown>): string[] | null {
-  const named = [row['bridge_members'], row['lag_ports']].filter((list) => Array.isArray(list));
+  // The predicate is written out rather than left to inference: `Array.isArray`
+  // narrows to `any[]`, which would make the joined list `any` and take the
+  // member names below out of the type system's reach entirely.
+  const named = [row['bridge_members'], row['lag_ports']].filter(
+    (list): list is unknown[] => Array.isArray(list),
+  );
   // Null only where NEITHER field is a list: an aggregate that named two empty
   // ones has no members, which is not the same as naming no list at all.
   if (named.length === 0) return null;
@@ -260,7 +273,10 @@ export const networkInterfaces: ReadOnlyTool = {
     'for IPv4, `INET6` for IPv6, `LINK` for the hardware address — an ' +
     '`address`, and a `netmask` that is a prefix length or a dotted mask ' +
     'depending on the platform, passed through as the system sent it. An ' +
-    'empty list is an interface carrying no address; any of the three fields ' +
+    'empty list is an interface carrying no address, and NULL IS AN INTERFACE ' +
+    'WHOSE ADDRESSES COULD NOT BE READ — the system reported no state for it, ' +
+    'or no address list within that state — WHICH IS NOT THE SAME THING. Any ' +
+    'of the three fields within an entry ' +
     'is null where the system reported no value for it. `vlan_parent` and ' +
     '`vlan_tag` are the interface a VLAN sits on and the tag it carries, and ' +
     'ARE BOTH NULL ON EVERY INTERFACE THAT IS NOT A VLAN, which `type` is what ' +
