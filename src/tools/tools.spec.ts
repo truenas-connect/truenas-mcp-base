@@ -942,8 +942,15 @@ describe('datasets_quota_report', () => {
   });
 
   it('ignores a threshold that is not a number', async () => {
-    const rows = await rowsFrom([dataset({ used: { parsed: 1 } })], { threshold_percent: '50' });
-    expect(rows).toHaveLength(1);
+    // Both percentages sit below the threshold — 0.3% of quota and 2.5% of
+    // refquota — so the dataset survives only because the filter never runs.
+    // A comparison against the string would coerce it and keep any dataset at
+    // or above 50 on either limit, which is what makes this row the one that
+    // tells the two paths apart.
+    const rows = await rowsFrom([dataset({ used: { parsed: 1 }, referenced: { parsed: 1 } })], {
+      threshold_percent: '50',
+    });
+    expect(rows.map((row) => row['id'])).toEqual(['tank/media']);
   });
 
   it('asks the middleware for the two limits and the two usages they cap', async () => {
