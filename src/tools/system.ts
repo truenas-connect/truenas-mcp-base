@@ -838,8 +838,11 @@ export const rebootInfo: ReadOnlyTool = {
     'the system said, not a result of nulls. This tool only reports. It does ' +
     'not restart the system, schedule a restart or cancel one, and it does not ' +
     'download or apply the update behind a pending restart. It answers about ' +
-    'THIS system only: on a two-node HA pair the other node is asked ' +
-    'separately and is not read here, which is `ha_status`\'s question. NO ' +
+    'THIS system only. On a two-node HA pair, whether the OTHER node is ' +
+    'waiting to be restarted is a separate question and NO TOOL IN THIS ' +
+    'CATALOG ANSWERS IT — `ha_status` reports whether a pair exists, which ' +
+    'node this is and whether a failover would work, and carries no reboot ' +
+    'state for either node. Do not read this result as covering the pair. NO ' +
     'field beyond the three named here is returned, whatever a later TrueNAS ' +
     'release adds to the payload.',
   inputSchema: { type: 'object', properties: {} },
