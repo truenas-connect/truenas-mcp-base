@@ -130,11 +130,11 @@ function addresses(state: Record<string, unknown> | null): AddressRow[] {
       address: textOrNull(alias?.['address']),
       // The client types this `string | number` — a prefix length on some
       // platforms and a dotted mask on others — so both are passed through as
-      // they arrive rather than converted into one of them.
+      // they arrive rather than converted into one of them. An empty string is
+      // no value here for the same reason it is no value in `type` and
+      // `address` beside it, rather than a mask of no characters.
       netmask:
-        typeof netmask === 'string' || (typeof netmask === 'number' && Number.isFinite(netmask))
-          ? netmask
-          : null,
+        typeof netmask === 'number' && Number.isFinite(netmask) ? netmask : textOrNull(netmask),
     };
   });
 }
@@ -155,11 +155,24 @@ interface MemberRow {
  * ordinary case rather than a fault. Null is therefore "the system reported no
  * member list", and `type` is what says whether that means "does not aggregate
  * anything" or "an aggregate whose members could not be read".
+ *
+ * Both fields are read and joined rather than one being preferred to the
+ * other. The middleware sends an interface record whole, so a LAGG can carry an
+ * empty `bridge_members` beside its populated `lag_ports` — and preferring the
+ * first field that is present would then report a live aggregation as having no
+ * members at all, which is the one answer worse than no answer. Nothing is
+ * double-counted by joining them: an interface is a bridge or an aggregation
+ * and never both, so at most one of the two lists is ever populated.
  */
 function memberNames(row: Record<string, unknown>): string[] | null {
-  const named = row['bridge_members'] ?? row['lag_ports'];
-  if (!Array.isArray(named)) return null;
-  return named.map((name) => textOrNull(name)).filter((name): name is string => name !== null);
+  const named = [row['bridge_members'], row['lag_ports']].filter((list) => Array.isArray(list));
+  // Null only where NEITHER field is a list: an aggregate that named two empty
+  // ones has no members, which is not the same as naming no list at all.
+  if (named.length === 0) return null;
+  return named.flat().flatMap((name) => {
+    const text = textOrNull(name);
+    return text === null ? [] : [text];
+  });
 }
 
 /**
@@ -191,9 +204,14 @@ function portFlags(state: Record<string, unknown> | null): Map<string, string[]>
  *
  * The link state is resolved against the same response rather than read off the
  * aggregate, because an interface under a bridge or a LAGG is itself a row of
- * `interface.query` and that row is where its link lives. A member the response
- * holds no row for reports null — a member this tool could not resolve, never
- * one that is down.
+ * `interface.query` and that row is where its link lives.
+ *
+ * Null covers both ways that can fail to produce a state — the response held no
+ * row for the member, and the row it held reported no link state of its own —
+ * because the two are the same fact to a caller: the member's link cannot be
+ * stated. Neither is a member that is DOWN, which is the distinction that
+ * matters, and the tool's description draws it that way rather than promising a
+ * finer one this cannot keep.
  */
 function members(
   row: Record<string, unknown>,
@@ -253,8 +271,9 @@ export const networkInterfaces: ReadOnlyTool = {
     'aggregate currently has no members, and null means its member list could ' +
     'not be read — `type` is what tells those apart. Each member carries its ' +
     'own `name`, the `link_state` FROM THAT MEMBER\'S OWN ENTRY in this same ' +
-    'result — null where no entry for it was returned, which is a member that ' +
-    'could not be resolved rather than one that is down — and `flags`, which ' +
+    'result — null where no entry for it was returned OR where that entry ' +
+    'reported no link state, so a null there is a member whose link CANNOT BE ' +
+    'STATED and is never a member that is down — and `flags`, which ' +
     'is what the aggregate itself says about that port and is a DIFFERENT FACT ' +
     'from the link: a member can have a link and still not be carrying ' +
     'traffic, which is what a degraded LAGG looks like. `flags` is null where ' +

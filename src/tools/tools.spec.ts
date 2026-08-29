@@ -5610,10 +5610,22 @@ describe('network_interfaces', () => {
 
   it('reports an address field the system sent nothing readable for as null', async () => {
     expect(
-      await one({}, { aliases: [{ type: '', address: null, netmask: { nested: true } }, 'not one'] }),
+      await one(
+        {},
+        {
+          aliases: [
+            { type: '', address: null, netmask: { nested: true } },
+            // An empty netmask is no value, exactly as it is in the two fields
+            // beside it, rather than a mask of no characters.
+            { type: 'INET', address: '10.0.0.5', netmask: '' },
+            'not one',
+          ],
+        },
+      ),
     ).toMatchObject({
       addresses: [
         { type: null, address: null, netmask: null },
+        { type: 'INET', address: '10.0.0.5', netmask: null },
         { type: null, address: null, netmask: null },
       ],
     });
@@ -5673,6 +5685,46 @@ describe('network_interfaces', () => {
         { name: 'missing', link_state: null, flags: null },
       ],
     });
+  });
+
+  it('reports the members of a LAGG that also carries an empty bridge member list', async () => {
+    // The middleware sends an interface record whole, so an aggregation can
+    // carry both fields with only one of them populated. Preferring whichever
+    // is present first would report this live bond as having no members.
+    const rows = await reported([
+      iface({ name: 'eno1' }, { link_state: 'LINK_STATE_UP' }),
+      iface(
+        {
+          name: 'bond0',
+          type: 'LINK_AGGREGATION',
+          bridge_members: [],
+          lag_ports: ['eno1'],
+        },
+        { ports: [{ name: 'eno1', flags: ['ACTIVE'] }] },
+      ),
+    ]);
+    expect(rows[1]).toMatchObject({
+      members: [{ name: 'eno1', link_state: 'LINK_STATE_UP', flags: ['ACTIVE'] }],
+    });
+  });
+
+  it('reports an aggregate carrying two empty member lists as having no members', async () => {
+    // Both fields are lists, so a member list WAS named — twice, and empty
+    // both times. That is an aggregate with nothing under it, not one whose
+    // members could not be read.
+    expect(
+      await one({ type: 'BRIDGE', bridge_members: [], lag_ports: [] }),
+    ).toMatchObject({ members: [] });
+  });
+
+  it('reports a member whose own entry named no link state as unstatable, not down', async () => {
+    const rows = await reported([
+      iface({ name: 'eno1' }, { link_state: null }),
+      iface({ name: 'bond0', type: 'LINK_AGGREGATION', lag_ports: ['eno1'] }, { ports: [] }),
+    ]);
+    // The same null an unresolved member gets: both are a link this tool
+    // cannot state, and neither is a link that is down.
+    expect(rows[1]).toMatchObject({ members: [{ name: 'eno1', link_state: null }] });
   });
 
   it('tells an aggregate with no members apart from one that named no list', async () => {
