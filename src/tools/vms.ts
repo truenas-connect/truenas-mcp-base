@@ -285,10 +285,10 @@ export const vmsList: ReadOnlyTool = {
     'stack that failed reports no VMs and a failure, which is not a system ' +
     'without any. A stack that is simply absent from a given TrueNAS release ' +
     'appears here as a failure for that reason. This tool reports only virtual ' +
-    'machines: incus containers are excluded, applications are `apps_list`, ' +
-    'and the log output of one VM is `vm_logs`. It does not report a VM\'s ' +
-    'disks, network interfaces, display or passthrough devices, and it does ' +
-    'not create, start, stop or change one. NO field beyond those named here ' +
+    'machines: incus containers are excluded and applications are ' +
+    "`apps_list`. It does not report a VM's log output, disks, network " +
+    'interfaces, display or passthrough devices, and it does not create, ' +
+    'start, stop or change one. NO field beyond those named here ' +
     'is returned, whatever a later TrueNAS release adds to either record.',
   inputSchema: { type: 'object', properties: {} },
   requiredRole: Role.ReadOnly,
