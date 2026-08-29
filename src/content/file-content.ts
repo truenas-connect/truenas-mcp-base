@@ -115,9 +115,11 @@ export function createDownloadContentReader(
         throw new FileContentError('NOT_A_FILE', path, `"${path}" is a directory, not a file`);
       }
       // Everything below is arithmetic on the size, so a size that is not one
-      // is a failure to read rather than a number to compute with. Saying so
-      // is what keeps it out of the empty-file answer below, which asserts
-      // that the file was read and held nothing.
+      // is a failure to read rather than a number to compute with. Without
+      // this, a `NaN` size leaves `skip` NaN, both of the comparisons that
+      // consume it false, and the read quietly degrades to the zero-size walk
+      // below — an answer, where the honest report is that the path could not
+      // be read.
       if (!Number.isFinite(stat.size) || stat.size < 0) {
         throw new FileContentError(
           'UNREADABLE',
@@ -125,15 +127,15 @@ export function createDownloadContentReader(
           `The system reported no usable size for "${path}"`,
         );
       }
-      // A size of zero is NOT answered from `stat` alone. On Linux it does not
-      // mean "no bytes": every file under `/proc` and `/sys` reports `st_size`
-      // 0 and still has content, as do some FUSE-backed paths. Short-circuiting
-      // would hand those back as `lines: []`, which {@link FileTail} defines as
-      // a file that held nothing — the one conflation the rest of this file is
-      // careful to avoid. A genuinely empty file costs one download, which is
-      // the cheapest download there is, and comes back through the ordinary
-      // path with exactly the same empty answer.
-
+      // No branch here for a size of zero, deliberately: the download below is
+      // issued for one too. On Linux that size does not mean "no bytes" —
+      // every file under `/proc` and `/sys` reports `st_size` 0 and still has
+      // content, as do some FUSE-backed paths — so answering it from `stat`
+      // alone would hand those back as `lines: []`, which {@link FileTail}
+      // defines as a file that held nothing. That is the one conflation the
+      // rest of this file is careful to avoid. A genuinely empty file costs
+      // one download, the cheapest there is, and reaches the same empty answer
+      // by the ordinary route.
       const url = await mintDownloadUrl(client, base, path);
       // The whole file is on offer, so the tail is reached by discarding the
       // front of it — and how much to discard is decided from a size read a
