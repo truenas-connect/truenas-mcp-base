@@ -71,5 +71,6 @@ export {
   alertsList,
   snapshotsList,
   replicationStatus,
+  snapshotTasksList,
   createSnapshot,
 } from '@/tools/index';

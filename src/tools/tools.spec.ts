@@ -15,6 +15,7 @@ import {
   replicationStatus,
   scrubHistory,
   snapshotsList,
+  snapshotTasksList,
 } from '@/tools/index';
 
 /**
@@ -36,7 +37,7 @@ function fakeSystem(responses: Partial<Record<string, unknown>>): {
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the twelve sketch tools', () => {
+  it('registers the thirteen sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'storage_pool_status',
@@ -49,6 +50,7 @@ describe('createDefaultCatalog', () => {
       'alerts_list',
       'snapshots_list',
       'replication_status',
+      'snapshot_tasks_list',
       'snapshots_create',
     ]);
   });
@@ -92,6 +94,12 @@ describe('createDefaultCatalog', () => {
   it('advertises replication_status to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
       'replication_status',
+    );
+  });
+
+  it('advertises snapshot_tasks_list to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'snapshot_tasks_list',
     );
   });
 });
@@ -1775,5 +1783,233 @@ describe('replication_status', () => {
     expect(await sources(['tank/media', 7, null])).toEqual(['tank/media']);
     expect(await sources(undefined)).toEqual([]);
     expect(await sources('tank/media')).toEqual([]);
+  });
+});
+
+describe('snapshot_tasks_list', () => {
+  /**
+   * A periodic snapshot task as `pool.snapshottask.query` reports one.
+   * `exclude`, `naming_schema`, `allow_empty`, `vmware_sync` and `state` are
+   * here to be dropped: they are fields of the real payload the tool does not
+   * name.
+   */
+  const task = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    dataset: 'tank/media',
+    recursive: true,
+    enabled: true,
+    lifetime_value: 2,
+    lifetime_unit: 'WEEK',
+    schedule: {
+      minute: '0',
+      hour: '2',
+      dom: '*',
+      month: '*',
+      dow: '*',
+      begin: '00:00',
+      end: '23:59',
+    },
+    exclude: [],
+    naming_schema: 'auto-%Y-%m-%d_%H-%M',
+    allow_empty: true,
+    vmware_sync: false,
+    state: { state: 'FINISHED' },
+    ...over,
+  });
+
+  const listed = async (rows: unknown[]): Promise<Record<string, unknown>[]> => {
+    const { ctx } = fakeSystem({ ['pool.snapshottask.query']: rows });
+    return (await snapshotTasksList.handler(ctx, {})) as Record<string, unknown>[];
+  };
+
+  /** One task, differing only in the schedule the system holds for it. */
+  const forSchedule = async (schedule: unknown): Promise<Record<string, unknown>> =>
+    (await listed([task({ schedule })]))[0];
+
+  /**
+   * The words one schedule is rendered into. The base is a daily 02:00 task
+   * with no window, so a case names only the fields it is about.
+   */
+  const described = async (over: Record<string, unknown>): Promise<unknown> =>
+    (await forSchedule({ minute: '0', hour: '2', dom: '*', month: '*', dow: '*', ...over }))[
+      'schedule_description'
+    ];
+
+  it('maps a task to its dataset, schedule and retention', async () => {
+    expect(await listed([task()])).toEqual([
+      {
+        id: 1,
+        dataset: 'tank/media',
+        enabled: true,
+        recursive: true,
+        schedule: {
+          minute: '0',
+          hour: '2',
+          dom: '*',
+          month: '*',
+          dow: '*',
+          begin: '00:00',
+          end: '23:59',
+        },
+        schedule_description: 'at 02:00, every day',
+        lifetime_value: 2,
+        lifetime_unit: 'WEEK',
+      },
+    ]);
+  });
+
+  it('surfaces no field a later release adds, at either level', async () => {
+    const rows = await listed([
+      task({
+        future_field: 'added by a later TrueNAS release',
+        schedule: { minute: '0', hour: '2', dom: '*', month: '*', dow: '*', timezone: 'UTC' },
+      }),
+    ]);
+    expect(Object.keys(rows[0])).toEqual([
+      'id',
+      'dataset',
+      'enabled',
+      'recursive',
+      'schedule',
+      'schedule_description',
+      'lifetime_value',
+      'lifetime_unit',
+    ]);
+    expect(Object.keys(rows[0]['schedule'] as object)).toEqual([
+      'minute',
+      'hour',
+      'dom',
+      'month',
+      'dow',
+      'begin',
+      'end',
+    ]);
+  });
+
+  it('asks for every task, with no filters and no options', async () => {
+    const { ctx, query } = fakeSystem({ ['pool.snapshottask.query']: [task()] });
+    await snapshotTasksList.handler(ctx, {});
+    expect(query).toHaveBeenCalledWith('pool.snapshottask.query');
+  });
+
+  it('returns [] for a system with no snapshot tasks', async () => {
+    expect(await listed([])).toEqual([]);
+  });
+
+  it('lists a disabled task, and reports a switch it cannot read as null', async () => {
+    // A task that exists and is off is the case worth surfacing, so it is
+    // returned and marked rather than omitted.
+    const [disabled] = await listed([task({ enabled: false })]);
+    expect(disabled['enabled']).toBe(false);
+    // Not defaulted either way: a task whose switch is unreadable must not be
+    // presented as definitely on or definitely off.
+    const [unreported] = await listed([task({ enabled: undefined })]);
+    expect(unreported['enabled']).toBeNull();
+  });
+
+  it('reports recursion it cannot read as null rather than as flat', async () => {
+    expect((await listed([task({ recursive: false })]))[0]['recursive']).toBe(false);
+    expect((await listed([task({ recursive: undefined })]))[0]['recursive']).toBeNull();
+  });
+
+  it('reports the retention, and a retention it cannot read as null', async () => {
+    const [kept] = await listed([task({ lifetime_value: 6, lifetime_unit: 'MONTH' })]);
+    expect(kept['lifetime_value']).toBe(6);
+    expect(kept['lifetime_unit']).toBe('MONTH');
+    // Null rather than absent: a task whose retention could not be read is not
+    // one that keeps its snapshots forever.
+    const [unreported] = await listed([
+      task({ lifetime_value: undefined, lifetime_unit: undefined }),
+    ]);
+    expect(unreported['lifetime_value']).toBeNull();
+    expect(unreported['lifetime_unit']).toBeNull();
+  });
+
+  it('reports a schedule it cannot read at all as null, with no words for it', async () => {
+    for (const unreadable of [undefined, null, '0 2 * * *', 42]) {
+      const row = await forSchedule(unreadable);
+      expect(row['schedule']).toBeNull();
+      expect(row['schedule_description']).toBeNull();
+    }
+  });
+
+  it('reports a cron field it cannot read as null, and renders no words then', async () => {
+    const row = await forSchedule({ minute: '', hour: 2, dom: '*', dow: null });
+    expect(row['schedule']).toEqual({
+      minute: null,
+      hour: null,
+      dom: '*',
+      month: null,
+      dow: null,
+      begin: null,
+      end: null,
+    });
+    expect(row['schedule_description']).toBeNull();
+  });
+
+  it('states a fixed time of day in words', async () => {
+    expect(await described({ minute: '30', hour: '2' })).toBe('at 02:30, every day');
+    expect(await described({ minute: '0', hour: '0,12' })).toBe('at 00:00 and 12:00, every day');
+    expect(await described({ minute: '5', hour: '0,6,18' })).toBe(
+      'at 00:05, 06:05 and 18:05, every day',
+    );
+  });
+
+  it('states a recurring interval in words', async () => {
+    expect(await described({ minute: '0', hour: '*' })).toBe('every hour at :00, every day');
+    expect(await described({ minute: '15', hour: '*/4' })).toBe('every 4 hours at :15, every day');
+    // A step of one is every hour; "every 1 hours" is not English.
+    expect(await described({ minute: '0', hour: '*/1' })).toBe('every hour at :00, every day');
+    expect(await described({ minute: '*/15', hour: '*' })).toBe('every 15 minutes, every day');
+  });
+
+  it('states which days it runs on in words', async () => {
+    expect(await described({ dow: '1' })).toBe('at 02:00, on Monday');
+    expect(await described({ dow: '0,4' })).toBe('at 02:00, on Sunday and Thursday');
+    // Cron numbers Sunday as both 0 and 7.
+    expect(await described({ dow: '7' })).toBe('at 02:00, on Sunday');
+    expect(await described({ dow: 'mon,Thu' })).toBe('at 02:00, on Monday and Thursday');
+    expect(await described({ dom: '1' })).toBe('at 02:00, on day 1 of each month');
+    expect(await described({ dom: '1,15' })).toBe('at 02:00, on days 1 and 15 of each month');
+  });
+
+  it('names the daily window only where one restricts the task', async () => {
+    expect(await described({ begin: '09:00', end: '17:00' })).toBe(
+      'at 02:00, every day, between 09:00 and 17:00',
+    );
+    // The window a task carries when nothing restricts it, which is worth no
+    // words: it says only that the task is not restricted.
+    expect(await described({ begin: '00:00', end: '23:59' })).toBe('at 02:00, every day');
+    // Half a window is not a window, and the missing end must not be assumed.
+    expect(await described({ begin: '09:00' })).toBe('at 02:00, every day');
+    expect(await described({ end: '17:00' })).toBe('at 02:00, every day');
+  });
+
+  it('renders no words for a schedule shape it cannot state exactly', async () => {
+    for (const shape of [
+      // A list of minutes, which no shape here renders.
+      { minute: '0,30', hour: '2' },
+      // Stepped minutes against a fixed hour, which is not "every N minutes".
+      { minute: '*/15', hour: '2' },
+      // Out of range, so misread rather than merely unusual.
+      { minute: '61', hour: '2' },
+      { minute: '0', hour: '47' },
+      { minute: '0', hour: '*/40' },
+      { minute: '0', hour: '*/0' },
+      // Ranges and names this tool does not decode.
+      { minute: '0', hour: '1-5' },
+      { minute: '0', hour: 'H' },
+      // A month other than every month.
+      { month: '3' },
+      // A day of the month and a day of the week together, which cron runs on
+      // the union of and every plain phrasing reads as the intersection.
+      { dom: '1', dow: '1' },
+      { dom: '1-5' },
+      { dom: '0' },
+      { dow: 'weekdays' },
+      { dow: '8' },
+    ]) {
+      expect(await described(shape)).toBeNull();
+    }
   });
 });
