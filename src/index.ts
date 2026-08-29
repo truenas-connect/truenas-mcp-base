@@ -74,5 +74,6 @@ export {
   snapshotTasksList,
   cloudsyncTasksList,
   tasksRecentRuns,
+  sharesList,
   createSnapshot,
 } from '@/tools/index';
