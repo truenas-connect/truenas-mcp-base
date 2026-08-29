@@ -70,5 +70,6 @@ export {
   appsList,
   alertsList,
   snapshotsList,
+  replicationStatus,
   createSnapshot,
 } from '@/tools/index';
