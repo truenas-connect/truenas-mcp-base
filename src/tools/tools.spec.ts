@@ -8880,7 +8880,6 @@ describe('reporting_space_trends', () => {
   });
 
   it('marks a dataset the system holds no snapshot of in the range', async () => {
-    expect(entry(await reported(healthy()), 'tank/vm')).toBeDefined();
     const report = await reported(spaceSystem({}));
     expect(entry(report, 'tank/media')).toMatchObject({
       used_bytes: 5e9,
@@ -9035,6 +9034,37 @@ describe('reporting_space_trends', () => {
     });
   });
 
+  it('does not claim a dataset holds no snapshot when it read only some of them', async () => {
+    // A thousand snapshots read, all of them before the range, and no order was
+    // asked for — so what lies inside the range is exactly what was not read.
+    const many = Array.from({ length: 1001 }, (_, index) =>
+      snap(day(300) + index * 60_000, 1000 + index),
+    );
+    const report = await reported(spaceSystem({ snapshots: { 'tank/media': many } }));
+    expect(report.truncated_snapshots).toBe(true);
+    expect(entry(report, 'tank/media')).toMatchObject({
+      snapshots_observed: 0,
+      change_bytes: null,
+      unavailable:
+        'the system holds more snapshots of this dataset than were read, and no two of ' +
+        'the ones read fall at different times in this range',
+    });
+  });
+
+  it('says the same of a truncated read that found only one instant', async () => {
+    // Every snapshot read is at one instant inside the range, so what would
+    // have given a second instant is exactly what was left unread.
+    const many = Array.from({ length: 1001 }, (_, index) => snap(day(30), 1000 + index));
+    const report = await reported(spaceSystem({ snapshots: { 'tank/media': many } }));
+    expect(entry(report, 'tank/media')).toMatchObject({
+      snapshots_observed: 1000,
+      change_bytes: null,
+      unavailable:
+        'the system holds more snapshots of this dataset than were read, and no two of ' +
+        'the ones read fall at different times in this range',
+    });
+  });
+
   it('marks a pool no dataset of which could be measured', async () => {
     const report = await reported(spaceSystem({}));
     expect(report.pools[0]).toMatchObject({
@@ -9121,6 +9151,33 @@ describe('reporting_space_trends', () => {
     await expect(reportingSpaceTrends.handler(fake.ctx, RANGE)).rejects.toThrow(
       'datasets unavailable',
     );
+  });
+
+  it('fails rather than hiding a failed listing behind a listing that named nothing', async () => {
+    // The pool read succeeded and named no pool, so there is no entry to carry
+    // the dataset read's failure — which is the same silence as both failing.
+    const fake = spaceSystem({
+      pools: [],
+      failures: { 'pool.dataset.query': new Error('datasets unavailable') },
+    });
+    await expect(reportingSpaceTrends.handler(fake.ctx, RANGE)).rejects.toThrow(
+      'datasets unavailable',
+    );
+  });
+
+  it('fails when the pool listing failed and the system listed no dataset either', async () => {
+    const fake = spaceSystem({
+      datasets: [],
+      failures: { 'pool.query': new Error('pools unavailable') },
+    });
+    await expect(reportingSpaceTrends.handler(fake.ctx, RANGE)).rejects.toThrow(
+      'pools unavailable',
+    );
+  });
+
+  it('answers a system that holds nothing, which is not a failure', async () => {
+    const report = await reported(spaceSystem({ datasets: [], pools: [] }));
+    expect(report).toMatchObject({ pools: [], datasets: [], truncated_datasets: false });
   });
 
   it('reports on what the system named a dataset, and attributes one whose pool it did not', async () => {

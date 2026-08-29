@@ -1183,6 +1183,21 @@ const NO_SNAPSHOTS = 'the system holds no snapshot of this dataset in this range
 const ONE_INSTANT =
   'the system holds no two snapshots of this dataset taken at different times in this range';
 
+/**
+ * What a dataset whose snapshot listing was CUT SHORT, and that yielded no
+ * change from the part of it that was read, is marked with.
+ *
+ * Neither {@link NO_SNAPSHOTS} nor {@link ONE_INSTANT} may be used there, and
+ * this is the whole reason this constant exists: no order is asked for, so the
+ * thousand snapshots read are an arbitrary thousand, and every one of them
+ * falling outside the range says nothing whatever about the ones that were not
+ * read. Claiming the system holds no snapshot in the range would be a statement
+ * about the system made from evidence that does not reach it.
+ */
+const TRUNCATED_READ =
+  'the system holds more snapshots of this dataset than were read, and no two of ' +
+  'the ones read fall at different times in this range';
+
 /** What a pool none of whose reported datasets yielded a change is marked with. */
 const NO_OBSERVED_DATASETS =
   'no dataset reported for this pool had snapshots at two different times in this range';
@@ -1472,7 +1487,13 @@ function noTrend(reason: string, observed: number): Trend {
  */
 function trendOf(row: DatasetRow, history: History): { trend: Trend; measured: Measured | null } {
   if (history.error !== null) return { trend: noTrend(history.error, 0), measured: null };
-  if (history.samples.length === 0) return { trend: noTrend(NO_SNAPSHOTS, 0), measured: null };
+  // A cut-short listing supports neither of the claims below, for the reason
+  // {@link TRUNCATED_READ} gives. It still supports a change where one was
+  // found: that is a statement about the two snapshots named beside it.
+  if (history.samples.length === 0) {
+    const reason = history.truncated ? TRUNCATED_READ : NO_SNAPSHOTS;
+    return { trend: noTrend(reason, 0), measured: null };
+  }
   let first = history.samples[0];
   let last = history.samples[0];
   for (const sample of history.samples) {
@@ -1480,7 +1501,8 @@ function trendOf(row: DatasetRow, history: History): { trend: Trend; measured: M
     if (sample.at > last.at) last = sample;
   }
   if (first.at === last.at) {
-    return { trend: noTrend(ONE_INSTANT, history.samples.length), measured: null };
+    const reason = history.truncated ? TRUNCATED_READ : ONE_INSTANT;
+    return { trend: noTrend(reason, history.samples.length), measured: null };
   }
   const change = last.bytes - first.bytes;
   const perDay = Math.round(change / ((last.at - first.at) / MILLIS_PER_DAY));
@@ -1534,9 +1556,13 @@ export const reportingSpaceTrends: ReadOnlyTool = {
     'of the range. At most ten datasets are reported, THE LARGEST BY CURRENT ' +
     '`used_bytes` — not the fastest growing, which cannot be known before ' +
     'reading them — and `truncated_datasets` is true when the system has more. ' +
-    'At most a thousand snapshots are read per dataset; `truncated_snapshots` ' +
-    'is true when some dataset had more, and the window observed for it is ' +
-    'then narrower than the range. `pools` holds one entry per pool, each ' +
+    'At most a thousand snapshots are read per dataset, and no order is asked ' +
+    'for, so they are an arbitrary thousand; `truncated_snapshots` is true ' +
+    'when some dataset had more, and the window observed for it is then ' +
+    'narrower than the range. Such a dataset that yielded no change SAYS SO IN ' +
+    '`unavailable` rather than reporting that the system holds no snapshot of ' +
+    'it — the part not read cannot be spoken for. `pools` holds one entry per ' +
+    'pool, each ' +
     'with: `used_bytes`, `free_bytes`, `total_bytes` and `used_percent`, the ' +
     "pool's space AS OF NOW rather than over the range, with " +
     '`levels_unavailable` naming why where they could not be read; ' +
@@ -1592,10 +1618,20 @@ export const reportingSpaceTrends: ReadOnlyTool = {
     const now = Date.now();
     const range = resolveRange(args, now);
     const [datasets, pools] = await Promise.all([datasetListing(system), poolListing(system)]);
-    // Nothing to report and no pool entry to carry the reason. Named rather
-    // than answered with an empty result, which would read as a system holding
-    // no storage at all.
-    if (datasets.error !== null && pools.error !== null) throw new Error(datasets.error);
+    // Every pool either listing named. A pool with no dataset listed still
+    // reports its levels, and a pool whose datasets were listed still reports
+    // its coverage, which is what keeps one failed read from hiding the other's
+    // answer.
+    const names = [...new Set([...datasets.all.map((row) => row.pool), ...pools.levels.keys()])];
+    names.sort();
+    // A failure with nowhere to be reported is thrown instead. Every failure
+    // this tool catches is carried by a pool entry, so no pool entries means no
+    // pool named it — and answering an empty result would read as a system
+    // holding no storage at all. The test is what the result CAN carry rather
+    // than which read failed: a dataset listing that failed beside a pool one
+    // that answered nothing leaves the same silence as both of them failing.
+    const failure = datasets.error ?? pools.error;
+    if (names.length === 0 && failure !== null) throw new Error(failure);
 
     const histories = await Promise.all(
       datasets.reported.map((row) => snapshotHistory(system, row.id, range)),
@@ -1607,12 +1643,6 @@ export const reportingSpaceTrends: ReadOnlyTool = {
       return { dataset: row.id, pool: row.pool, used_bytes: row.used, ...answer.trend };
     });
 
-    // Every pool either listing named. A pool with no dataset listed still
-    // reports its levels, and a pool whose datasets were listed still reports
-    // its coverage, which is what keeps one failed read from hiding the other's
-    // answer.
-    const names = [...new Set([...datasets.all.map((row) => row.pool), ...pools.levels.keys()])];
-    names.sort();
     return {
       start: new Date(range.start).toISOString(),
       end: new Date(range.end).toISOString(),
