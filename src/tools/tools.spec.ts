@@ -11,6 +11,7 @@ import {
   disksList,
   iscsiList,
   listDatasets,
+  nvmeofList,
   poolStatus,
   poolTopology,
   quotaReport,
@@ -41,8 +42,25 @@ function fakeSystem(responses: Partial<Record<string, unknown>>): {
   return { ctx: { system }, call, query };
 }
 
+/**
+ * A SystemHandle whose queries answer independently, either with rows or by
+ * failing — `fakeSystem` answers every method from one map and has no way to
+ * make a call fail, which the tools that read several methods and return a
+ * partial answer are largely about.
+ */
+function failingSystem(
+  rows: Partial<Record<string, unknown>>,
+  failures: Partial<Record<string, unknown>> = {},
+): { ctx: ToolContext; query: ReturnType<typeof vi.fn> } {
+  const query = vi.fn((method: string) =>
+    method in failures ? throwError(() => failures[method]) : of(rows[method]),
+  );
+  const system = { name: 'nas', client: { api: { query } } } as unknown as SystemHandle;
+  return { ctx: { system }, query };
+}
+
 describe('createDefaultCatalog', () => {
-  it('registers the eighteen sketch tools', () => {
+  it('registers the nineteen sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'storage_pool_status',
@@ -61,6 +79,7 @@ describe('createDefaultCatalog', () => {
       'shares_list',
       'share_access',
       'iscsi_list',
+      'nvmeof_list',
       'snapshots_create',
     ]);
   });
@@ -135,6 +154,10 @@ describe('createDefaultCatalog', () => {
 
   it('advertises iscsi_list to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('iscsi_list');
+  });
+
+  it('advertises nvmeof_list to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('nvmeof_list');
   });
 });
 
@@ -3746,22 +3769,6 @@ describe('share_access', () => {
 
 describe('iscsi_list', () => {
   /**
-   * A SystemHandle whose four iSCSI queries answer independently, either with
-   * rows or by failing — `fakeSystem` answers every method from one map and has
-   * no way to make a call fail, which several of these tests are about.
-   */
-  const fakeIscsi = (
-    rows: Partial<Record<string, unknown>>,
-    failures: Partial<Record<string, unknown>> = {},
-  ): { ctx: ToolContext; query: ReturnType<typeof vi.fn> } => {
-    const query = vi.fn((method: string) =>
-      method in failures ? throwError(() => failures[method]) : of(rows[method]),
-    );
-    const system = { name: 'nas', client: { api: { query } } } as unknown as SystemHandle;
-    return { ctx: { system }, query };
-  };
-
-  /**
    * A target as `iscsi.target.query` reports one. `rel_tgt_id`, `mode`,
    * `groups` and `auth_networks` are real fields of the payload the tool does
    * not name, and are here to be dropped.
@@ -3830,7 +3837,7 @@ describe('iscsi_list', () => {
     rows: Partial<Record<string, unknown>> = {},
     failures: Partial<Record<string, unknown>> = {},
   ): Promise<Listing> => {
-    const { ctx } = fakeIscsi(
+    const { ctx } = failingSystem(
       {
         ['iscsi.target.query']: [target()],
         ['iscsi.extent.query']: [extent()],
@@ -4272,7 +4279,7 @@ describe('iscsi_list', () => {
   });
 
   it('issues every read before awaiting any of them', async () => {
-    const { ctx, query } = fakeIscsi({
+    const { ctx, query } = failingSystem({
       ['iscsi.target.query']: [target()],
       ['iscsi.extent.query']: [extent()],
       ['iscsi.targetextent.query']: [mapping()],
@@ -4289,6 +4296,436 @@ describe('iscsi_list', () => {
       'iscsi.extent.query',
       'iscsi.targetextent.query',
       'iscsi.global.sessions',
+    ]);
+    await listing;
+  });
+});
+
+describe('nvmeof_list', () => {
+  /**
+   * A subsystem as `nvmet.subsys.query` reports one. `serial`, `pi_enable`,
+   * `ana` and the three id lists are real fields of the payload the tool does
+   * not name, and are here to be dropped — `hosts` and `namespaces` especially,
+   * which the tool answers with the joined records rather than with these ids.
+   */
+  const subsystem = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    name: 'nvme0',
+    subnqn: 'nqn.2011-06.com.truenas.ctl:nvme0',
+    serial: 'a1b2c3d4e5f6',
+    allow_any_host: false,
+    pi_enable: false,
+    qid_max: null,
+    ieee_oui: null,
+    ana: null,
+    hosts: [3],
+    namespaces: [7],
+    ports: [1],
+    ...over,
+  });
+
+  /**
+   * A namespace as `nvmet.namespace.query` reports one: a ZVOL, which is the
+   * kind that carries no `filesize` of its own.
+   */
+  const namespace = (over: Record<string, unknown> = {}) => ({
+    id: 7,
+    nsid: 1,
+    subsys: { id: 1, name: 'nvme0' },
+    device_type: 'ZVOL',
+    device_path: 'zvol/tank/nvme0',
+    filesize: null,
+    device_uuid: '3fa85f64-5717-4562-b3fc-2c963f66afa6',
+    device_nguid: 'e2b4c1a05f9d4c7e',
+    enabled: true,
+    locked: false,
+    ...over,
+  });
+
+  /** A row of the join table allowing one host onto one subsystem. */
+  const hostJoin = (over: Record<string, unknown> = {}) => ({
+    id: 2,
+    host: { id: 3, hostnqn: 'nqn.2014-08.org.nvmexpress:uuid:esx1', dhchap_key: null },
+    subsys: { id: 1, name: 'nvme0' },
+    ...over,
+  });
+
+  type Listing = {
+    supported: boolean;
+    unsupported_reason: string | null;
+    subsystems: Record<string, unknown>[] | null;
+    failures: Record<string, unknown>[];
+  };
+
+  const listed = async (
+    rows: Partial<Record<string, unknown>> = {},
+    failures: Partial<Record<string, unknown>> = {},
+  ): Promise<Listing> => {
+    const { ctx } = failingSystem(
+      {
+        ['nvmet.subsys.query']: [subsystem()],
+        ['nvmet.namespace.query']: [namespace()],
+        ['nvmet.host_subsys.query']: [hostJoin()],
+        ...rows,
+      },
+      failures,
+    );
+    return (await nvmeofList.handler(ctx, {})) as Listing;
+  };
+
+  /** The single subsystem of a listing, for the cases about one's fields. */
+  const onlySubsystem = async (
+    rows: Partial<Record<string, unknown>> = {},
+    failures: Partial<Record<string, unknown>> = {},
+  ): Promise<Record<string, unknown>> => ((await listed(rows, failures)).subsystems ?? [])[0];
+
+  it('reports each subsystem with its allowed hosts and its namespaces', async () => {
+    expect(await listed()).toEqual({
+      supported: true,
+      unsupported_reason: null,
+      subsystems: [
+        {
+          id: 1,
+          name: 'nvme0',
+          nqn: 'nqn.2011-06.com.truenas.ctl:nvme0',
+          allow_any_host: false,
+          hosts: ['nqn.2014-08.org.nvmexpress:uuid:esx1'],
+          namespaces: [
+            {
+              id: 7,
+              nsid: 1,
+              device_type: 'ZVOL',
+              device_path: 'zvol/tank/nvme0',
+              size_bytes: null,
+              enabled: true,
+              locked: false,
+            },
+          ],
+        },
+      ],
+      failures: [],
+    });
+  });
+
+  it('surfaces no field a later release adds', async () => {
+    const listing = await listed({
+      ['nvmet.subsys.query']: [subsystem({ future_field: 'added by a later release' })],
+      ['nvmet.namespace.query']: [namespace({ future_field: 'added by a later release' })],
+      ['nvmet.host_subsys.query']: [hostJoin({ future_field: 'added by a later release' })],
+    });
+    expect(Object.keys(listing)).toEqual([
+      'supported',
+      'unsupported_reason',
+      'subsystems',
+      'failures',
+    ]);
+    const only = (listing.subsystems ?? [])[0];
+    expect(Object.keys(only)).toEqual([
+      'id',
+      'name',
+      'nqn',
+      'allow_any_host',
+      'hosts',
+      'namespaces',
+    ]);
+    expect(Object.keys((only['namespaces'] as Record<string, unknown>[])[0])).toEqual([
+      'id',
+      'nsid',
+      'device_type',
+      'device_path',
+      'size_bytes',
+      'enabled',
+      'locked',
+    ]);
+  });
+
+  it('reports a subsystem with no namespaces as an empty list, not omitted', async () => {
+    expect(await onlySubsystem({ ['nvmet.namespace.query']: [] })).toMatchObject({
+      name: 'nvme0',
+      namespaces: [],
+    });
+  });
+
+  it('reports a subsystem no host is allowed onto as an empty list', async () => {
+    expect(await onlySubsystem({ ['nvmet.host_subsys.query']: [] })).toMatchObject({ hosts: [] });
+  });
+
+  it('reports whether any host is admitted, so an empty list is not read as a bar', async () => {
+    // With `allow_any_host` true the host list restricts nothing, and without
+    // this field an empty one reads as a subsystem nobody may attach to.
+    const listing = await listed({
+      ['nvmet.subsys.query']: [
+        subsystem({ allow_any_host: true }),
+        subsystem({ id: 2, name: 'nvme1', allow_any_host: 'yes' }),
+      ],
+      ['nvmet.host_subsys.query']: [],
+    });
+    expect(
+      (listing.subsystems ?? []).map((one) => [one['name'], one['allow_any_host'], one['hosts']]),
+    ).toEqual([
+      ['nvme0', true, []],
+      // Present but not a boolean settles neither, so it is null rather than
+      // the false that would assert the list is the whole of who may attach.
+      ['nvme1', null, []],
+    ]);
+  });
+
+  it('reports the backing device of a ZVOL namespace and of a FILE one', async () => {
+    const namespaces = (
+      await onlySubsystem({
+        ['nvmet.namespace.query']: [
+          namespace(),
+          namespace({
+            id: 8,
+            nsid: 2,
+            device_type: 'FILE',
+            device_path: '/mnt/tank/nvme/logs.img',
+            filesize: 10737418240,
+          }),
+        ],
+      })
+    )['namespaces'] as Record<string, unknown>[];
+    // A ZVOL takes its size from the zvol and reports none here. Null is that
+    // unlearned size — reporting 0 would say the namespace holds nothing.
+    expect(namespaces[0]).toMatchObject({ device_type: 'ZVOL', size_bytes: null });
+    expect(namespaces[1]).toMatchObject({
+      device_type: 'FILE',
+      device_path: '/mnt/tank/nvme/logs.img',
+      size_bytes: 10737418240,
+    });
+  });
+
+  it('reports a namespace field the system omitted or garbled as null', async () => {
+    const namespaces = (
+      await onlySubsystem({
+        ['nvmet.namespace.query']: [
+          { subsys: { id: 1 }, device_uuid: 'u', nsid: 'first', filesize: Number.NaN },
+        ],
+      })
+    )['namespaces'] as Record<string, unknown>[];
+    // `enabled` and `locked` especially: false would say the namespace is
+    // definitely not serving, which the system did not report either way.
+    expect(namespaces[0]).toEqual({
+      id: null,
+      nsid: null,
+      device_type: null,
+      device_path: null,
+      size_bytes: null,
+      enabled: null,
+      locked: null,
+    });
+  });
+
+  it('reads a subsystem field the system omitted as having none', async () => {
+    expect(
+      await onlySubsystem({ ['nvmet.subsys.query']: [{ id: 1, serial: 'a1b2c3' }] }),
+    ).toMatchObject({ name: null, nqn: null, allow_any_host: null });
+    for (const missing of [null, undefined, '']) {
+      expect(
+        await onlySubsystem({ ['nvmet.subsys.query']: [subsystem({ subnqn: missing })] }),
+      ).toMatchObject({ nqn: null });
+    }
+  });
+
+  it('groups namespaces and hosts under the subsystem each names', async () => {
+    const listing = await listed({
+      ['nvmet.subsys.query']: [subsystem(), subsystem({ id: 2, name: 'nvme1' })],
+      ['nvmet.namespace.query']: [
+        namespace(),
+        namespace({ id: 8, nsid: 1, subsys: { id: 2 }, device_path: 'zvol/tank/nvme1' }),
+        namespace({ id: 9, nsid: 2, device_path: 'zvol/tank/nvme0b' }),
+      ],
+      ['nvmet.host_subsys.query']: [
+        hostJoin(),
+        hostJoin({
+          id: 5,
+          subsys: { id: 2 },
+          host: { id: 4, hostnqn: 'nqn.2014-08.org.nvmexpress:uuid:esx2' },
+        }),
+        hostJoin({ id: 6, host: { id: 4, hostnqn: 'nqn.2014-08.org.nvmexpress:uuid:esx2' } }),
+      ],
+    });
+    expect(
+      (listing.subsystems ?? []).map((one) => [
+        one['name'],
+        one['hosts'],
+        (one['namespaces'] as Record<string, unknown>[]).map((each) => each['device_path']),
+      ]),
+    ).toEqual([
+      [
+        'nvme0',
+        ['nqn.2014-08.org.nvmexpress:uuid:esx1', 'nqn.2014-08.org.nvmexpress:uuid:esx2'],
+        ['zvol/tank/nvme0', 'zvol/tank/nvme0b'],
+      ],
+      ['nvme1', ['nqn.2014-08.org.nvmexpress:uuid:esx2'], ['zvol/tank/nvme1']],
+    ]);
+  });
+
+  it('leaves out a row the system did not attribute to a subsystem', async () => {
+    // Filing it under a subsystem it may not belong to would report a namespace
+    // on the wrong device, and a host as allowed onto one it is not.
+    const listing = await listed({
+      ['nvmet.namespace.query']: [namespace({ subsys: { name: 'nvme0' } })],
+      ['nvmet.host_subsys.query']: [hostJoin({ subsys: {} })],
+    });
+    expect((listing.subsystems ?? [])[0]).toMatchObject({ namespaces: [], hosts: [] });
+    expect(listing.failures).toEqual([]);
+  });
+
+  it('leaves out a host row carrying no NQN to report', async () => {
+    for (const missing of [null, '', undefined]) {
+      expect(
+        await onlySubsystem({
+          ['nvmet.host_subsys.query']: [hostJoin({ host: { id: 3, hostnqn: missing } })],
+        }),
+      ).toMatchObject({ hosts: [] });
+    }
+  });
+
+  it('attributes nothing to a subsystem the system did not number', async () => {
+    const listing = await listed({ ['nvmet.subsys.query']: [subsystem({ id: 'nvme0' })] });
+    // Null as for a read that failed, because there is no id to join on — and
+    // an empty `failures` is what tells this apart from that.
+    expect((listing.subsystems ?? [])[0]).toEqual({
+      id: null,
+      name: 'nvme0',
+      nqn: 'nqn.2011-06.com.truenas.ctl:nvme0',
+      allow_any_host: false,
+      hosts: null,
+      namespaces: null,
+    });
+    expect(listing.failures).toEqual([]);
+  });
+
+  it('distinguishes namespaces that could not be read from a subsystem with none', async () => {
+    const listing = await listed({}, { ['nvmet.namespace.query']: new Error('denied') });
+    // Null rather than empty: an empty list would say the subsystem exports
+    // nothing, which is the one answer this tool must not invent.
+    expect((listing.subsystems ?? [])[0]).toMatchObject({ namespaces: null });
+    expect((listing.subsystems ?? [])[0]).not.toMatchObject({ hosts: null });
+    expect(listing.failures).toEqual([{ source: 'namespaces', error: 'denied' }]);
+  });
+
+  it('distinguishes hosts that could not be read from a subsystem with none', async () => {
+    const listing = await listed({}, { ['nvmet.host_subsys.query']: new Error('denied') });
+    expect((listing.subsystems ?? [])[0]).toMatchObject({ hosts: null });
+    expect((listing.subsystems ?? [])[0]).not.toMatchObject({ namespaces: null });
+    expect(listing.failures).toEqual([{ source: 'hosts', error: 'denied' }]);
+  });
+
+  it('reports both reads failing without losing the subsystems themselves', async () => {
+    const listing = await listed(
+      {},
+      {
+        ['nvmet.namespace.query']: new Error('denied'),
+        ['nvmet.host_subsys.query']: new Error('service not running'),
+      },
+    );
+    expect(listing.subsystems).toEqual([
+      {
+        id: 1,
+        name: 'nvme0',
+        nqn: 'nqn.2011-06.com.truenas.ctl:nvme0',
+        allow_any_host: false,
+        hosts: null,
+        namespaces: null,
+      },
+    ]);
+    expect(listing.failures).toEqual([
+      { source: 'namespaces', error: 'denied' },
+      { source: 'hosts', error: 'service not running' },
+    ]);
+  });
+
+  it('names a failure the system sent as an object rather than an Error', async () => {
+    // What a failed call actually rejects with: the client's own error types
+    // are a middleware object carrying `reason` and a JSON-RPC one carrying
+    // `message`. Reading neither reported every real failure as silent.
+    for (const [reason, error] of [
+      ['connection reset', 'connection reset'],
+      [{ reason: 'Not authorized' }, 'Not authorized'],
+      [{ code: 500, message: 'Internal error' }, 'Internal error'],
+      [new Error(''), 'the system reported no reason'],
+      [{ code: 500 }, 'the system reported no reason'],
+      [504, 'the system reported no reason'],
+    ] as [unknown, string][]) {
+      expect((await listed({}, { ['nvmet.host_subsys.query']: reason })).failures).toEqual([
+        { source: 'hosts', error },
+      ]);
+    }
+  });
+
+  it('reports a system whose version has no NVMe-oF as unsupported, not as empty', async () => {
+    // Every spelling of "no such method" the client's error types allow: the
+    // JSON-RPC code, the middleware's error name, either text field, and the
+    // nested `data` a JSON-RPC error wraps a middleware one in.
+    for (const reason of [
+      new Error('[ENOMETHOD] Method "nvmet.subsys.query" not found'),
+      '[ENOMETHOD] no such method',
+      { code: -32601, message: 'Method not found' },
+      { errname: 'ENOMETHOD', reason: 'Method does not exist' },
+      { reason: '[ENOMETHOD] Method does not exist' },
+      { message: '[ENOMETHOD] Method does not exist' },
+      { code: -32000, message: 'call failed', data: { errname: 'ENOMETHOD', reason: 'gone' } },
+    ]) {
+      expect(await listed({}, { ['nvmet.subsys.query']: reason })).toMatchObject({
+        supported: false,
+        subsystems: null,
+        // The other two reads fail the same way on such a system; naming them
+        // would report one absent feature three times, as three defects.
+        failures: [],
+      });
+    }
+    expect(
+      (await listed({}, { ['nvmet.subsys.query']: { code: -32601, message: 'Method not found' } }))
+        .unsupported_reason,
+    ).toBe('Method not found');
+  });
+
+  it('raises rather than calling a read it could not make unsupported', async () => {
+    // "This system has no NVMe-oF" is a claim about the system, and a denied or
+    // dropped read is evidence for no such claim.
+    await expect(listed({}, { ['nvmet.subsys.query']: new Error('denied') })).rejects.toThrow(
+      'denied',
+    );
+    await expect(
+      listed({}, { ['nvmet.subsys.query']: { code: -32000, message: 'connection reset' } }),
+    ).rejects.toEqual({ code: -32000, message: 'connection reset' });
+    await expect(listed({}, { ['nvmet.subsys.query']: 'connection reset' })).rejects.toBe(
+      'connection reset',
+    );
+    await expect(listed({}, { ['nvmet.subsys.query']: null })).rejects.toBeNull();
+  });
+
+  it('reports a system that has NVMe-oF and no subsystems as an empty list', async () => {
+    expect(
+      await listed({
+        ['nvmet.subsys.query']: [],
+        ['nvmet.namespace.query']: [],
+        ['nvmet.host_subsys.query']: [],
+      }),
+    ).toEqual({
+      supported: true,
+      unsupported_reason: null,
+      subsystems: [],
+      failures: [],
+    });
+  });
+
+  it('issues every read before awaiting any of them', async () => {
+    const { ctx, query } = failingSystem({
+      ['nvmet.subsys.query']: [subsystem()],
+      ['nvmet.namespace.query']: [namespace()],
+      ['nvmet.host_subsys.query']: [hostJoin()],
+    });
+    const listing = nvmeofList.handler(ctx, {});
+    // Asserted before the handler is awaited at all, which is what makes this
+    // about concurrency rather than order: a handler that awaited one read
+    // before starting the next would have made one call by this point.
+    expect(query.mock.calls.map((one) => one[0])).toEqual([
+      'nvmet.subsys.query',
+      'nvmet.namespace.query',
+      'nvmet.host_subsys.query',
     ]);
     await listing;
   });
