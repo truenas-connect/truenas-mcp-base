@@ -4,13 +4,13 @@ import { appsList } from '@/tools/apps';
 import { disksList } from '@/tools/disks';
 import { poolTopology, scrubHistory } from '@/tools/pools';
 import { replicationStatus } from '@/tools/replication';
-import { sharesList } from '@/tools/shares';
+import { shareAccess, sharesList } from '@/tools/shares';
 import { createSnapshot, snapshotsList } from '@/tools/snapshots';
 import { listDatasets, poolStatus, quotaReport } from '@/tools/storage';
 import { systemInfo } from '@/tools/system';
 import { cloudsyncTasksList, snapshotTasksList, tasksRecentRuns } from '@/tools/tasks';
 
-/** The sketch's catalog: fifteen read-only tools plus one mutating tool. */
+/** The sketch's catalog: sixteen read-only tools plus one mutating tool. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -28,6 +28,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(cloudsyncTasksList);
   catalog.register(tasksRecentRuns);
   catalog.register(sharesList);
+  catalog.register(shareAccess);
   catalog.register(createSnapshot);
   return catalog;
 }
@@ -44,6 +45,7 @@ export {
   quotaReport,
   replicationStatus,
   scrubHistory,
+  shareAccess,
   sharesList,
   snapshotsList,
   snapshotTasksList,

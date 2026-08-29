@@ -15,6 +15,7 @@ import {
   quotaReport,
   replicationStatus,
   scrubHistory,
+  shareAccess,
   sharesList,
   snapshotsList,
   snapshotTasksList,
@@ -40,7 +41,7 @@ function fakeSystem(responses: Partial<Record<string, unknown>>): {
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the sixteen sketch tools', () => {
+  it('registers the seventeen sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'storage_pool_status',
@@ -57,6 +58,7 @@ describe('createDefaultCatalog', () => {
       'cloudsync_tasks_list',
       'tasks_recent_runs',
       'shares_list',
+      'share_access',
       'snapshots_create',
     ]);
   });
@@ -123,6 +125,10 @@ describe('createDefaultCatalog', () => {
 
   it('advertises shares_list to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('shares_list');
+  });
+
+  it('advertises share_access to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('share_access');
   });
 });
 
@@ -2841,5 +2847,461 @@ describe('shares_list', () => {
     await expect(sharesList.handler(ctx, {})).rejects.toThrow(
       'no share could be listed: SMB: smb is down; NFS: nfs is down',
     );
+  });
+});
+
+describe('share_access', () => {
+  /**
+   * A SystemHandle whose share lists and ACL read answer from one canned map,
+   * or fail. Both seams read that map because this tool uses `query` for the
+   * two share lists and `call` for the ACL, and half of these tests are about
+   * one of the three failing while the others answer.
+   */
+  const fakeAccess = (
+    rows: Partial<Record<string, unknown>>,
+    failures: Partial<Record<string, unknown>> = {},
+  ): { ctx: ToolContext; query: ReturnType<typeof vi.fn>; call: ReturnType<typeof vi.fn> } => {
+    const answer = (method: string) =>
+      method in failures ? throwError(() => failures[method]) : of(rows[method]);
+    const query = vi.fn(answer);
+    const call = vi.fn(answer);
+    const system = { name: 'nas', client: { api: { query, call } } } as unknown as SystemHandle;
+    return { ctx: { system }, query, call };
+  };
+
+  const smbShare = (over: Record<string, unknown> = {}) => ({
+    id: 3,
+    name: 'media',
+    path: '/mnt/tank/media',
+    enabled: true,
+    comment: 'Films and music',
+    ...over,
+  });
+
+  const nfsExport = (over: Record<string, unknown> = {}) => ({
+    id: 7,
+    path: '/mnt/tank/backups',
+    enabled: true,
+    comment: 'Nightly backups',
+    hosts: ['10.0.0.5'],
+    networks: ['10.0.0.0/24'],
+    ...over,
+  });
+
+  /** One ACL entry as `filesystem.getacl` reports one, resolved. */
+  const ace = (over: Record<string, unknown> = {}) => ({
+    tag: 'USER',
+    id: 1001,
+    who: 'alice',
+    type: 'ALLOW',
+    perms: { BASIC: 'FULL_CONTROL' },
+    flags: { BASIC: 'INHERIT' },
+    ...over,
+  });
+
+  const aclOf = (over: Record<string, unknown> = {}) => ({
+    path: '/mnt/tank/media',
+    user: 'root',
+    uid: 0,
+    group: 'wheel',
+    gid: 0,
+    acltype: 'NFS4',
+    trivial: false,
+    acl: [ace()],
+    ...over,
+  });
+
+  /** The one entry the default ACL holds, once mapped. */
+  const entry = {
+    tag: 'USER',
+    name: 'alice',
+    id: 1001,
+    access: 'ALLOW',
+    permissions: ['FULL_CONTROL'],
+    children_only: false,
+  };
+
+  /** The default ACL, once mapped. */
+  const acl = {
+    type: 'NFS4',
+    trivial: false,
+    owner_user: 'root',
+    owner_uid: 0,
+    owner_group: 'wheel',
+    owner_gid: 0,
+    entries: [entry],
+  };
+
+  const answered = async (
+    args: Record<string, unknown>,
+    rows: Partial<Record<string, unknown>> = {},
+    failures: Partial<Record<string, unknown>> = {},
+  ): Promise<Record<string, unknown>> => {
+    const { ctx } = fakeAccess(
+      {
+        ['sharing.smb.query']: [smbShare()],
+        ['sharing.nfs.query']: [nfsExport()],
+        ['filesystem.getacl']: aclOf(),
+        ...rows,
+      },
+      failures,
+    );
+    return (await shareAccess.handler(ctx, args)) as Record<string, unknown>;
+  };
+
+  const entriesOf = (result: Record<string, unknown>): Record<string, unknown>[] =>
+    (result['acl'] as { entries: Record<string, unknown>[] }).entries;
+
+  /** The SMB share's single ACL entry, with only the fields a case is about differing. */
+  const oneEntry = async (over: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const result = await answered(
+      { share: 'media' },
+      { ['filesystem.getacl']: aclOf({ acl: [ace(over)] }) },
+    );
+    return entriesOf(result)[0];
+  };
+
+  it('reports an SMB share by name, with the ACL on its path', async () => {
+    expect(await answered({ share: 'media' })).toEqual({
+      protocol: 'SMB',
+      id: 3,
+      name: 'media',
+      path: '/mnt/tank/media',
+      enabled: true,
+      // SMB has no host or network restriction of its own.
+      hosts: null,
+      networks: null,
+      acl,
+      acl_error: null,
+    });
+  });
+
+  it('reports an NFS export by the path it exports, with who may mount it', async () => {
+    expect(await answered({ share: '/mnt/tank/backups' })).toEqual({
+      protocol: 'NFS',
+      id: 7,
+      // NFS identifies an export by its path and holds no name for one.
+      name: null,
+      path: '/mnt/tank/backups',
+      enabled: true,
+      hosts: ['10.0.0.5'],
+      networks: ['10.0.0.0/24'],
+      acl,
+      acl_error: null,
+    });
+  });
+
+  it('surfaces no field a later release adds', async () => {
+    const result = await answered(
+      { share: 'media' },
+      {
+        ['sharing.smb.query']: [smbShare({ future_field: 'added later' })],
+        ['filesystem.getacl']: aclOf({
+          future_field: 'added later',
+          acl: [ace({ future_field: 'added later' })],
+        }),
+      },
+    );
+    expect(Object.keys(result)).toEqual([
+      'protocol',
+      'id',
+      'name',
+      'path',
+      'enabled',
+      'hosts',
+      'networks',
+      'acl',
+      'acl_error',
+    ]);
+    expect(Object.keys(result['acl'] as object)).toEqual([
+      'type',
+      'trivial',
+      'owner_user',
+      'owner_uid',
+      'owner_group',
+      'owner_gid',
+      'entries',
+    ]);
+    expect(Object.keys(entriesOf(result)[0])).toEqual([
+      'tag',
+      'name',
+      'id',
+      'access',
+      'permissions',
+      'children_only',
+    ]);
+  });
+
+  it('reads the ACL of the path the share serves, resolving ids to names', async () => {
+    const { ctx, call } = fakeAccess({
+      ['sharing.smb.query']: [smbShare()],
+      ['sharing.nfs.query']: [],
+      ['filesystem.getacl']: aclOf(),
+    });
+    await shareAccess.handler(ctx, { share: 'media' });
+    expect(call).toHaveBeenCalledWith('filesystem.getacl', ['/mnt/tank/media', true, true]);
+  });
+
+  it('matches an SMB share by its path as well as by its name', async () => {
+    expect((await answered({ share: '/mnt/tank/media' }))['id']).toBe(3);
+  });
+
+  it('searches only the protocol asked for', async () => {
+    // The path is an SMB share's, so restricting to NFS must find nothing
+    // rather than answering with the SMB share.
+    await expect(answered({ share: '/mnt/tank/media', protocol: 'NFS' })).rejects.toThrow(
+      'no NFS share is named "/mnt/tank/media" or exports that path',
+    );
+  });
+
+  it('treats an omitted or null protocol as both', async () => {
+    for (const protocol of [undefined, null]) {
+      expect((await answered({ share: '/mnt/tank/backups', protocol }))['protocol']).toBe('NFS');
+    }
+  });
+
+  it('errors naming the share when nothing matches, rather than answering empty', async () => {
+    // A share that does not exist and a share nobody can reach are opposite
+    // answers, and an empty result would read as the second.
+    await expect(answered({ share: 'ghost' })).rejects.toThrow(
+      'no share is named "ghost" or exports that path',
+    );
+  });
+
+  it('says so when the share it did not find is one it could not have seen', async () => {
+    await expect(
+      answered({ share: 'ghost' }, {}, { ['sharing.nfs.query']: new Error('nfs is down') }),
+    ).rejects.toThrow(
+      'no share is named "ghost" or exports that path, and it may be one that could not be ' +
+        'looked up: NFS: nfs is down',
+    );
+  });
+
+  it('leaves out a failure of a protocol the caller excluded', async () => {
+    // The NFS list failing says nothing about a question restricted to SMB, so
+    // reporting it would make a complete answer read as a doubtful one.
+    await expect(
+      answered(
+        { share: 'ghost', protocol: 'SMB' },
+        {},
+        { ['sharing.nfs.query']: new Error('nfs is down') },
+      ),
+    ).rejects.toThrow('no SMB share is named "ghost" or exports that path');
+  });
+
+  it('errors rather than guessing when one string matches more than one share', async () => {
+    // A path shared over both protocols grants access differently through each,
+    // so there is no single answer to give.
+    await expect(
+      answered(
+        { share: '/mnt/tank/media' },
+        { ['sharing.nfs.query']: [nfsExport({ path: '/mnt/tank/media' })] },
+      ),
+    ).rejects.toThrow(
+      '"/mnt/tank/media" matches 2 shares — SMB share 3, NFS share 7. Ask again with the ' +
+        'protocol argument, or with the SMB share name rather than its path.',
+    );
+  });
+
+  it('rejects a call that names no share', async () => {
+    for (const missing of [undefined, null, '', 42]) {
+      await expect(answered({ share: missing })).rejects.toThrow('share is required');
+    }
+  });
+
+  it('rejects a protocol that is neither SMB nor NFS', async () => {
+    await expect(answered({ share: 'media', protocol: 'iSCSI' })).rejects.toThrow(
+      'protocol must be "SMB" or "NFS", not "iSCSI"',
+    );
+  });
+
+  it('reports an unrestricted NFS export as empty, which is not nobody', async () => {
+    // No host restriction and no network restriction together mean any machine
+    // that can reach the server may mount it.
+    for (const unrestricted of [[], undefined, null]) {
+      const result = await answered(
+        { share: '/mnt/tank/backups' },
+        {
+          ['sharing.nfs.query']: [
+            nfsExport({ hosts: unrestricted, networks: unrestricted }),
+          ],
+        },
+      );
+      expect(result['hosts']).toEqual([]);
+      expect(result['networks']).toEqual([]);
+    }
+  });
+
+  it('drops a restriction that is not text, and reports an unreadable list as null', async () => {
+    const result = await answered(
+      { share: '/mnt/tank/backups' },
+      { ['sharing.nfs.query']: [nfsExport({ hosts: ['10.0.0.5', '', 42], networks: 'everyone' })] },
+    );
+    expect(result['hosts']).toEqual(['10.0.0.5']);
+    expect(result['networks']).toBeNull();
+  });
+
+  it('states why a share that serves no path here has no ACL', async () => {
+    const external = await answered(
+      { share: 'media' },
+      { ['sharing.smb.query']: [smbShare({ path: 'EXTERNAL' })] },
+    );
+    expect(external['acl']).toBeNull();
+    expect(external['acl_error']).toContain('redirects clients to another server');
+
+    const pathless = await answered(
+      { share: 'media' },
+      { ['sharing.smb.query']: [smbShare({ path: null })] },
+    );
+    expect(pathless['acl']).toBeNull();
+    expect(pathless['acl_error']).toBe(
+      'the system reported no path for this share, so it has no ACL',
+    );
+  });
+
+  it('keeps the share and its restrictions when the ACL read fails', async () => {
+    // Over NFS the host restrictions still answer half the question, and an
+    // unread ACL must never arrive as an empty one.
+    for (const [reason, text] of [
+      [new Error('permission denied'), 'permission denied'],
+      [{ code: 500 }, 'the system reported no reason'],
+    ] as const) {
+      const result = await answered(
+        { share: '/mnt/tank/backups' },
+        {},
+        { ['filesystem.getacl']: reason },
+      );
+      expect(result['hosts']).toEqual(['10.0.0.5']);
+      expect(result['acl']).toBeNull();
+      expect(result['acl_error']).toBe(text);
+    }
+  });
+
+  it('reports a path with ACLs switched off as holding no entry list', async () => {
+    // Access there is governed by the Unix mode bits, which this tool does not
+    // read — an empty list would claim nobody has access.
+    const result = await answered(
+      { share: 'media' },
+      { ['filesystem.getacl']: aclOf({ acltype: 'DISABLED', acl: null, trivial: true }) },
+    );
+    expect(result['acl']).toEqual({
+      type: 'DISABLED',
+      trivial: true,
+      owner_user: 'root',
+      owner_uid: 0,
+      owner_group: 'wheel',
+      owner_gid: 0,
+      entries: null,
+    });
+  });
+
+  it('reports an ACL field it could not read as null', async () => {
+    const result = await answered(
+      { share: 'media' },
+      {
+        ['filesystem.getacl']: aclOf({
+          acltype: '',
+          trivial: 'yes',
+          user: null,
+          uid: 'nobody',
+          group: '',
+          gid: Number.NaN,
+        }),
+      },
+    );
+    expect(result['acl']).toEqual({
+      type: null,
+      trivial: null,
+      owner_user: null,
+      owner_uid: null,
+      owner_group: null,
+      owner_gid: null,
+      entries: [entry],
+    });
+  });
+
+  it('reports an ACL that holds no entry as empty, which the mode bits do not', async () => {
+    expect(
+      (await answered({ share: 'media' }, { ['filesystem.getacl']: aclOf({ acl: [] }) }))['acl'],
+    ).toEqual({ ...acl, entries: [] });
+  });
+
+  it('reports a principal by name where it resolves and by raw id where it does not', async () => {
+    expect(await oneEntry({ who: null })).toMatchObject({ name: null, id: 1001 });
+    expect(await oneEntry({ who: 'alice', id: 1001 })).toMatchObject({ name: 'alice', id: 1001 });
+  });
+
+  it('reports the tags that are their own principal with neither a name nor an id', async () => {
+    // TrueNAS writes -1 on an entry whose tag IS the principal; reporting it
+    // verbatim would put a uid in the result that no account has.
+    expect(await oneEntry({ tag: 'owner@', who: null, id: -1 })).toMatchObject({
+      tag: 'owner@',
+      name: null,
+      id: null,
+    });
+  });
+
+  it('keeps an entry it could not read at all rather than dropping it', async () => {
+    // A shorter list of principals reads as a complete one.
+    const result = await answered(
+      { share: 'media' },
+      { ['filesystem.getacl']: aclOf({ acl: [null, 'nonsense'] }) },
+    );
+    expect(entriesOf(result)).toEqual([
+      { tag: null, name: null, id: null, access: null, permissions: null, children_only: null },
+      { tag: null, name: null, id: null, access: null, permissions: null, children_only: null },
+    ]);
+  });
+
+  it('reports ALLOW and DENY, and anything else as null', async () => {
+    expect((await oneEntry({ type: 'DENY' }))['access']).toBe('DENY');
+    for (const unreadable of [undefined, null, 'PERMIT']) {
+      expect((await oneEntry({ type: unreadable }))['access']).toBeNull();
+    }
+  });
+
+  it('names a preset permission, an NFS4 permission set, and a POSIX one', async () => {
+    expect((await oneEntry({ perms: { BASIC: 'MODIFY' } }))['permissions']).toEqual(['MODIFY']);
+    expect(
+      (await oneEntry({ perms: { READ_DATA: true, WRITE_DATA: false, EXECUTE: true } }))[
+        'permissions'
+      ],
+    ).toEqual(['READ_DATA', 'EXECUTE']);
+    expect(
+      (await oneEntry({ perms: { READ: true, WRITE: false, EXECUTE: true } }))['permissions'],
+    ).toEqual(['READ', 'EXECUTE']);
+  });
+
+  it('keeps an entry naming no permission apart from one whose permissions it could not read', async () => {
+    // The second is not evidence that the entry grants nothing.
+    expect((await oneEntry({ perms: {} }))['permissions']).toEqual([]);
+    for (const unreadable of [null, undefined, 'FULL_CONTROL']) {
+      expect((await oneEntry({ perms: unreadable }))['permissions']).toBeNull();
+    }
+    // A preset is known to grant something, and what it grants is exactly what
+    // an unreadable preset name loses.
+    for (const unreadable of [{ BASIC: '' }, { BASIC: 42 }]) {
+      expect((await oneEntry({ perms: unreadable }))['permissions']).toBeNull();
+    }
+  });
+
+  it('marks an entry that grants nothing on the path itself', async () => {
+    // POSIX says it outright; NFS4 says it among its flags.
+    expect((await oneEntry({ default: true }))['children_only']).toBe(true);
+    expect((await oneEntry({ default: false }))['children_only']).toBe(false);
+    expect((await oneEntry({ flags: { INHERIT_ONLY: true } }))['children_only']).toBe(true);
+    expect((await oneEntry({ flags: { FILE_INHERIT: true } }))['children_only']).toBe(false);
+    expect((await oneEntry({ flags: {} }))['children_only']).toBe(false);
+    // Neither preset flag is inherit-only.
+    for (const preset of ['INHERIT', 'NOINHERIT']) {
+      expect((await oneEntry({ flags: { BASIC: preset } }))['children_only']).toBe(false);
+    }
+  });
+
+  it('reports inheritance it could not read as null, not as access to the path', async () => {
+    for (const unreadable of [undefined, null, 'inherited']) {
+      expect((await oneEntry({ flags: unreadable }))['children_only']).toBeNull();
+    }
+    expect((await oneEntry({ flags: { BASIC: 42 } }))['children_only']).toBeNull();
   });
 });
