@@ -261,8 +261,9 @@ export const sharesList: ReadOnlyTool = {
     const shares: Share[] = [];
     const failures: Failure[] = [];
     for (const attempted of attempts) {
-      // The share half only: what an export restricts and whom it maps is
-      // `share_access`, and this tool's own description says so.
+      // The share half only. What an export restricts and whom it maps is read
+      // by the same query and belongs to `share_access`; this tool's own
+      // description says those fields are not among the ones it returns.
       shares.push(...attempted.rows.map((target) => target.share));
       if (attempted.failure !== null) failures.push(attempted.failure);
     }
@@ -374,7 +375,12 @@ function permissionNames(perms: unknown): string[] | null {
     return basic === null ? null : [basic];
   }
   const names = Object.keys(record);
-  if (!names.some((name) => typeof record[name] === 'boolean')) return null;
+  if (names.length === 0) return null;
+  // Whole or nothing, as a restriction list is: reporting the readable ones
+  // alone would answer with a definite, narrower set of rights than the entry
+  // carries, and a caller cannot tell that from an entry that really holds
+  // only those.
+  if (!names.every((name) => typeof record[name] === 'boolean')) return null;
   return names.filter((name) => record[name] === true);
 }
 
@@ -395,7 +401,13 @@ function childrenOnly(ace: Record<string, unknown>): boolean | null {
   if (flags === null || typeof flags !== 'object') return null;
   const record = flags as Record<string, unknown>;
   if ('BASIC' in record) return textOrNull(record['BASIC']) === null ? null : false;
-  return record['INHERIT_ONLY'] === true;
+  const inheritOnly = record['INHERIT_ONLY'];
+  // Absent is a flag that is not set, which the middleware states by omission.
+  // Present but not a boolean is a flag that could not be read, and answering
+  // false there would assert the entry grants access on the path — the claim
+  // this field exists to avoid making by accident.
+  if (inheritOnly === undefined) return false;
+  return typeof inheritOnly === 'boolean' ? inheritOnly : null;
 }
 
 /**

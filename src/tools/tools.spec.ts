@@ -3614,8 +3614,10 @@ describe('share_access', () => {
       expect((await oneEntry({ perms: unreadable }))['permissions']).toBeNull();
     }
     // A set naming no permission this tool can read at all is unreadable, not
-    // an entry that holds nothing.
-    for (const unreadable of [{}, { READ: 'yes' }]) {
+    // an entry that holds nothing. So is a partly readable one: reporting
+    // ['READ'] for the last of these would answer with a definite, narrower
+    // set of rights than the entry carries.
+    for (const unreadable of [{}, { READ: 'yes' }, { READ: true, WRITE: 'yes' }]) {
       expect((await oneEntry({ perms: unreadable }))['permissions']).toBeNull();
     }
     // A preset is known to grant something, and what it grants is exactly what
@@ -3643,5 +3645,8 @@ describe('share_access', () => {
       expect((await oneEntry({ flags: unreadable }))['children_only']).toBeNull();
     }
     expect((await oneEntry({ flags: { BASIC: 42 } }))['children_only']).toBeNull();
+    // Present but not a boolean: answering false would assert the entry grants
+    // access on the path, which is the claim this field exists to avoid.
+    expect((await oneEntry({ flags: { INHERIT_ONLY: 'yes' } }))['children_only']).toBeNull();
   });
 });
