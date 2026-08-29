@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { SystemHandle, ToolContext } from '@/catalog/tool';
 import { Role } from '@/interfaces';
 import {
@@ -15,6 +15,7 @@ import {
   quotaReport,
   replicationStatus,
   scrubHistory,
+  sharesList,
   snapshotsList,
   snapshotTasksList,
   tasksRecentRuns,
@@ -39,7 +40,7 @@ function fakeSystem(responses: Partial<Record<string, unknown>>): {
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the fifteen sketch tools', () => {
+  it('registers the sixteen sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'storage_pool_status',
@@ -55,6 +56,7 @@ describe('createDefaultCatalog', () => {
       'snapshot_tasks_list',
       'cloudsync_tasks_list',
       'tasks_recent_runs',
+      'shares_list',
       'snapshots_create',
     ]);
   });
@@ -117,6 +119,10 @@ describe('createDefaultCatalog', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
       'tasks_recent_runs',
     );
+  });
+
+  it('advertises shares_list to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('shares_list');
   });
 });
 
@@ -2612,5 +2618,228 @@ describe('tasks_recent_runs', () => {
     for (const unreadable of [undefined, null, '', 42]) {
       expect((await one({ state: 'FAILED', error: unreadable }))['error']).toBeNull();
     }
+  });
+});
+
+describe('shares_list', () => {
+  /**
+   * A SystemHandle whose two share queries answer independently, either with
+   * rows or by failing. `fakeSystem` answers every method from one canned map
+   * and has no way to make a call fail, which is what half of these tests are
+   * about.
+   *
+   * A failure is a second map rather than a sentinel value in the first, so a
+   * test can say what the query rejected WITH — including a rejection that is
+   * not an `Error` at all, which a sentinel could not tell from a response.
+   */
+  const fakeShares = (
+    rows: Partial<Record<string, unknown>>,
+    failures: Partial<Record<string, unknown>> = {},
+  ): { ctx: ToolContext; query: ReturnType<typeof vi.fn> } => {
+    const query = vi.fn((method: string) =>
+      method in failures ? throwError(() => failures[method]) : of(rows[method]),
+    );
+    const system = { name: 'nas', client: { api: { query } } } as unknown as SystemHandle;
+    return { ctx: { system }, query };
+  };
+
+  /**
+   * An SMB share as `sharing.smb.query` reports one. `options`, `audit`,
+   * `purpose` and `locked` are real fields of the payload that this tool does
+   * not name, and are here to be dropped.
+   */
+  const smb = (over: Record<string, unknown> = {}) => ({
+    id: 3,
+    name: 'media',
+    path: '/mnt/tank/media',
+    enabled: true,
+    comment: 'Films and music',
+    purpose: 'DEFAULT_SHARE',
+    locked: false,
+    browsable: true,
+    audit: { enable: false },
+    options: { aapl_name_mangling: false },
+    ...over,
+  });
+
+  /**
+   * An NFS export as `sharing.nfs.query` reports one. `hosts`, `networks`,
+   * `security` and `maproot_user` are fields the tool does not name — who may
+   * reach the export is `share_access`, not this tool.
+   */
+  const nfs = (over: Record<string, unknown> = {}) => ({
+    id: 3,
+    path: '/mnt/tank/backups',
+    enabled: true,
+    comment: 'Nightly backups',
+    hosts: ['10.0.0.5'],
+    networks: ['10.0.0.0/24'],
+    security: ['SYS'],
+    maproot_user: 'root',
+    locked: null,
+    ...over,
+  });
+
+  const listed = async (
+    rows: Partial<Record<string, unknown>>,
+    failures: Partial<Record<string, unknown>> = {},
+  ): Promise<{ shares: Record<string, unknown>[]; failures: Record<string, unknown>[] }> => {
+    const { ctx } = fakeShares(rows, failures);
+    return (await sharesList.handler(ctx, {})) as {
+      shares: Record<string, unknown>[];
+      failures: Record<string, unknown>[];
+    };
+  };
+
+  /** Both protocols answering, with only the fields a case is about differing. */
+  const both = async (
+    smbOver: Record<string, unknown> = {},
+    nfsOver: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>[]> =>
+    (
+      await listed({
+        ['sharing.smb.query']: [smb(smbOver)],
+        ['sharing.nfs.query']: [nfs(nfsOver)],
+      })
+    ).shares;
+
+  it('merges SMB and NFS into one list, each tagged with its protocol', async () => {
+    expect(
+      await listed({
+        ['sharing.smb.query']: [smb()],
+        ['sharing.nfs.query']: [nfs()],
+      }),
+    ).toEqual({
+      shares: [
+        {
+          protocol: 'SMB',
+          id: 3,
+          name: 'media',
+          path: '/mnt/tank/media',
+          enabled: true,
+          comment: 'Films and music',
+        },
+        {
+          protocol: 'NFS',
+          id: 3,
+          // NFS identifies an export by its path and holds no name for one.
+          name: null,
+          path: '/mnt/tank/backups',
+          enabled: true,
+          comment: 'Nightly backups',
+        },
+      ],
+      failures: [],
+    });
+  });
+
+  it('surfaces no field a later release adds', async () => {
+    const shares = await both(
+      { future_field: 'added by a later TrueNAS release' },
+      { future_field: 'added by a later TrueNAS release' },
+    );
+    for (const share of shares) {
+      expect(Object.keys(share)).toEqual([
+        'protocol',
+        'id',
+        'name',
+        'path',
+        'enabled',
+        'comment',
+      ]);
+    }
+  });
+
+  it('asks each protocol for every share', async () => {
+    const { ctx, query } = fakeShares({
+      ['sharing.smb.query']: [smb()],
+      ['sharing.nfs.query']: [nfs()],
+    });
+    await sharesList.handler(ctx, {});
+    expect(query).toHaveBeenCalledWith('sharing.smb.query');
+    expect(query).toHaveBeenCalledWith('sharing.nfs.query');
+  });
+
+  it('returns an empty list for a system sharing nothing', async () => {
+    expect(await listed({ ['sharing.smb.query']: [], ['sharing.nfs.query']: [] })).toEqual({
+      shares: [],
+      failures: [],
+    });
+  });
+
+  it('returns a disabled share, marked disabled, rather than omitting it', async () => {
+    // A share nobody switched back on is exactly the one worth finding.
+    const shares = await both({ enabled: false }, { enabled: false });
+    expect(shares.map((share) => share['enabled'])).toEqual([false, false]);
+  });
+
+  it('reports a switch it could not read as null, which is not false', async () => {
+    for (const unreadable of [undefined, null]) {
+      const shares = await both({ enabled: unreadable }, { enabled: unreadable });
+      expect(shares.map((share) => share['enabled'])).toEqual([null, null]);
+    }
+  });
+
+  it('passes an SMB EXTERNAL share through as the system spelled it', async () => {
+    // Not a path on this system, and not a path that could not be found.
+    expect((await both({ path: 'EXTERNAL' }))[0]['path']).toBe('EXTERNAL');
+  });
+
+  it('reports a name, path or comment the system did not give as null', async () => {
+    for (const absent of [undefined, null, '', 42]) {
+      const shares = await both(
+        { name: absent, path: absent, comment: absent },
+        { path: absent, comment: absent },
+      );
+      expect(shares.map((share) => share['name'])).toEqual([null, null]);
+      expect(shares.map((share) => share['path'])).toEqual([null, null]);
+      expect(shares.map((share) => share['comment'])).toEqual([null, null]);
+    }
+  });
+
+  it('keeps one protocol’s shares when the other’s query fails', async () => {
+    const smbOnly = await listed(
+      { ['sharing.smb.query']: [smb()] },
+      { ['sharing.nfs.query']: new Error('nfs service is not running') },
+    );
+    expect(smbOnly.shares.map((share) => share['protocol'])).toEqual(['SMB']);
+    expect(smbOnly.failures).toEqual([{ protocol: 'NFS', error: 'nfs service is not running' }]);
+
+    const nfsOnly = await listed(
+      { ['sharing.nfs.query']: [nfs()] },
+      { ['sharing.smb.query']: new Error('smb service is not running') },
+    );
+    expect(nfsOnly.shares.map((share) => share['protocol'])).toEqual(['NFS']);
+    expect(nfsOnly.failures).toEqual([{ protocol: 'SMB', error: 'smb service is not running' }]);
+  });
+
+  it('names a failure that arrived as neither an Error nor any text', async () => {
+    for (const [reason, text] of [
+      ['nfs is down', 'nfs is down'],
+      [new Error(''), 'the system reported no reason'],
+      [{ code: 500 }, 'the system reported no reason'],
+      [undefined, 'the system reported no reason'],
+    ] as const) {
+      const result = await listed(
+        { ['sharing.smb.query']: [smb()] },
+        { ['sharing.nfs.query']: reason },
+      );
+      expect(result.failures).toEqual([{ protocol: 'NFS', error: text }]);
+    }
+  });
+
+  it('raises rather than answering with an empty list when neither could be read', async () => {
+    // An empty `shares` beside a `failures` nobody checked reads as a system
+    // that shares nothing, which is the one wrong answer that gets repeated.
+    const { ctx } = fakeShares(
+      {},
+      {
+        ['sharing.smb.query']: new Error('smb is down'),
+        ['sharing.nfs.query']: new Error('nfs is down'),
+      },
+    );
+    await expect(sharesList.handler(ctx, {})).rejects.toThrow(
+      'no share could be listed: SMB: smb is down; NFS: nfs is down',
+    );
   });
 });
