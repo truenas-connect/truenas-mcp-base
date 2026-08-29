@@ -76,5 +76,6 @@ export {
   tasksRecentRuns,
   sharesList,
   shareAccess,
+  iscsiList,
   createSnapshot,
 } from '@/tools/index';
