@@ -853,17 +853,33 @@ describe('datasets_quota_report', () => {
   });
 
   it('reads an explicitly null limit as no limit rather than as unreadable', async () => {
-    // The client types the same field `number | (0 | null)`, so null here is
-    // ZFS spelling "no limit" the other of its two ways.
-    const [row] = await rowsFrom([dataset({ refquota: { parsed: null } })]);
-    expect(row['refquota_bytes']).toBe(0);
-    expect(row['refquota_used_percent']).toBeNull();
+    // The client types the same field `number | (0 | null)`, so null is ZFS
+    // spelling "no limit" the other of its two ways — in either position.
+    const [nullParsed, nullProperty] = await rowsFrom([
+      dataset({ id: 'tank/a', refquota: { parsed: null } }),
+      dataset({ id: 'tank/b', refquota: null }),
+    ]);
+    expect(nullParsed['refquota_bytes']).toBe(0);
+    expect(nullProperty['refquota_bytes']).toBe(0);
+    expect(nullParsed['refquota_used_percent']).toBeNull();
+    expect(nullProperty['refquota_used_percent']).toBeNull();
   });
 
   it('treats a property carrying no parsed value as unreadable', async () => {
     const [row] = await rowsFrom([dataset({ quota: {}, refquota: { parsed: 'unlimited' } })]);
     expect(row['quota_bytes']).toBeNull();
     expect(row['refquota_bytes']).toBeNull();
+  });
+
+  it('survives a limit the middleware sends as a bare value rather than a property', async () => {
+    // The row is `unknown` at this seam, and a primitive would throw on the
+    // `in` test that looks for `parsed` — taking the whole report down with it
+    // rather than losing the one field it could not read.
+    const [row] = await rowsFrom([dataset({ quota: 12345, refquota: 'none' })]);
+    expect(row['quota_bytes']).toBeNull();
+    expect(row['refquota_bytes']).toBeNull();
+    // The rest of the row still stands.
+    expect(row['used_bytes']).toBe(75);
   });
 
   it('reports an unreadable usage as null rather than as nothing used', async () => {

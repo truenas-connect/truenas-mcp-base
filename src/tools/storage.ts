@@ -78,26 +78,6 @@ export const listDatasets: ReadOnlyTool = {
 };
 
 /**
- * How close each dataset is to a limit it has been given.
- *
- * `storage_list_datasets` reports used and available bytes, which describe a
- * dataset's share of its pool rather than its own ceiling: a dataset can sit in
- * a pool that is nearly empty and still be one write away from a quota. Those
- * are different questions and only the second is asked here.
- *
- * ZFS enforces two limits, against two different measurements, and pairing
- * either limit with the other measurement gives a percentage that is wrong
- * rather than merely imprecise:
- *
- *     quota     caps `used`       — the dataset with its descendants and snapshots
- *     refquota  caps `referenced` — the data the dataset itself holds, alone
- *
- * A parent whose children are large can therefore sit at its quota while its
- * refquota is barely touched, which is why each limit is reported beside the
- * usage it actually caps rather than both against one number.
- */
-
-/**
  * The numeric value of a ZFS property, or null where the middleware reported
  * none.
  *
@@ -123,15 +103,20 @@ function propertyBytes(property: unknown): number | null {
  *
  * `0` is what ZFS itself reports for "no limit" rather than a sentinel chosen
  * here, and the client types the same field `number | (0 | null)` on the
- * dataset payload — so an explicit null is that same spelling and is reported
- * as `0`. Only a property that is absent, or that carries no `parsed` value at
- * all, is unreadable.
+ * dataset payload. So a null is that same spelling wherever it appears — as
+ * the property itself, or as its `parsed` value — and both report as `0`. Only
+ * a property that is absent, that is not an object at all, or that carries no
+ * `parsed` value is unreadable.
  */
 function quotaLimit(property: unknown): number | null {
-  const value = property as ZfsProperty | undefined;
-  if (!value || !('parsed' in value)) return null;
-  if (value.parsed === null) return 0;
-  return propertyBytes(value);
+  if (property === null) return 0;
+  // The row arrives as `unknown` and this is the only guard between it and the
+  // `in` below, which throws a TypeError on a primitive rather than answering
+  // false. A property the middleware sends as a bare number or string is not
+  // the object shape this tool reads, so it is unreadable rather than fatal.
+  if (typeof property !== 'object') return null;
+  if (!('parsed' in property)) return null;
+  return (property as ZfsProperty).parsed === null ? 0 : propertyBytes(property);
 }
 
 /**
@@ -148,6 +133,25 @@ function usedPercent(used: number | null, limit: number | null): number | null {
   return Math.round((used / limit) * 1000) / 10;
 }
 
+/**
+ * How close each dataset is to a limit it has been given.
+ *
+ * `storage_list_datasets` reports used and available bytes, which describe a
+ * dataset's share of its pool rather than its own ceiling: a dataset can sit in
+ * a pool that is nearly empty and still be one write away from a quota. Those
+ * are different questions and only the second is asked here.
+ *
+ * ZFS enforces two limits, against two different measurements, and pairing
+ * either limit with the other measurement gives a percentage that is wrong
+ * rather than merely imprecise:
+ *
+ *     quota     caps `used`       — the dataset with its descendants and snapshots
+ *     refquota  caps `referenced` — the data the dataset itself holds, alone
+ *
+ * A parent whose children are large can therefore sit at its quota while its
+ * refquota is barely touched, which is why each limit is reported beside the
+ * usage it actually caps rather than both against one number.
+ */
 export const quotaReport: ReadOnlyTool = {
   name: 'datasets_quota_report',
   description:
