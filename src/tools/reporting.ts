@@ -1936,20 +1936,46 @@ function fromApp(entry: AppEntry): UsageRow {
 }
 
 /**
- * A libvirt-backed VM as `vm.query` reports it, with the memory figure already
- * read for it.
+ * What a libvirt VM's row says about itself: the identifier its memory is read
+ * by, and the middleware's own state word.
  *
- * `status.state` is the middleware's own word, read the way `vms_list` reads it:
- * the type declares `status` present and non-null, and a system that reported
- * neither must answer a null state rather than throw.
+ * Derived ONCE and then used both to decide the memory read and to fill the
+ * entry. Deriving it twice would let the state a result reports drift from the
+ * state that decided whether to read its memory, so an entry could say RUNNING
+ * beside a marker saying it is not.
  */
-function fromVm(entry: VmEntry, memory: MemoryRead): UsageRow {
+interface VmReading {
+  id: number | null;
+  state: string | null;
+}
+
+/**
+ * `status` read back as a partial of ITS OWN TYPE, which is how `vms_list` reads
+ * it and is what checks the field name below against the generated client.
+ * Reached through {@link property} instead it would be an unchecked string key:
+ * a client that renamed the field would null every VM's state here and skip
+ * every memory read with it, silently and with the fixtures still passing.
+ *
+ * The type declares `status` present and non-null; a system that sent neither
+ * must still answer a null state rather than throw, so it is read through the
+ * optional chain rather than trusted.
+ */
+function vmReading(entry: VmEntry): VmReading {
+  const status = entry.status as Partial<VmEntry['status']> | null | undefined;
+  return { id: numberOrNull(entry.id), state: textOrNull(status?.state) };
+}
+
+/**
+ * A libvirt-backed VM as `vm.query` reports it, with its reading and the memory
+ * figure already taken from it.
+ */
+function fromVm(entry: VmEntry, reading: VmReading, memory: MemoryRead): UsageRow {
   return {
     kind: 'vm',
     source: 'vm',
-    id: numberOrNull(entry.id),
+    id: reading.id,
     name: textOrNull(entry.name),
-    state: textOrNull(property(entry.status, 'state')),
+    state: reading.state,
     cpu_percent: null,
     cpu_unavailable: NO_VM_CPU,
     memory_used_bytes: memory.bytes,
@@ -2041,20 +2067,21 @@ export const reportingAppVmUsage: ReadOnlyTool = {
       ),
     ]);
 
+    // Read once, and used both to decide the memory read and to fill the entry:
+    // see {@link VmReading}.
+    const readings = vms.rows.map(vmReading);
     // One read per VM, all issued together. Only a running VM with a readable
     // id is actually asked about; the rest resolve to their stated reason
     // without a call, which is what keeps this bounded by the RUNNING VMs
     // rather than by every row the stack holds.
     const memories = await Promise.all(
-      vms.rows.map((entry) =>
-        vmMemory(system, numberOrNull(entry.id), textOrNull(property(entry.status, 'state'))),
-      ),
+      readings.map((reading) => vmMemory(system, reading.id, reading.state)),
     );
 
     return {
       entries: [
         ...apps.rows.map(fromApp),
-        ...vms.rows.map((entry, position) => fromVm(entry, memories[position])),
+        ...vms.rows.map((entry, position) => fromVm(entry, readings[position], memories[position])),
         // The `type` filter above is asked of the middleware; this re-checks it
         // on what came back, as `vms_list` does. A query parameter a release
         // does not recognise is dropped rather than refused, and the result of
