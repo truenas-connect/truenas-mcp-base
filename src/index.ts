@@ -65,6 +65,7 @@ export {
   poolTopology,
   scrubHistory,
   listDatasets,
+  quotaReport,
   disksList,
   appsList,
   alertsList,
