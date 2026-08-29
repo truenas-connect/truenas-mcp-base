@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { of } from 'rxjs';
 import { SystemHandle, ToolContext } from '@/catalog/tool';
 import { Role } from '@/interfaces';
@@ -17,6 +17,7 @@ import {
   scrubHistory,
   snapshotsList,
   snapshotTasksList,
+  tasksRecentRuns,
 } from '@/tools/index';
 
 /**
@@ -38,7 +39,7 @@ function fakeSystem(responses: Partial<Record<string, unknown>>): {
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the fourteen sketch tools', () => {
+  it('registers the fifteen sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'storage_pool_status',
@@ -53,6 +54,7 @@ describe('createDefaultCatalog', () => {
       'replication_status',
       'snapshot_tasks_list',
       'cloudsync_tasks_list',
+      'tasks_recent_runs',
       'snapshots_create',
     ]);
   });
@@ -108,6 +110,12 @@ describe('createDefaultCatalog', () => {
   it('advertises cloudsync_tasks_list to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
       'cloudsync_tasks_list',
+    );
+  });
+
+  it('advertises tasks_recent_runs to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'tasks_recent_runs',
     );
   });
 });
@@ -2299,5 +2307,310 @@ describe('cloudsync_tasks_list', () => {
       expect((await one({ job: { state: 'FAILED', error: unreadable } }))['error']).toBeNull();
     }
     expect((await one({ job: null }))['error']).toBeNull();
+  });
+});
+
+describe('tasks_recent_runs', () => {
+  /**
+   * A fixed present, so the default window is a fixed interval rather than one
+   * that moves with the clock. Only `Date` is faked: the tool reads the clock
+   * and nothing here schedules anything, and faking timers wholesale would put
+   * the promise machinery under the same control for no reason.
+   */
+  const NOW = 1_700_000_000_000; // 2023-11-14T22:13:20.000Z
+  /** NOW minus the tool's 24-hour default window. */
+  const WINDOW_START = NOW - 24 * 60 * 60 * 1000; // 2023-11-13T22:13:20.000Z
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * A job as `core.get_jobs` reports one, started ten minutes ago and finished
+   * five.
+   *
+   * `arguments`, `result`, `logs_excerpt`, `logs_path`, `exc_info` and
+   * `credentials` are here to be dropped, and the secrets among them are real
+   * strings for the same reason the cloud sync credential carries a key: the
+   * test that no secret survives is only worth anything if one was there to
+   * survive. `transient` and `abortable` are fields of the real payload the
+   * tool does not name.
+   */
+  const job = (over: Record<string, unknown> = {}) => ({
+    id: 412,
+    method: 'pool.scrub.run',
+    state: 'SUCCESS',
+    progress: { percent: 100, description: 'Scrubbing tank', extra: { pool: 'tank' } },
+    time_started: { $date: NOW - 600_000 },
+    time_finished: { $date: NOW - 300_000 },
+    error: null,
+    arguments: ['tank', { password: 'SECRET-ARGUMENT-MATERIAL' }],
+    result: { detail: 'SECRET-RESULT-MATERIAL' },
+    logs_path: '/var/log/jobs/412.log',
+    logs_excerpt: 'SECRET-LOG-MATERIAL',
+    exc_info: null,
+    credentials: { type: 'API_KEY', data: { key: 'SECRET-CREDENTIAL-MATERIAL' } },
+    transient: false,
+    abortable: true,
+    ...over,
+  });
+
+  const listed = async (
+    rows: unknown[],
+    args: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>[]> => {
+    const { ctx } = fakeSystem({ ['core.get_jobs']: rows });
+    return (await tasksRecentRuns.handler(ctx, args)) as Record<string, unknown>[];
+  };
+
+  /** One job, differing only in the fields the case is about. */
+  const one = async (over: Record<string, unknown>): Promise<Record<string, unknown>> =>
+    (await listed([job(over)]))[0];
+
+  /** The states a job reaches, grouped as `failed_only` reads them. */
+  const SUCCEEDED = ['SUCCESS', 'FINISHED'];
+  const UNDER_WAY = ['RUNNING', 'WAITING', 'PENDING', 'HOLD', 'LOCKED'];
+  const FAILED = ['FAILED', 'ERROR', 'ABORTED'];
+
+  it('maps a job to its method, state, progress, times and error', async () => {
+    expect(await listed([job()])).toEqual([
+      {
+        id: 412,
+        method: 'pool.scrub.run',
+        state: 'SUCCESS',
+        progress_percent: 100,
+        progress_description: 'Scrubbing tank',
+        started_at: '2023-11-14T22:03:20.000Z',
+        finished_at: '2023-11-14T22:08:20.000Z',
+        error: null,
+      },
+    ]);
+  });
+
+  it('surfaces no field a later release adds', async () => {
+    const rows = await listed([
+      job({
+        future_field: 'added by a later TrueNAS release',
+        progress: { percent: 100, description: 'Scrubbing tank', future_progress_field: 'x' },
+      }),
+    ]);
+    expect(Object.keys(rows[0])).toEqual([
+      'id',
+      'method',
+      'state',
+      'progress_percent',
+      'progress_description',
+      'started_at',
+      'finished_at',
+      'error',
+    ]);
+  });
+
+  it('never lets a job’s arguments, result, credentials or logs out', async () => {
+    const serialized = JSON.stringify(await listed([job()]));
+    for (const secret of [
+      'SECRET-ARGUMENT-MATERIAL',
+      'SECRET-RESULT-MATERIAL',
+      'SECRET-LOG-MATERIAL',
+      'SECRET-CREDENTIAL-MATERIAL',
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+    for (const field of ['arguments', 'result', 'credentials', 'logs_excerpt', 'logs_path']) {
+      expect(serialized).not.toContain(field);
+    }
+  });
+
+  it('asks for every job, naming the fields it reports and no others', async () => {
+    const { ctx, query } = fakeSystem({ ['core.get_jobs']: [job()] });
+    await tasksRecentRuns.handler(ctx, {});
+    expect(query).toHaveBeenCalledWith('core.get_jobs', [], {
+      select: ['id', 'method', 'state', 'progress', 'time_started', 'time_finished', 'error'],
+    });
+  });
+
+  it('returns [] for a system holding no jobs', async () => {
+    expect(await listed([])).toEqual([]);
+  });
+
+  it('reports the last 24 hours when nothing is asked for', async () => {
+    const rows = await listed([
+      job({ id: 1, time_started: { $date: WINDOW_START } }),
+      job({ id: 2, time_started: { $date: WINDOW_START - 1 } }),
+      job({ id: 3, time_started: { $date: NOW } }),
+    ]);
+    // Inclusive at the bound: a job started exactly 24 hours ago is in.
+    expect(rows.map((row) => row['id'])).toEqual([1, 3]);
+  });
+
+  it('keeps a job whose start time it cannot read, under any window', async () => {
+    for (const unreadable of [undefined, null, '2023-11-14T22:03:20Z', { $date: 'x' }]) {
+      // Nothing places it outside the window, and a failure that vanishes
+      // because its timestamp was unreadable is the outcome worth avoiding.
+      const rows = await listed([job({ time_started: unreadable })], { since: '2023-11-14' });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]['started_at']).toBeNull();
+    }
+  });
+
+  it('bounds the result at a `since` the caller names', async () => {
+    const rows = await listed(
+      [
+        job({ id: 1, time_started: { $date: Date.parse('2023-11-01T00:00:00Z') } }),
+        job({ id: 2, time_started: { $date: Date.parse('2023-11-10T00:00:00Z') } }),
+      ],
+      { since: '2023-11-05T00:00:00Z' },
+    );
+    expect(rows.map((row) => row['id'])).toEqual([2]);
+  });
+
+  it('accepts a bare date, an offset and a fractional second', async () => {
+    // Every accepted form names one instant unambiguously; a bare date is UTC
+    // midnight, which ECMAScript defines rather than leaves to the host.
+    for (const since of [
+      '2023-11-10',
+      '2023-11-10T00:00Z',
+      '2023-11-10T00:00:00Z',
+      '2023-11-10T00:00:00.000Z',
+      '2023-11-09T19:00:00-05:00',
+    ]) {
+      const rows = await listed(
+        [
+          job({ id: 1, time_started: { $date: Date.parse('2023-11-09T00:00:00Z') } }),
+          job({ id: 2, time_started: { $date: Date.parse('2023-11-11T00:00:00Z') } }),
+        ],
+        { since },
+      );
+      expect(rows.map((row) => row['id'])).toEqual([2]);
+    }
+  });
+
+  it('refuses a `since` it cannot read rather than falling back to the default', async () => {
+    // Ignoring it would answer about the last day while the caller believes it
+    // answered about the last month, and an empty result would then read as
+    // "nothing failed".
+    for (const since of [
+      '',
+      'yesterday',
+      42,
+      true,
+      // No zone: Node reads this as local time, so the window would move by
+      // the offset of whatever machine happens to run it.
+      '2023-11-10 00:00:00',
+      '2023-11-10T00:00:00',
+      '2023-11-10T00:00:00+0500',
+    ]) {
+      await expect(listed([job()], { since })).rejects.toThrow('"since" must be an ISO 8601');
+    }
+    // The right shape and not a real date. The last three are the ones
+    // `Date.parse` does not catch: a day the month does not have rolls over
+    // into the next month and answers a real instant, so `2023-02-30` would
+    // otherwise bound the report at the 2nd of March without saying so.
+    for (const since of [
+      '2023-13-01',
+      '2023-11-10T25:00:00Z',
+      '2023-11-10T00:00:00+25:00',
+      '2023-02-30',
+      '2023-11-31',
+      '2023-02-29',
+    ]) {
+      await expect(listed([job()], { since })).rejects.toThrow('is not a real date');
+    }
+    // A leap day that exists is not caught with them — the check knows which
+    // Februaries have a 29th rather than that none does.
+    expect(await listed([job()], { since: '2020-02-29' })).toHaveLength(1);
+  });
+
+  it('treats an absent `since` as the default, and null as absent', async () => {
+    for (const since of [undefined, null]) {
+      const rows = await listed([job({ time_started: { $date: WINDOW_START - 1 } })], { since });
+      expect(rows).toEqual([]);
+    }
+  });
+
+  it('keeps every job when `failed_only` is not asked for', async () => {
+    for (const state of [...SUCCEEDED, ...UNDER_WAY, ...FAILED]) {
+      expect(await listed([job({ state })])).toHaveLength(1);
+      expect(await listed([job({ state })], { failed_only: false })).toHaveLength(1);
+    }
+  });
+
+  it('keeps only what has not succeeded when `failed_only` is set', async () => {
+    for (const state of [...FAILED, 'A_LATER_RELEASE_STATE', '']) {
+      // An unfamiliar state survives the filter: written as what to exclude,
+      // so a failure state a later release adds is never silently dropped.
+      expect(await listed([job({ state })], { failed_only: true })).toHaveLength(1);
+    }
+    for (const state of [...SUCCEEDED, ...UNDER_WAY]) {
+      expect(await listed([job({ state })], { failed_only: true })).toEqual([]);
+    }
+  });
+
+  it('refuses a `failed_only` that is not a boolean', async () => {
+    // Coercing would answer a different question — every job the system ran,
+    // where the caller asked what went wrong.
+    for (const failed_only of ['true', 'false', 0, 1, '']) {
+      await expect(listed([job()], { failed_only })).rejects.toThrow(
+        '"failed_only" must be a boolean',
+      );
+    }
+    // Absent is absent, and the default is false.
+    for (const failed_only of [undefined, null]) {
+      expect(await listed([job({ state: 'SUCCESS' })], { failed_only })).toHaveLength(1);
+    }
+  });
+
+  it('passes a state through as the system spelled it, and an unreadable one as null', async () => {
+    for (const state of [...SUCCEEDED, ...UNDER_WAY, ...FAILED, 'A_LATER_RELEASE_STATE']) {
+      expect((await one({ state }))['state']).toBe(state);
+    }
+    expect((await one({ state: '' }))['state']).toBeNull();
+  });
+
+  it('reports a finish time only for a run that ended', async () => {
+    for (const state of [...SUCCEEDED, ...FAILED]) {
+      expect((await one({ state }))['finished_at']).toBe('2023-11-14T22:08:20.000Z');
+    }
+    // A job still going has not ended, so the time in its record is not a
+    // finish time — and a state this tool could not read has not been shown to
+    // be one either.
+    for (const state of [...UNDER_WAY, '']) {
+      expect((await one({ state }))['finished_at']).toBeNull();
+    }
+  });
+
+  it('reports a progress it cannot read as null, and a null percent is not zero', async () => {
+    expect((await one({ progress: { percent: 0, description: 'Starting' } }))[
+      'progress_percent'
+    ]).toBe(0);
+    for (const unreadable of [undefined, null, 42, 'Scrubbing', {}, { percent: '50' }]) {
+      const row = await one({ progress: unreadable });
+      expect(row['progress_percent']).toBeNull();
+      expect(row['progress_description']).toBeNull();
+    }
+    for (const percent of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect((await one({ progress: { percent } }))['progress_percent']).toBeNull();
+    }
+    for (const description of [undefined, null, '', 42]) {
+      expect((await one({ progress: { percent: 10, description } }))[
+        'progress_description'
+      ]).toBeNull();
+    }
+  });
+
+  it('carries the reason a job failed, and reports no reason as null', async () => {
+    expect((await one({ state: 'FAILED', error: 'pool is unavailable' }))['error']).toBe(
+      'pool is unavailable',
+    );
+    // A job in FAILED with a null error failed for a reason the system did not
+    // record; it has not succeeded.
+    for (const unreadable of [undefined, null, '', 42]) {
+      expect((await one({ state: 'FAILED', error: unreadable }))['error']).toBeNull();
+    }
   });
 });
