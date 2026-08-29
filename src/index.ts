@@ -89,5 +89,6 @@ export {
   certificatesList,
   cloudCredentialsList,
   reportingUtilisation,
+  reportingDiskIo,
   createSnapshot,
 } from '@/tools/index';

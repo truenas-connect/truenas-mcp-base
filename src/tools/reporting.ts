@@ -26,10 +26,16 @@ import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
  * (unconfirmed) against a live middleware, and each is noted where it is relied
  * on: which dimensions each graph carries, that a data row is
  * `[timestamp, ...values]` aligned to `legend`, that the query bounds are unix
- * seconds, and the unit the interface graph records. Each is read defensively —
- * a wrong reading costs a stated `unavailable` rather than a plausible wrong
- * value — except the interface unit, which is named in the result and would be
- * wrong rather than absent; see `NETWORK_UNIT`.
+ * seconds, and the units the interface and disk graphs record. Each is read
+ * defensively — a wrong reading costs a stated `unavailable` rather than a
+ * plausible wrong value — except those two units, which are named in the result
+ * and would be wrong rather than absent; see `NETWORK_UNIT` and
+ * `DISK_THROUGHPUT_UNIT`.
+ *
+ * The range, the bucketing, the markers and the summary are shared by every
+ * tool here, so a caller who has learned one of them has learned the family.
+ * What differs per tool is the label a metric carries — the interface it was
+ * measured on, or the disk — and which dimension each metric is derived from.
  */
 
 /**
@@ -63,6 +69,19 @@ const BUCKETS = 12;
  */
 const MAX_INTERFACES = 6;
 
+/**
+ * How many disks the disk metrics cover.
+ *
+ * The same cap as {@link MAX_INTERFACES}, and for the same reason: a disk
+ * shelf is unbounded, and six is a number a caller can read. It bites harder
+ * here — a shelf of twenty-four disks is ordinary where twenty-four interfaces
+ * are not, and this tool reports six metrics per disk rather than two — so
+ * `truncated_disks` matters more than its network counterpart, and the
+ * description says plainly that the answer covers the first six disks IN NAME
+ * ORDER rather than the six most interesting ones.
+ */
+const MAX_DISKS = 6;
+
 /** What a failure carrying no text of its own is reported as. */
 const NO_REASON = 'the system reported no reason';
 
@@ -74,6 +93,12 @@ const NO_DATA = 'the system collected no data for this metric in this range';
  * and named nothing to graph.
  */
 const NO_INTERFACES = 'the system named no interface to graph';
+
+/**
+ * What the disk metrics are marked with where the disk listing was read and
+ * named nothing to graph.
+ */
+const NO_DISKS = 'the system named no disk to graph';
 
 /**
  * What a metric whose graph's LEGEND did not name the dimension it is derived
@@ -235,7 +260,7 @@ function resolveRange(args: Record<string, unknown>, now: number): Range {
  * `interface` is per-interface and carries an identifier; the other two are
  * system-wide and carry none.
  */
-type GraphName = 'cpu' | 'memory' | 'interface';
+type GraphName = 'cpu' | 'memory' | 'interface' | 'disk';
 
 /** What one graph read produced, with a failure named rather than thrown. */
 interface GraphAttempt {
@@ -426,13 +451,46 @@ function round1(value: number): number {
   return Math.round(value * 10) / 10;
 }
 
-/** The metrics this tool reports. */
+/** The metrics `reporting_utilisation` reports. */
 type MetricName = 'cpu_percent' | 'memory_used_percent' | 'network_received' | 'network_sent';
 
-/** One metric over the range, or the stated reason there is none. */
-interface MetricReport {
+/** The metrics `reporting_disk_io` reports. */
+type DiskMetricName =
+  | 'read_throughput'
+  | 'write_throughput'
+  | 'read_iops'
+  | 'write_iops'
+  | 'read_latency'
+  | 'write_latency';
+
+/**
+ * What names one of `reporting_utilisation`'s metrics: which of the four it is,
+ * and the interface a network metric was measured on.
+ */
+interface UtilisationLabel {
   metric: MetricName;
   interface: string | null;
+}
+
+/**
+ * What names one of `reporting_disk_io`'s metrics: which of the six it is, and
+ * the disk it was measured on.
+ */
+interface DiskLabel {
+  metric: DiskMetricName;
+  disk: string | null;
+}
+
+/**
+ * What every metric carries beyond the label naming it — the summary, or the
+ * stated reason there is none.
+ *
+ * Split from the label because the two tools here name their metrics
+ * differently (an interface, or a disk) and summarise them identically. The
+ * label is SPREAD FIRST into the result, so a metric reads with its identity
+ * ahead of its numbers whichever tool produced it.
+ */
+interface MetricBody {
   unit: string;
   min: number | null;
   max: number | null;
@@ -442,16 +500,16 @@ interface MetricReport {
   unavailable: string | null;
 }
 
+/** One of `reporting_utilisation`'s metrics over the range. */
+type MetricReport = UtilisationLabel & MetricBody;
+
+/** One of `reporting_disk_io`'s metrics over the range. */
+type DiskMetricReport = DiskLabel & MetricBody;
+
 /** A metric with nothing to report, and why. */
-function unavailable(
-  metric: MetricName,
-  iface: string | null,
-  unit: string,
-  reason: string,
-): MetricReport {
+function unavailable<L extends object>(label: L, unit: string, reason: string): L & MetricBody {
   return {
-    metric,
-    interface: iface,
+    ...label,
     unit,
     min: null,
     max: null,
@@ -479,13 +537,12 @@ function unavailable(
  * decides that an empty list is a marker rather than a summary, and which of the
  * markers it is.
  */
-function summarise(
-  metric: MetricName,
-  iface: string | null,
+function summarise<L extends object>(
+  label: L,
   unit: string,
   found: Point[],
   range: Range,
-): MetricReport {
+): L & MetricBody {
   const width = (range.end - range.start) / BUCKETS;
   const sums = new Array<number>(BUCKETS).fill(0);
   const counts = new Array<number>(BUCKETS).fill(0);
@@ -505,8 +562,7 @@ function summarise(
     counts[bucket] += 1;
   }
   return {
-    metric,
-    interface: iface,
+    ...label,
     unit,
     min: round1(min),
     max: round1(max),
@@ -598,15 +654,16 @@ const memoryUsedPercent: Derivation = {
 };
 
 /**
- * The magnitude of one direction of interface traffic.
+ * The magnitude of one dimension, whatever it measures.
  *
- * The magnitude rather than the value, because netdata's interface chart mirrors
- * one direction below the axis to draw it: a sent rate arrives negative on a
- * link that is sending, and passing it through would report a busy link as one
- * with less than no traffic. Direction is what the metric name says, so the sign
- * carries nothing this result needs.
+ * The magnitude rather than the value, because netdata mirrors one direction of
+ * a two-way chart below the axis to draw it — on the interface chart and on the
+ * disk one alike: a sent rate arrives negative on a link that is sending, and a
+ * write rate negative on a disk that is writing. Passing that through would
+ * report a busy link, or a busy disk, as one doing less than nothing. Direction
+ * is what the metric NAME says, so the sign carries nothing the result needs.
  */
-function throughput(dimension: string): Derivation {
+function magnitude(dimension: string): Derivation {
   return {
     requires: [dimension],
     from: (dimensions) => {
@@ -616,11 +673,89 @@ function throughput(dimension: string): Derivation {
   };
 }
 
-/** The interfaces to report, and whether the cap left any out. */
-interface Interfaces {
+/**
+ * The unit the disk throughput metrics are reported in.
+ *
+ * (unconfirmed), and the same kind of assumption as {@link NETWORK_UNIT}: the
+ * disk graph's values are passed through, so a release recording bytes per
+ * second would be reported as kibibytes per second. Stated rather than omitted
+ * because a throughput with no unit cannot be compared with anything, and the
+ * reading is netdata's own, which records the disk chart in KiB/s.
+ */
+const DISK_THROUGHPUT_UNIT = 'kibibytes_per_second';
+
+/** The unit the disk IOPS metrics are reported in. */
+const IOPS_UNIT = 'operations_per_second';
+
+/** The unit the disk latency metrics are reported in. */
+const LATENCY_UNIT = 'milliseconds';
+
+/** One of the six measurements `reporting_disk_io` reports per disk. */
+interface DiskMeasurement {
+  metric: DiskMetricName;
+  unit: string;
+  derive: Derivation;
+}
+
+/**
+ * The six measurements, and the dimension of the disk graph each is derived
+ * from.
+ *
+ * All six come from the ONE `disk` graph, because there is no second one to
+ * read: the client types `reporting.netdata_get_data`'s graph name as a closed
+ * union — `cpu`, `cputemp`, `disk`, `disktemp`, `interface`, `load`, `memory`,
+ * `processes`, `uptime`, `arcsize` and the UPS graphs — and `disk` is the only
+ * member of it that is per-disk I/O. So whether this system can report IOPS and
+ * latency at all is a question about that graph's LEGEND, and it is asked as
+ * one: each metric names the dimension it needs, and a graph that does not
+ * carry it answers {@link NO_DIMENSION} rather than a number.
+ *
+ * (unconfirmed) every dimension name below. `reads` and `writes` are netdata's
+ * own for the disk chart's throughput. The other four are what a release that
+ * recorded operation counts and I/O wait times would plausibly call them, and
+ * on every release this was written against the graph carries neither — which
+ * is why the tool's description says those two are commonly unavailable rather
+ * than promising them. A name that no release carries costs a stated
+ * `unavailable` rather than a number, which is the whole reason the dimension
+ * travels with the derivation; see {@link Derivation}. What that does NOT cover
+ * is a name a release carries under other semantics — the value would then be
+ * reported under the unit asserted here — so the four guessed names are ones
+ * netdata uses for these quantities and nothing else.
+ */
+const DISK_MEASUREMENTS: DiskMeasurement[] = [
+  { metric: 'read_throughput', unit: DISK_THROUGHPUT_UNIT, derive: magnitude('reads') },
+  { metric: 'write_throughput', unit: DISK_THROUGHPUT_UNIT, derive: magnitude('writes') },
+  { metric: 'read_iops', unit: IOPS_UNIT, derive: magnitude('read_ops') },
+  { metric: 'write_iops', unit: IOPS_UNIT, derive: magnitude('write_ops') },
+  { metric: 'read_latency', unit: LATENCY_UNIT, derive: magnitude('read_await') },
+  { metric: 'write_latency', unit: LATENCY_UNIT, derive: magnitude('write_await') },
+];
+
+/** The things to graph, and whether the cap left any out. */
+interface Graphed {
   names: string[];
   truncated: boolean;
   error: string | null;
+}
+
+/**
+ * The `name` of every row that has one, in name order, up to the cap.
+ *
+ * Sorted BEFORE the cap, so which of them a capped result covers is a property
+ * of the system rather than of the order it happened to list them.
+ *
+ * A row that is not a record, or whose name is not a non-empty string, names
+ * nothing that could be graphed and is dropped: the identifier is what the
+ * graph is asked for by, so a row without one has no graph to read.
+ */
+function graphedNames(rows: unknown[], cap: number): Omit<Graphed, 'error'> {
+  const named = rows.flatMap((row) => {
+    if (typeof row !== 'object' || row === null) return [];
+    const name = textOrNull((row as Record<string, unknown>)['name']);
+    return name === null ? [] : [name];
+  });
+  named.sort();
+  return { names: named.slice(0, cap), truncated: named.length > cap };
 }
 
 /**
@@ -635,21 +770,36 @@ interface Interfaces {
  * A listing that could not be read is named rather than thrown: CPU and memory
  * are still an answer, and the network metrics say why they are not one.
  */
-async function interfaceNames(system: SystemHandle): Promise<Interfaces> {
+async function interfaceNames(system: SystemHandle): Promise<Graphed> {
   try {
+    // The call is inlined rather than shared with `diskNames` below, as the
+    // graph reads are inlined above: the client types `query` per method, so a
+    // method name reaching it through a variable widens to `string` and no
+    // longer selects an overload. Only the sort-and-cap step is shared.
     const rows = await firstValueFrom(system.client.api.query('interface.query'));
-    const named = rows.flatMap((row) => {
-      const name = textOrNull(row['name']);
-      return name === null ? [] : [name];
-    });
-    // Sorted before the cap, so which interfaces a capped result covers is a
-    // property of the system rather than of the order it happened to list them.
-    named.sort();
-    return {
-      names: named.slice(0, MAX_INTERFACES),
-      truncated: named.length > MAX_INTERFACES,
-      error: null,
-    };
+    return { ...graphedNames(rows, MAX_INTERFACES), error: null };
+  } catch (reason) {
+    return { names: [], truncated: false, error: errorText(reason) };
+  }
+}
+
+/**
+ * The disks to graph: every one the system lists, in name order, up to the cap.
+ *
+ * The device name rather than the serial, because the name is what the disk
+ * graph is identified by. Every disk the system knows is kept, whether or not
+ * it belongs to a pool: a disk being hammered while in no pool is exactly the
+ * kind of thing this tool is asked about, and `disks_list` is where pool
+ * membership is answered.
+ *
+ * A listing that could not be read is named rather than thrown, as the
+ * interface listing is: the metrics then say why there is nothing rather than
+ * the whole call failing.
+ */
+async function diskNames(system: SystemHandle): Promise<Graphed> {
+  try {
+    const rows = await firstValueFrom(system.client.api.query('disk.query'));
+    return { ...graphedNames(rows, MAX_DISKS), error: null };
   } catch (reason) {
     return { names: [], truncated: false, error: errorText(reason) };
   }
@@ -739,8 +889,14 @@ export const reportingUtilisation: ReadOnlyTool = {
     ]);
 
     const metrics: MetricReport[] = [
-      graphMetric('cpu_percent', null, PERCENT, cpu, range, cpuPercent),
-      graphMetric('memory_used_percent', null, PERCENT, memory, range, memoryUsedPercent),
+      graphMetric<UtilisationLabel>({ metric: 'cpu_percent', interface: null }, PERCENT, cpu, range, cpuPercent),
+      graphMetric<UtilisationLabel>(
+        { metric: 'memory_used_percent', interface: null },
+        PERCENT,
+        memory,
+        range,
+        memoryUsedPercent,
+      ),
     ];
     if (interfaces.names.length === 0) {
       // Both network metrics are still reported, carrying the reason no
@@ -749,15 +905,35 @@ export const reportingUtilisation: ReadOnlyTool = {
       // all, which is the one thing a result must not imply here.
       const reason = interfaces.error ?? NO_INTERFACES;
       metrics.push(
-        unavailable('network_received', null, NETWORK_UNIT, reason),
-        unavailable('network_sent', null, NETWORK_UNIT, reason),
+        unavailable<UtilisationLabel>(
+          { metric: 'network_received', interface: null },
+          NETWORK_UNIT,
+          reason,
+        ),
+        unavailable<UtilisationLabel>(
+          { metric: 'network_sent', interface: null },
+          NETWORK_UNIT,
+          reason,
+        ),
       );
     }
     interfaces.names.forEach((name, position) => {
       const graph = network[position];
       metrics.push(
-        graphMetric('network_received', name, NETWORK_UNIT, graph, range, throughput('received')),
-        graphMetric('network_sent', name, NETWORK_UNIT, graph, range, throughput('sent')),
+        graphMetric<UtilisationLabel>(
+          { metric: 'network_received', interface: name },
+          NETWORK_UNIT,
+          graph,
+          range,
+          magnitude('received'),
+        ),
+        graphMetric<UtilisationLabel>(
+          { metric: 'network_sent', interface: name },
+          NETWORK_UNIT,
+          graph,
+          range,
+          magnitude('sent'),
+        ),
       );
     });
 
@@ -767,6 +943,126 @@ export const reportingUtilisation: ReadOnlyTool = {
       bucket_seconds: round1((range.end - range.start) / BUCKETS / 1000),
       metrics,
       truncated_interfaces: interfaces.truncated,
+    };
+  },
+};
+
+export const reportingDiskIo: ReadOnlyTool = {
+  name: 'reporting_disk_io',
+  description:
+    'Per-disk throughput, IOPS and latency on a TrueNAS system OVER A TIME ' +
+    'RANGE, from the metrics the system records for itself. This is what ' +
+    'answers "which disk is slow" and "was that disk slow at 3am" — latency ' +
+    'is how a failing disk announces itself before SMART does, and it is what ' +
+    'explains a slow pool when every capacity and health figure looks fine. ' +
+    '`metrics` holds one entry per measurement per disk, each with: `metric`, ' +
+    'which of the six it is; `disk`, the device name it was measured on; ' +
+    '`unit`, what the numbers are in; `min`, `max` and `mean` over the whole ' +
+    'range; `latest`, the value at the most recent sample IN THE RANGE, which ' +
+    'is not the value now unless the range ends now; and `buckets`. ' +
+    '`read_throughput` and `write_throughput` are data moved per second in ' +
+    'each direction, reported as a magnitude. `read_iops` and `write_iops` are ' +
+    'operations per second, and `read_latency` and `write_latency` the average ' +
+    'wait per operation in milliseconds. THE IOPS AND LATENCY METRICS ARE ' +
+    'COMMONLY UNAVAILABLE: they come from the same per-disk graph as ' +
+    'throughput, and a system whose graph records throughput only reports them ' +
+    'with `unavailable` set rather than omitting them — that is a fact about ' +
+    'what the system records, NOT about the disk, and it is not worth ' +
+    'retrying. At most six disks are covered, IN NAME ORDER — not the six ' +
+    'busiest — and `truncated_disks` is true when the system has more than ' +
+    'that and some were left out, so on a large shelf this reports a slice ' +
+    'chosen alphabetically. Every disk the system knows is eligible whether or ' +
+    'not it is in a pool; `disks_list` is what says which pool a disk belongs ' +
+    'to, and this tool does not say. `buckets` is twelve entries on every ' +
+    'metric that was measured: the range is divided into twelve equal ' +
+    'intervals and each entry is the MEAN of the samples inside its interval, ' +
+    'oldest first, so the width of one is a twelfth of the range and is given ' +
+    'as `bucket_seconds`. A bucket the system collected nothing in is NULL, ' +
+    'WHICH IS NOT ZERO — no measurement was taken, and the disk may have been ' +
+    'at any rate. Raw samples are never returned: an hour is hundreds of them ' +
+    'per metric, so the summary and the twelve buckets are the whole answer ' +
+    'and the result is the same size whatever range is asked for. ' +
+    '`unavailable` is null on a metric that was measured, and otherwise names ' +
+    'why there is nothing to report — the system collected no data for that ' +
+    'disk in the range, its graph carried no series this metric could be ' +
+    'derived from, the read itself failed with the reason the system gave, or ' +
+    '— on entries that then carry a null `disk` — the system named no disk to ' +
+    'graph at all. WHERE IT IS NON-NULL, `min`, `max`, `mean` and `latest` ARE ' +
+    'ALL NULL AND `buckets` IS EMPTY, and that is never a disk that was idle: ' +
+    'nothing was measured. Metrics fail independently, so one disk can report ' +
+    'while another is unavailable, and a disk can report throughput while its ' +
+    'own IOPS and latency are not. `start` and `end` are the range actually ' +
+    'reported on, as ISO 8601 UTC timestamps, so an unavailable metric is ' +
+    'readable against the window it was asked for. Give `start` and `end` to ' +
+    'bound the range; OMITTED, THE LAST HOUR ending now, and a `start` with no ' +
+    '`end` runs to now while an `end` with no `start` covers the hour before ' +
+    'it. This tool reads recorded metrics. It does not report SMART attributes ' +
+    'or disk temperature, per-pool or per-dataset activity, or which workload ' +
+    'caused the I/O, and it changes nothing about what the system records.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      start: {
+        type: 'string',
+        description:
+          'The beginning of the range, as an ISO 8601 timestamp — ' +
+          '"2026-08-29T09:00:00Z" — or a date, "2026-08-29", which is ' +
+          'midnight. A time given without a timezone is read as UTC. Omitted, ' +
+          'one hour before the end of the range.',
+      },
+      end: {
+        type: 'string',
+        description: 'The end of the range, in the same forms as `start`. Omitted, now.',
+      },
+    },
+  },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }, args) {
+    // The range is resolved before anything is read, so an unreadable bound is
+    // an error rather than a query the system answers over the wrong interval.
+    const range = resolveRange(args, Date.now());
+    // The disk listing is what decides which graphs are read, so it is the one
+    // read that cannot be issued alongside the others.
+    const disks = await diskNames(system);
+    const graphs = await Promise.all(
+      disks.names.map((name) => readGraph(system, 'disk', name, range)),
+    );
+
+    const metrics: DiskMetricReport[] = [];
+    if (disks.names.length === 0) {
+      // All six metrics are still reported, carrying the reason no disk could
+      // be graphed — the listing failed, or it was read and named none. Absent
+      // metrics would read as a system with no disks at all, which is the one
+      // thing a result must not imply here.
+      const reason = disks.error ?? NO_DISKS;
+      for (const measurement of DISK_MEASUREMENTS) {
+        metrics.push(
+          unavailable<DiskLabel>({ metric: measurement.metric, disk: null }, measurement.unit, reason),
+        );
+      }
+    }
+    disks.names.forEach((name, position) => {
+      const graph = graphs[position];
+      for (const measurement of DISK_MEASUREMENTS) {
+        metrics.push(
+          graphMetric<DiskLabel>(
+            { metric: measurement.metric, disk: name },
+            measurement.unit,
+            graph,
+            range,
+            measurement.derive,
+          ),
+        );
+      }
+    });
+
+    return {
+      start: new Date(range.start).toISOString(),
+      end: new Date(range.end).toISOString(),
+      bucket_seconds: round1((range.end - range.start) / BUCKETS / 1000),
+      metrics,
+      truncated_disks: disks.truncated,
     };
   },
 };
@@ -793,20 +1089,19 @@ export const reportingUtilisation: ReadOnlyTool = {
  * system's answer supports: nothing was collected here, and a legend alone says
  * nothing about whether the series would have been derivable had it been.
  */
-function graphMetric(
-  metric: MetricName,
-  iface: string | null,
+function graphMetric<L extends object>(
+  label: L,
   unit: string,
   graph: GraphAttempt,
   range: Range,
   derive: Derivation,
-): MetricReport {
-  if (graph.error !== null) return unavailable(metric, iface, unit, graph.error);
+): L & MetricBody {
+  if (graph.error !== null) return unavailable(label, unit, graph.error);
   const carried = columns(graph.legend);
   const samples = points(graph.rows, carried, range, derive);
-  if (samples.found.length > 0) return summarise(metric, iface, unit, samples.found, range);
+  if (samples.found.length > 0) return summarise(label, unit, samples.found, range);
   if (samples.inRange > 0 && derive.requires.some((name) => !carried.has(name))) {
-    return unavailable(metric, iface, unit, NO_DIMENSION);
+    return unavailable(label, unit, NO_DIMENSION);
   }
-  return unavailable(metric, iface, unit, NO_DATA);
+  return unavailable(label, unit, NO_DATA);
 }
