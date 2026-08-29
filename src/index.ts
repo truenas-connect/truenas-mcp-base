@@ -90,5 +90,6 @@ export {
   cloudCredentialsList,
   reportingUtilisation,
   reportingDiskIo,
+  reportingSpaceTrends,
   createSnapshot,
 } from '@/tools/index';

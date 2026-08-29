@@ -36,6 +36,11 @@ import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
  * tool here, so a caller who has learned one of them has learned the family.
  * What differs per tool is the label a metric carries — the interface it was
  * measured on, or the disk — and which dimension each metric is derived from.
+ *
+ * Everything above holds of the two tools that read graphs. `reporting_space_trends`
+ * is in this family for the question it answers and shares its range grammar,
+ * and shares neither the source nor the bucketing: the system records no space
+ * graph to read. What it reads instead, and why, is at {@link reportingSpaceTrends}.
  */
 
 /**
@@ -1105,3 +1110,617 @@ function graphMetric<L extends object>(
   }
   return unavailable(label, unit, NO_DATA);
 }
+
+/**
+ * Space trends: how much data a dataset held, over time.
+ *
+ * Not netdata, and not bucketed — which is why this tool sits apart from the two
+ * above rather than sharing their shape. `reporting.netdata_get_data` types its
+ * graph name as a CLOSED UNION — cpu, cputemp, disk, disktemp, interface, load,
+ * processes, memory, uptime, the ARC graphs and the UPS ones — and not one of
+ * them is pool or dataset space. `reporting.get_data` takes the same union. So
+ * there is no recorded space series on this API surface at all, and a tool that
+ * bucketed one would be inventing it.
+ *
+ * What the system does retain is ZFS's own record. Every snapshot carries the
+ * instant it was taken and the bytes the dataset REFERENCED at that instant, and
+ * `snapshots_list` already reads exactly those two properties. A dataset that is
+ * snapshotted therefore has a space history, sampled at whatever times its
+ * snapshot task happens to run; one that is not has none, and says so.
+ *
+ * Three consequences follow, and each is stated in the description rather than
+ * smoothed over, because each is a way this answer is narrower than its name:
+ * the samples are not evenly spaced and are not the range's own ends; `used` —
+ * the dataset with its descendants and its snapshots — has no history, because a
+ * snapshot's own `used` is the space unique to that snapshot rather than the
+ * dataset's; and a pool's free space has none either, which is why the pool
+ * levels here are current readings carrying their own timestamp instead of a
+ * value at each end of the range.
+ */
+
+/**
+ * How many datasets are reported.
+ *
+ * The same kind of cap as {@link MAX_DISKS} and for the same reason — a dataset
+ * listing is unbounded — but chosen ON SIZE rather than in name order, which is
+ * the one place this tool departs from its siblings. Space is what is being
+ * reported, the largest datasets are where a pool's space goes, and an
+ * alphabetical slice of a hundred datasets would answer a capacity question with
+ * whichever ones happen to sort first. `truncated_datasets` says when the cap
+ * removed any, and ties break on the dataset name so the choice stays
+ * deterministic.
+ */
+const MAX_DATASETS = 10;
+
+/**
+ * How many snapshots are read per dataset.
+ *
+ * A nightly task holds a thousand snapshots within three years and an hourly one
+ * within six weeks, so this bites on real systems. What it costs when it does is
+ * a NARROWER observed window rather than a wrong number: the two ends actually
+ * used are reported as `observed_start` and `observed_end`, and every figure
+ * beside them is a true statement about that window. `truncated_snapshots` says
+ * when some dataset held more than were read.
+ *
+ * The same bound `snapshots_list` applies to its own listing, deliberately: two
+ * tools reading the same rows should not disagree about how many of them are too
+ * many.
+ */
+const MAX_SNAPSHOTS = 1000;
+
+/** What a rate is stated per, in milliseconds. */
+const MILLIS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/** What a dataset the system holds no snapshot of in the range is marked with. */
+const NO_SNAPSHOTS = 'the system holds no snapshot of this dataset in this range';
+
+/**
+ * What a dataset whose snapshots in the range were all taken at one instant is
+ * marked with. Distinct from {@link NO_SNAPSHOTS}: the dataset IS snapshotted
+ * and there is a level to be had, and what is missing is the second instant that
+ * would make it a change.
+ */
+const ONE_INSTANT =
+  'the system holds no two snapshots of this dataset taken at different times in this range';
+
+/**
+ * What a dataset whose snapshot listing was CUT SHORT, and that yielded no
+ * change from the part of it that was read, is marked with.
+ *
+ * Neither {@link NO_SNAPSHOTS} nor {@link ONE_INSTANT} may be used there, and
+ * this is the whole reason this constant exists: no order is asked for, so the
+ * thousand snapshots read are an arbitrary thousand, and every one of them
+ * falling outside the range says nothing whatever about the ones that were not
+ * read. Claiming the system holds no snapshot in the range would be a statement
+ * about the system made from evidence that does not reach it.
+ */
+const TRUNCATED_READ =
+  'the system holds more snapshots of this dataset than were read, and no two of ' +
+  'the ones read fall at different times in this range';
+
+/**
+ * What a pool none of whose reported datasets yielded a change is marked with.
+ *
+ * A statement about what was OBTAINED rather than about the pool's snapshots,
+ * and that is the whole distinction: the datasets that yielded nothing may have
+ * yielded nothing because their reads failed or were cut short, and a pool-level
+ * "these datasets have no snapshots at two different times" would then be
+ * asserting the same thing {@link TRUNCATED_READ} exists to stop each dataset
+ * asserting. Each of them names its own reason, so this points there.
+ */
+const NO_CHANGE_MEASURED =
+  'no dataset reported for this pool yielded a change in this range; each of them names why';
+
+/**
+ * What a pool none of whose datasets are among the ones reported is marked with.
+ *
+ * Distinct from {@link NO_CHANGE_MEASURED}, which would be vacuously true here
+ * and would read as a finding about this pool. Nothing of it was looked at:
+ * `MAX_DATASETS` is a cap over the whole system rather than per pool, so a pool
+ * holding only small datasets can be crowded out of the reporting entirely by
+ * another pool's large ones.
+ */
+const NO_DATASETS_REPORTED =
+  'no dataset of this pool is among the ones reported, so nothing was measured for it';
+
+/** What a pool the system did not list is marked with, in place of its levels. */
+const NOT_LISTED = 'the system did not list this pool';
+
+/**
+ * A ZFS property as the middleware reports it. `pool.dataset.query` and
+ * `pool.snapshot.query` both answer rows typed `Record<string, unknown>`, so the
+ * parsed value has to be restated — as `storage.ts` and `snapshots.ts` each
+ * restate it, and local here for the reason those files give: a tool file is
+ * read on its own.
+ */
+interface ZfsProperty {
+  parsed?: unknown;
+  rawvalue?: unknown;
+}
+
+/**
+ * The numeric value of a byte-count property, or null where the middleware
+ * reported none. Null rather than a coerced zero: a dataset whose size could not
+ * be read must not report as one holding nothing.
+ */
+function propertyBytes(property: unknown): number | null {
+  const parsed = (property as ZfsProperty | undefined)?.parsed;
+  return typeof parsed === 'number' && Number.isFinite(parsed) ? parsed : null;
+}
+
+/** A finite number, or null where the system reported anything else. */
+function numberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * One entry of a row's `properties` map, or undefined where the row carries no
+ * map to read it from. Guarded rather than asserted, because a row that sends
+ * something other than an object is exactly what the assertion would get wrong.
+ */
+function property(properties: unknown, name: string): unknown {
+  return typeof properties === 'object' && properties !== null
+    ? (properties as Record<string, unknown>)[name]
+    : undefined;
+}
+
+/**
+ * When a snapshot was taken, in milliseconds since the epoch, or null where the
+ * system reported no time this tool can read.
+ *
+ * ZFS reports `creation` as whole seconds since the epoch and `rawvalue` is that
+ * number as ZFS itself states it, which is why the raw value is read here rather
+ * than `parsed` — the middleware's own rendering of the same instant has changed
+ * format between releases. The same reading `snapshots_list` applies.
+ */
+function creationMillis(properties: unknown): number | null {
+  const raw = (property(properties, 'creation') as ZfsProperty | undefined)?.rawvalue;
+  // Digits or nothing: `Number('')` is 0, which would place a snapshot whose
+  // creation time is an empty string at the epoch.
+  const seconds =
+    typeof raw === 'number' ? raw : typeof raw === 'string' && /^-?\d+$/.test(raw) ? Number(raw) : null;
+  if (seconds === null || !Number.isFinite(seconds)) return null;
+  const millis = seconds * 1000;
+  // Beyond what a `Date` can hold, `toISOString` throws rather than answering,
+  // and one absurd creation time would take the whole result down with it.
+  return Number.isFinite(millis) && Math.abs(millis) <= 8.64e15 ? millis : null;
+}
+
+/** A dataset the system listed, reduced to what this tool needs of it. */
+interface DatasetRow {
+  id: string;
+  pool: string;
+  used: number | null;
+}
+
+/** What the dataset listing produced, with a failure named rather than thrown. */
+interface DatasetListing {
+  /** Every dataset the system named, which is what `datasets_total` counts. */
+  all: DatasetRow[];
+  /** The ones actually reported on: the largest, up to the cap. */
+  reported: DatasetRow[];
+  truncated: boolean;
+  error: string | null;
+}
+
+/** Largest first, and by name where two are the same size or neither is readable. */
+function byLargestFirst(a: DatasetRow, b: DatasetRow): number {
+  if (a.used !== b.used) {
+    // A dataset whose size could not be read is ordered last rather than as
+    // empty: it may be the largest one there is, and nothing here can say.
+    if (a.used === null) return 1;
+    if (b.used === null) return -1;
+    return b.used - a.used;
+  }
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/**
+ * Every dataset the system lists, and the largest of them up to the cap.
+ *
+ * A row without a readable `id` names nothing that could be asked about, so it
+ * is dropped — the id is what the snapshot listing is filtered by. A row whose
+ * `pool` is unreadable is kept and attributed by the first segment of its id,
+ * which is what a ZFS dataset name means; dropping it would lose a large dataset
+ * from a pool's total over a field this tool only groups by.
+ */
+async function datasetListing(system: SystemHandle): Promise<DatasetListing> {
+  try {
+    // Filters and options are inlined so the call's own parameter types apply,
+    // as in `storage.ts`. `retrieve_children` walks the whole tree and the
+    // response is already flat, each entry additionally nesting its descendants
+    // under `children` — so the top-level entries are every dataset exactly
+    // once, and walking `children` would count each of them again.
+    const rows = await firstValueFrom(
+      system.client.api.query('pool.dataset.query', [], {
+        extra: { retrieve_children: true, properties: ['used'] },
+      }),
+    );
+    const all = rows.flatMap((row) => {
+      if (typeof row !== 'object' || row === null) return [];
+      const held = row as Record<string, unknown>;
+      const id = textOrNull(held['id']);
+      if (id === null) return [];
+      return [{ id, pool: textOrNull(held['pool']) ?? id.split('/')[0], used: propertyBytes(held['used']) }];
+    });
+    const largest = [...all].sort(byLargestFirst);
+    return {
+      all,
+      reported: largest.slice(0, MAX_DATASETS),
+      truncated: largest.length > MAX_DATASETS,
+      error: null,
+    };
+  } catch (reason) {
+    return { all: [], reported: [], truncated: false, error: errorText(reason) };
+  }
+}
+
+/** A pool's space as the system reports it right now. */
+interface PoolLevels {
+  used: number | null;
+  free: number | null;
+  total: number | null;
+}
+
+/** What the pool listing produced, with a failure named rather than thrown. */
+interface PoolListing {
+  levels: Map<string, PoolLevels>;
+  error: string | null;
+}
+
+/**
+ * Each pool's current space, keyed by pool name.
+ *
+ * Current rather than historical, because there is no historical: this is the
+ * one place a caller can read the LEVEL a change should be judged against, and
+ * it is stamped with `as_of` rather than presented as either end of the range.
+ */
+async function poolListing(system: SystemHandle): Promise<PoolListing> {
+  try {
+    const pools = await firstValueFrom(system.client.api.query('pool.query'));
+    const levels = new Map<string, PoolLevels>();
+    for (const pool of pools) {
+      const name = textOrNull(pool.name);
+      if (name === null) continue;
+      levels.set(name, {
+        used: numberOrNull(pool.allocated),
+        free: numberOrNull(pool.free),
+        total: numberOrNull(pool.size),
+      });
+    }
+    return { levels, error: null };
+  } catch (reason) {
+    return { levels: new Map(), error: errorText(reason) };
+  }
+}
+
+/** One snapshot's contribution to a dataset's history. */
+interface Sample {
+  at: number;
+  bytes: number;
+}
+
+/** What the snapshot listing for one dataset produced. */
+interface History {
+  /** The samples inside the range, in whatever order the system listed them. */
+  samples: Sample[];
+  truncated: boolean;
+  error: string | null;
+}
+
+/**
+ * One dataset's space history over the range, from its snapshots.
+ *
+ * Read per dataset rather than in one listing of every snapshot, and the bound
+ * is why: a single bounded listing would hold whichever snapshots the system
+ * returned first, so one heavily snapshotted dataset could crowd out every other
+ * one's history entirely. Per dataset the bound applies per dataset, and they
+ * are all issued together.
+ *
+ * No `order_by`, for the reason `snapshots_list` gives at length: no field of a
+ * snapshot row orders it in time soundly — `createtxg` is a string and is the
+ * receiving system's on a replication target, and the creation time itself is
+ * nested inside `properties`. Asking for an order that is wrong on those systems
+ * would decide WHICH snapshots a truncated listing holds, which is worse than
+ * asking for none, since the ends actually observed are reported either way.
+ */
+async function snapshotHistory(
+  system: SystemHandle,
+  dataset: string,
+  range: Range,
+): Promise<History> {
+  try {
+    const rows = await firstValueFrom(
+      system.client.api.query('pool.snapshot.query', [['dataset', '=', dataset]], {
+        // One more row than the bound. That extra row is what says the system
+        // held more than fit; it is counted and then dropped.
+        limit: MAX_SNAPSHOTS + 1,
+        // Only the two properties this tool reads. A snapshot row otherwise
+        // carries every ZFS property of the snapshot, on every row.
+        extra: { properties: ['creation', 'referenced'] },
+      }),
+    );
+    const samples: Sample[] = [];
+    for (const row of rows.slice(0, MAX_SNAPSHOTS)) {
+      const properties = row['properties'];
+      const at = creationMillis(properties);
+      const bytes = propertyBytes(property(properties, 'referenced'));
+      // Both or neither: a snapshot with no readable size places nothing, and
+      // one with no readable time cannot be placed. Either way it is not a
+      // sample, and counting it would report a history it does not carry.
+      if (at === null || bytes === null) continue;
+      if (at < range.start || at > range.end) continue;
+      samples.push({ at, bytes });
+    }
+    return { samples, truncated: rows.length > MAX_SNAPSHOTS, error: null };
+  } catch (reason) {
+    return { samples: [], truncated: false, error: errorText(reason) };
+  }
+}
+
+/** What one dataset's history says, as the result states it. */
+interface Trend {
+  referenced_start_bytes: number | null;
+  referenced_end_bytes: number | null;
+  change_bytes: number | null;
+  change_bytes_per_day: number | null;
+  observed_start: string | null;
+  observed_end: string | null;
+  snapshots_observed: number;
+  unavailable: string | null;
+}
+
+/** The same change, kept in the numbers a pool's aggregate is summed from. */
+interface Measured {
+  pool: string;
+  change: number;
+  perDay: number;
+  startAt: number;
+  endAt: number;
+}
+
+/** A dataset with no change to report, and why. Its sample count is still stated. */
+function noTrend(reason: string, observed: number): Trend {
+  return {
+    referenced_start_bytes: null,
+    referenced_end_bytes: null,
+    change_bytes: null,
+    change_bytes_per_day: null,
+    observed_start: null,
+    observed_end: null,
+    snapshots_observed: observed,
+    unavailable: reason,
+  };
+}
+
+/**
+ * The change between the ends of one dataset's history, and the rate it implies.
+ *
+ * The ends are the earliest and latest samples IN THE RANGE rather than the
+ * range's own bounds, and they are reported, because they are what the numbers
+ * beside them are true of: a range of a month over a dataset snapshotted twice
+ * on its first day describes that day.
+ *
+ * The rate is taken over the observed window rather than over the range, for the
+ * same reason. Dividing by the range would report a dataset that grew 10 GiB in
+ * an hour as growing 10 GiB a month, which is the projection a caller would then
+ * make from it.
+ */
+function trendOf(row: DatasetRow, history: History): { trend: Trend; measured: Measured | null } {
+  if (history.error !== null) return { trend: noTrend(history.error, 0), measured: null };
+  // A cut-short listing supports neither of the claims below, for the reason
+  // {@link TRUNCATED_READ} gives. It still supports a change where one was
+  // found: that is a statement about the two snapshots named beside it.
+  if (history.samples.length === 0) {
+    const reason = history.truncated ? TRUNCATED_READ : NO_SNAPSHOTS;
+    return { trend: noTrend(reason, 0), measured: null };
+  }
+  let first = history.samples[0];
+  let last = history.samples[0];
+  for (const sample of history.samples) {
+    if (sample.at < first.at) first = sample;
+    if (sample.at > last.at) last = sample;
+  }
+  if (first.at === last.at) {
+    const reason = history.truncated ? TRUNCATED_READ : ONE_INSTANT;
+    return { trend: noTrend(reason, history.samples.length), measured: null };
+  }
+  const change = last.bytes - first.bytes;
+  const perDay = Math.round(change / ((last.at - first.at) / MILLIS_PER_DAY));
+  return {
+    trend: {
+      referenced_start_bytes: first.bytes,
+      referenced_end_bytes: last.bytes,
+      change_bytes: change,
+      change_bytes_per_day: perDay,
+      observed_start: new Date(first.at).toISOString(),
+      observed_end: new Date(last.at).toISOString(),
+      snapshots_observed: history.samples.length,
+      unavailable: null,
+    },
+    measured: { pool: row.pool, change, perDay, startAt: first.at, endAt: last.at },
+  };
+}
+
+/** Why a pool has no change to report, or null where it has one. */
+function poolReason(measured: number, reportedDatasets: number): string | null {
+  if (measured > 0) return null;
+  return reportedDatasets === 0 ? NO_DATASETS_REPORTED : NO_CHANGE_MEASURED;
+}
+
+/** Usage as a percentage of a pool's size, to one decimal place. */
+function percentOf(used: number | null, total: number | null): number | null {
+  if (used === null || total === null || total <= 0) return null;
+  return round1((used / total) * 100);
+}
+
+export const reportingSpaceTrends: ReadOnlyTool = {
+  name: 'reporting_space_trends',
+  description:
+    'How pool and dataset space usage has MOVED over a time range, which is a ' +
+    'different question from how full something is now — a pool at 60% that ' +
+    'gained 30 points this month is a problem, and one that has sat at 85% for ' +
+    'two years is not. THE HISTORY COMES FROM ZFS SNAPSHOTS, not from a ' +
+    'recorded space graph: the system keeps no space series of any kind, so ' +
+    'what is available is the bytes each snapshot records its dataset as ' +
+    'REFERENCING at the instant it was taken. Everything about the answer ' +
+    'follows from that. `datasets` holds one entry per dataset, each with: ' +
+    '`dataset` and `pool`, matching `id` and `pool` in `storage_list_datasets`; ' +
+    '`used_bytes`, the CURRENT size of the dataset with its descendants and ' +
+    'snapshots; `referenced_start_bytes` and `referenced_end_bytes`, what the ' +
+    'dataset itself referenced at the first and last snapshot found in the ' +
+    'range; `change_bytes`, the second minus the first, NEGATIVE where the ' +
+    'dataset shrank; `change_bytes_per_day`, that change as a rate, so a ' +
+    'projection needs no arithmetic over a series; `observed_start` and ' +
+    '`observed_end`, the instants those two snapshots were actually taken; and ' +
+    '`snapshots_observed`, how many snapshots of it were read that fell in the ' +
+    'range AND carried a readable time and size — one the system reported ' +
+    'neither of is not counted, because it places nothing. THE ' +
+    'OBSERVED WINDOW IS NOT THE RANGE, and the rate is per day of that window ' +
+    'rather than of the range: a month-long range over a dataset snapshotted ' +
+    'twice on its first day describes that day. `referenced` is the data the ' +
+    'dataset itself holds, which is what ZFS records at snapshot time; `used` ' +
+    'has no history at all, and neither does free space, so `used_bytes` is a ' +
+    'reading taken now and stamped `as_of` rather than a value at either end ' +
+    'of the range. At most ten datasets are reported, THE LARGEST BY CURRENT ' +
+    '`used_bytes` — not the fastest growing, which cannot be known before ' +
+    'reading them — and `truncated_datasets` is true when the system has more. ' +
+    'At most a thousand snapshots are read per dataset, and no order is asked ' +
+    'for, so they are an arbitrary thousand; `truncated_snapshots` is true ' +
+    'when some dataset had more, and the window observed for it may then be ' +
+    'narrower than the range — how much narrower is not knowable, since which ' +
+    'thousand were read is not. Such a dataset that yielded no change SAYS SO IN ' +
+    '`unavailable` rather than reporting that the system holds no snapshot of ' +
+    'it — the part not read cannot be spoken for. `pools` holds one entry per ' +
+    'pool, each ' +
+    'with: `used_bytes`, `free_bytes`, `total_bytes` and `used_percent`, the ' +
+    "pool's space AS OF NOW rather than over the range, with " +
+    '`levels_unavailable` naming why where they could not be read; ' +
+    '`referenced_change_bytes` and `referenced_change_bytes_per_day`, the SUM ' +
+    'of those figures over the datasets reported for that pool; ' +
+    '`observed_start` and `observed_end`, the earliest and latest instants any ' +
+    'of them was observed at, which means the summed figures cover windows ' +
+    'that may differ between datasets; and `datasets_observed` against ' +
+    '`datasets_total`, which is how far the sum covers the pool at all. THAT ' +
+    'SUM IS NOT THE CHANGE IN THE POOL\'S USED SPACE, and is not a bound on it ' +
+    'in either direction: it omits every dataset not reported and every dataset ' +
+    'with too few snapshots — EACH OF WHICH MAY HAVE GROWN OR SHRUNK, so the ' +
+    'sum can fall on either side of the pool\'s own change — and it omits space ' +
+    'held only by snapshots of data since deleted. Read it as the direction the ' +
+    'datasets it names are moving in, against `datasets_observed`, and read ' +
+    '`used_percent` for how full the pool is now. `unavailable` is null on an ' +
+    'entry with a change to report and otherwise names why there is none — the ' +
+    'system holds no snapshot of that dataset in the range, or none at two ' +
+    'different times, or the read was cut short, or it failed with the reason ' +
+    'the system gave. On a POOL it says instead that none of the datasets ' +
+    'reported for it yielded a change — each of those names its own reason — ' +
+    'or that none of its datasets is among the ones reported at all, which the ' +
+    'ten-dataset cap can do to a pool holding only small ones. ' +
+    'WHERE IT IS NON-NULL EVERY MEASUREMENT IS NULL — the two referenced ' +
+    'figures, the change, the rate and both instants — and that is never a ' +
+    'dataset that did not change: nothing was measured. `snapshots_observed` ' +
+    'is still reported there, and is what says whether the reason was none at ' +
+    'all or too few. ' +
+    '`used_bytes` and the pool levels are read separately and are reported ' +
+    'whatever `unavailable` says. Entries fail independently, so one dataset ' +
+    'can report while another cannot. `start` and `end` are the range asked ' +
+    'about, as ISO 8601 UTC timestamps. Give them to bound it; OMITTED, THE ' +
+    'LAST HOUR ending now, which for this tool is almost never what is wanted ' +
+    '— snapshots are hours or days apart, so ask for weeks or months. This ' +
+    'tool reads what snapshots record. It does not report which files grew, ' +
+    'per-share or per-app usage, quota headroom — `datasets_quota_report` ' +
+    'answers that — or what a pool held before its oldest surviving snapshot, ' +
+    'and it changes nothing.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      start: {
+        type: 'string',
+        description:
+          'The beginning of the range, as an ISO 8601 timestamp — ' +
+          '"2026-08-29T09:00:00Z" — or a date, "2026-08-29", which is ' +
+          'midnight. A time given without a timezone is read as UTC. Omitted, ' +
+          'one hour before the end of the range.',
+      },
+      end: {
+        type: 'string',
+        description: 'The end of the range, in the same forms as `start`. Omitted, now.',
+      },
+    },
+  },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }, args) {
+    // The range is resolved before anything is read, so an unreadable bound is
+    // an error rather than a query the system answers over the wrong interval.
+    const now = Date.now();
+    const range = resolveRange(args, now);
+    const [datasets, pools] = await Promise.all([datasetListing(system), poolListing(system)]);
+    // Every pool either listing named. A pool with no dataset listed still
+    // reports its levels, and a pool whose datasets were listed still reports
+    // its coverage, which is what keeps one failed read from hiding the other's
+    // answer.
+    const names = [...new Set([...datasets.all.map((row) => row.pool), ...pools.levels.keys()])];
+    names.sort();
+    // A failure with nowhere to be reported is thrown instead. Every failure
+    // this tool catches is carried by a pool entry, so no pool entries means no
+    // pool named it — and answering an empty result would read as a system
+    // holding no storage at all. The test is what the result CAN carry rather
+    // than which read failed: a dataset listing that failed beside a pool one
+    // that answered nothing leaves the same silence as both of them failing.
+    const failure = datasets.error ?? pools.error;
+    if (names.length === 0 && failure !== null) throw new Error(failure);
+
+    const histories = await Promise.all(
+      datasets.reported.map((row) => snapshotHistory(system, row.id, range)),
+    );
+    const measured: Measured[] = [];
+    const reported = datasets.reported.map((row, position) => {
+      const answer = trendOf(row, histories[position]);
+      if (answer.measured !== null) measured.push(answer.measured);
+      return { dataset: row.id, pool: row.pool, used_bytes: row.used, ...answer.trend };
+    });
+
+    return {
+      start: new Date(range.start).toISOString(),
+      end: new Date(range.end).toISOString(),
+      as_of: new Date(now).toISOString(),
+      pools: names.map((name) => {
+        const levels = pools.levels.get(name);
+        const mine = measured.filter((entry) => entry.pool === name);
+        const ours = reported.filter((row) => row.pool === name);
+        return {
+          pool: name,
+          used_bytes: levels?.used ?? null,
+          free_bytes: levels?.free ?? null,
+          total_bytes: levels?.total ?? null,
+          used_percent: percentOf(levels?.used ?? null, levels?.total ?? null),
+          levels_unavailable: levels === undefined ? (pools.error ?? NOT_LISTED) : null,
+          referenced_change_bytes:
+            mine.length === 0 ? null : mine.reduce((total, entry) => total + entry.change, 0),
+          referenced_change_bytes_per_day:
+            mine.length === 0 ? null : mine.reduce((total, entry) => total + entry.perDay, 0),
+          observed_start:
+            mine.length === 0
+              ? null
+              : new Date(Math.min(...mine.map((entry) => entry.startAt))).toISOString(),
+          observed_end:
+            mine.length === 0
+              ? null
+              : new Date(Math.max(...mine.map((entry) => entry.endAt))).toISOString(),
+          datasets_observed: mine.length,
+          // Null rather than zero where the listing failed: "this pool has no
+          // datasets" is a claim, and nothing here looked.
+          datasets_total:
+            datasets.error === null
+              ? datasets.all.filter((row) => row.pool === name).length
+              : null,
+          unavailable: datasets.error ?? poolReason(mine.length, ours.length),
+        };
+      }),
+      datasets: reported,
+      truncated_datasets: datasets.truncated,
+      truncated_snapshots: histories.some((history) => history.truncated),
+    };
+  },
+};
