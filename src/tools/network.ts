@@ -631,9 +631,11 @@ export const networkConfig: ReadOnlyTool = {
     'SYSTEM THAT REPORTED NO LIST AT ALL. `ipv4_gateway` and `ipv6_gateway` ' +
     'each carry `configured`, the gateway set on this system and null where ' +
     'none is; `in_effect`, the default route of that family the system ' +
-    'reports as currently in use and null where there is none; and `source`. ' +
-    'A `source` of null means neither a configured gateway nor one in effect ' +
-    'was found for that family. `nameservers` lists every DNS server this ' +
+    'reports as currently in use, WHICH IS NULL BOTH WHERE THERE IS NONE AND ' +
+    'WHERE THE EFFECTIVE SIDE COULD NOT BE READ; and `source`. A `source` of ' +
+    'null means no gateway of that family is configured here and none was ' +
+    'seen in effect, so on a system whose effective side could not be read it ' +
+    'says only that none is configured. `nameservers` lists every DNS server this ' +
     'system is using or has been given, THOSE IN USE FIRST AND IN THE ORDER ' +
     'THE SYSTEM TRIES THEM, followed by any configured server that is not in ' +
     'use. Each carries its `address`, its `source`, and `in_effect`: true ' +
@@ -647,7 +649,9 @@ export const networkConfig: ReadOnlyTool = {
     'is configured rather than that the system has no routes. NULL IS A ' +
     'LISTING THAT COULD NOT BE READ. `failures` names each read that did not ' +
     'complete, with the reason the system gave; it is empty where every read ' +
-    'completed, and A FIELD IT NAMES AS UNREADABLE MUST NOT BE READ AS ' +
+    'completed, SO IT DOES NOT NAME A READ THAT COMPLETED AND ANSWERED A ' +
+    'SHAPE THIS TOOL COULD NOT READ — that shows as the nulls described ' +
+    'above instead. A FIELD IT NAMES AS UNREADABLE MUST NOT BE READ AS ' +
     'ABSENT — when it names `effective_values`, every `in_effect` is null and ' +
     'no value can be reported as `AUTOMATIC`, so a `STATIC` gateway or ' +
     'nameserver is still correct there while the absence of one is not ' +
