@@ -798,6 +798,23 @@ describe('audit_log_query', () => {
     expect(result.entries).toHaveLength(2);
   });
 
+  it('reports truncation it cannot rule out when the system ignored a filter', async () => {
+    // 101 entries in the window, of which the system should have returned only
+    // the two matching ones and returned every one instead: the entries it
+    // sent in place of the ones it filtered out stand between this result and
+    // however many further matches lie beyond the bound, and nothing here can
+    // count them.
+    const rows = Array.from({ length: 101 }, (unused, index) =>
+      entry({ timestamp: { $date: NOW - index * 1000 }, username: index < 2 ? 'alice' : 'bob' }),
+    );
+    const result = await queried(rows, { user: 'alice' });
+    expect(result.entries).toHaveLength(2);
+    expect(result.truncated).toBe(true);
+    // The same ignored filter over a trail that fitted whole is not truncated:
+    // everything the system holds was seen, whoever it belonged to.
+    expect((await queried(rows.slice(0, 100), { user: 'alice' })).truncated).toBe(false);
+  });
+
   it('refuses an answer that is not a list of entries', async () => {
     // `count: true` answers a number and `get: true` a single entry. Neither is
     // asked for, and an empty result would read as an answer about the trail.
@@ -806,6 +823,13 @@ describe('audit_log_query', () => {
         'audit.query did not answer with a list of audit entries',
       );
     }
+  });
+
+  it('fails rather than answering empty when the trail could not be read', async () => {
+    // An empty list is an answer about the trail — nothing matched — and a
+    // trail that could not be read is not that answer.
+    const { ctx } = failingSystem({}, { ['audit.query']: new Error('audit dataset not mounted') });
+    await expect(auditLogQuery.handler(ctx, {})).rejects.toThrow('audit dataset not mounted');
   });
 
   it('never mutates: it reads the trail and nothing else', async () => {

@@ -459,7 +459,8 @@ export const auditLogQuery: ReadOnlyTool = {
     'an empty result can be read against the window it was taken from. The ' +
     'result is bounded: `entries` holds at most `limit` — 100, which is not ' +
     'adjustable — and `truncated` is true when more matched than were ' +
-    'returned. NARROW THE QUESTION UNTIL `truncated` IS FALSE before reading ' +
+    'returned, and when this tool cannot rule that out. NARROW THE QUESTION ' +
+    'UNTIL `truncated` IS FALSE before reading ' +
     'the entries as everything that happened. Entries are newest first, and ' +
     'one whose timestamp could not be read is ordered last, so it is the first ' +
     'to be dropped from a truncated result. AN EMPTY `entries` MEANS THE TRAIL ' +
@@ -491,8 +492,9 @@ export const auditLogQuery: ReadOnlyTool = {
         type: 'string',
         minLength: 1,
         description:
-          'Only report entries from exactly this trail: `MIDDLEWARE`, `SMB`, ' +
-          '`SUDO` or `SYSTEM`.',
+          'Only report entries from exactly this trail, spelled as the system ' +
+          'spells it. `MIDDLEWARE`, `SMB`, `SUDO` and `SYSTEM` are the trails ' +
+          'TrueNAS keeps today; a name a later release adds works here too.',
       },
     },
   },
@@ -547,6 +549,9 @@ export const auditLogQuery: ReadOnlyTool = {
       throw new Error('audit.query did not answer with a list of audit entries');
     }
     const kept = [];
+    // Whether the re-check below removed anything, which is the only evidence
+    // this tool gets that the system did not apply a filter it was given.
+    let unfiltered = false;
     for (const row of answer) {
       const at = entryMillis(row['timestamp']);
       // Only an entry whose timestamp reads as older than the bound is dropped.
@@ -568,8 +573,14 @@ export const auditLogQuery: ReadOnlyTool = {
       // unrecognised query parameter is dropped rather than refused, so a
       // middleware that did not apply one would otherwise answer about every
       // account while looking exactly like an answer about the one asked for.
-      if (user !== null && entry.user !== user) continue;
-      if (service !== null && entry.service !== service) continue;
+      if (user !== null && entry.user !== user) {
+        unfiltered = true;
+        continue;
+      }
+      if (service !== null && entry.service !== service) {
+        unfiltered = true;
+        continue;
+      }
       kept.push({ at, entry });
     }
     return {
@@ -579,7 +590,23 @@ export const auditLogQuery: ReadOnlyTool = {
         .sort(byNewestFirst)
         .slice(0, AUDIT_LIMIT)
         .map((held) => held.entry),
-      truncated: kept.length > AUDIT_LIMIT,
+      // Two ways the system can hold more than came back, and the second is
+      // the one this tool cannot see past. Where the system applied the
+      // filters, what it sent IS what matched, so more matched than fit
+      // exactly when more came back than fit. Where it did not — the re-check
+      // above removed something, so the filters reached it and did nothing —
+      // the entries it dropped instead of the system stand between this result
+      // and however many further matches lie beyond the bound, and nothing
+      // here can count them. That is reported as truncated rather than
+      // guessed at: the description tells a caller to narrow the question
+      // until it is false, and the failure worth avoiding is a partial answer
+      // that says it is whole.
+      //
+      // The window is not read that way. It is applied here rather than by the
+      // system, but entries fall outside it in the same order the system was
+      // asked to sort by, so what it removed is the tail — and there is
+      // nothing further inside the window behind it.
+      truncated: kept.length > AUDIT_LIMIT || (unfiltered && answer.length > AUDIT_LIMIT),
       limit: AUDIT_LIMIT,
       // The bound actually applied, so that an empty result is readable against
       // the window it was taken from rather than against an assumed one.
