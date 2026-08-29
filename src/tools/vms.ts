@@ -310,9 +310,10 @@ export const vmsList: ReadOnlyTool = {
     'without any. A stack that is simply absent from a given TrueNAS release ' +
     'appears here as a failure for that reason. This tool reports only virtual ' +
     'machines: incus containers are excluded and applications are ' +
-    "`apps_list`. It does not report a VM's log output, disks, network " +
-    'interfaces, display or passthrough devices, and it does not create, ' +
-    'start, stop or change one. NO field beyond those named here ' +
+    "`apps_list`. A VM's log output is `vm_logs`, which reads one machine on " +
+    'the `vm` stack. This does not report a VM\'s disks, network interfaces, ' +
+    'display or passthrough devices, and it does not create, start, stop or ' +
+    'change one. NO field beyond those named here ' +
     'is returned, whatever a later TrueNAS release adds to either record.',
   inputSchema: { type: 'object', properties: {} },
   requiredRole: Role.ReadOnly,
@@ -566,9 +567,11 @@ export const vmLogs: ReadOnlyTool = {
     'watching a live problem should read again rather than treat one answer ' +
     'as final. `log_status` says how far the read got, and ONLY `READ` MEANS ' +
     'AN EMPTY `lines` IS SOMETHING THE VM DID. `READ` is the log file read, ' +
-    'with `lines` holding what it had; an empty `lines` there means the file ' +
-    'held no whole line, which is an empty log where `truncated` is false and ' +
-    "a single line longer than the reader's byte ceiling where it is true. " +
+    'with `lines` holding what it had; an empty `lines` there means no whole ' +
+    'line was in what was read, which is an empty log where `truncated` is ' +
+    'false and, where it is true, a window that held no line end — a line ' +
+    "longer than the reader's byte ceiling, or a file that changed size while " +
+    'it was being read, among others. ' +
     '`NO_LOG_PATH` is a system that names no log file for this VM at all, ' +
     'which is usually a machine that has never been started. `UNREADABLE` is a ' +
     'log file this tool was told about and could not read, with `log_error` ' +
@@ -590,13 +593,16 @@ export const vmLogs: ReadOnlyTool = {
     'lives. This tool reads recorded log output ' +
     'and nothing else. It is NOT console access — a console is a live socket ' +
     'and is not in this catalog — it does not report application or container ' +
-    'logs, which belong to `apps_list`, and it does not start, stop or change ' +
-    'a VM. NO field beyond those named here is returned.',
+    'logs, WHICH NOTHING IN THIS CATALOG REPORTS, and it does not start, stop ' +
+    'or change a VM. NO field beyond those named here is returned.',
   inputSchema: {
     type: 'object',
     properties: {
       vm: {
-        type: ['string', 'integer'],
+        // `oneOf` rather than a type list, as the catalog's own `systems`
+        // argument spells the same union: an array-valued `type` is valid JSON
+        // Schema and is outside the subset several provider APIs accept.
+        oneOf: [{ type: 'string' }, { type: 'integer' }],
         description:
           'The virtual machine to read, by name or by numeric id, as ' +
           '`vms_list` reports them for `source` `vm`.',
@@ -654,7 +660,8 @@ export const vmLogs: ReadOnlyTool = {
     if (matches.length > 1) {
       throw new Error(
         `"${selector}" matches ${matches.length} virtual machines on this system — ` +
-          `${matches.map(describeMatch).join(', ')}. Name one of them exactly.`,
+          `${matches.map(describeMatch).join(', ')}. Ask again with the id of the one ` +
+          'you mean.',
       );
     }
     const target = matches[0];
