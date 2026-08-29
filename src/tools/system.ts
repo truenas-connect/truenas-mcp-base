@@ -193,6 +193,22 @@ export const updateStatus: ReadOnlyTool = {
   },
 };
 
+/** A number the system reported, or null where it reported anything else. */
+function numberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * A record the system sent, or null where it sent anything else — an array
+ * included, which is an object and is never one of the keyed payloads this is
+ * used to read.
+ */
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 /**
  * How far back `audit_log_query` reaches when the caller bounds nothing.
  *
@@ -617,6 +633,135 @@ export const auditLogQuery: ReadOnlyTool = {
       // The bound actually applied, so that an empty result is readable against
       // the window it was taken from rather than against an assumed one.
       since: new Date(since).toISOString(),
+    };
+  },
+};
+
+/**
+ * The things the system listed beside one service, as names — or null where it
+ * listed something this tool cannot read as one.
+ *
+ * All-or-nothing rather than per-entry: an entry that could not be read is
+ * dropped from a list only by making the whole list null, because a list
+ * silently missing one share reads as a share that is not audited, which is the
+ * opposite of what is known about it. The same reading `audit_log_query` applies
+ * to a filter it could not check.
+ */
+function scopeNames(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const names: string[] = [];
+  for (const entry of value) {
+    const name = textOrNull(entry);
+    if (name === null) return null;
+    names.push(name);
+  }
+  return names;
+}
+
+/**
+ * What the system is configured to audit, as it reports it, or null where it
+ * sent no configuration this tool could read.
+ *
+ * A service is reported under the name the system spelled it with, so a service
+ * a later TrueNAS release begins auditing is answerable here without a change —
+ * these are values rather than fields, and the allowlist this file keeps is over
+ * the fields of the result.
+ *
+ * Sorted by name, because the middleware sends a keyed object and the order of
+ * its keys means nothing; leaving it alone would make the result differ between
+ * two reads of the same unchanged configuration.
+ */
+function enabledServices(value: unknown): { service: string; scope: string[] | null }[] | null {
+  const services = recordOrNull(value);
+  if (services === null) return null;
+  return Object.keys(services)
+    .filter((name) => name.length > 0)
+    .sort()
+    .map((service) => ({ service, scope: scopeNames(services[service]) }));
+}
+
+/**
+ * What the system is auditing, rather than what it audited.
+ *
+ * The counterpart to `audit_log_query`, and the distinction between them is the
+ * whole point: the trail says what was recorded, and reading it can never
+ * establish that a service is NOT being audited — a service nobody is auditing
+ * and a service nobody has used both record nothing. `fleet_compliance_report`
+ * says exactly that about its own `auditing` section, which is why this tool
+ * exists. The setting is the only place the answer is stated rather than
+ * inferred.
+ *
+ * Reads the configuration and does not change it. `audit.update` is the
+ * mutating counterpart and is not in this catalog.
+ */
+export const auditConfig: ReadOnlyTool = {
+  name: 'audit_config',
+  description:
+    'The audit SETTINGS of a TrueNAS system — what it is configured to audit, ' +
+    'whether audit records are also shipped off the box, how long they are ' +
+    'kept, and how much room the audit dataset has left. This is the ' +
+    'configuration, NOT the trail: for what was actually recorded, and by ' +
+    'whom, that is `audit_log_query`. The two answer different questions and ' +
+    'reading one for the other is the mistake this tool exists to prevent — an ' +
+    'empty trail cannot establish that a service is unaudited, because a ' +
+    'service nobody audits and a service nobody has used both record nothing. ' +
+    '`enabled_services` is what the system lists under its audit ' +
+    'configuration, one entry per service, sorted by name. `service` is the ' +
+    'name as the system spelled it — `MIDDLEWARE` for the API the web UI, the ' +
+    'CLI and this tool all call, `SMB` for file share access, `SUDO` for ' +
+    'commands run as another user, and a name a later TrueNAS release adds is ' +
+    'passed through as the system spelled it. `scope` is what the system ' +
+    'listed beside that service, such as the SMB shares being audited; it is ' +
+    'an empty list where the system listed nothing beside it, and null where ' +
+    'it listed something this tool could not read as names. AN EMPTY `scope` ' +
+    'IS NOT "NOT AUDITED" — (unconfirmed) whether a service listing nothing is ' +
+    'auditing everything or nothing is not established by this read, and only ' +
+    'a non-empty `scope` says which named things are covered. ' +
+    '`enabled_services` ITSELF IS NULL WHERE THE SYSTEM REPORTED NO SERVICE ' +
+    'CONFIGURATION THIS TOOL COULD READ, and an empty list means the system ' +
+    'reported the configuration and listed no services in it — those are ' +
+    'different answers and null is never to be read as the empty one. ' +
+    '`remote_logging_enabled` is whether audit records are also sent to a ' +
+    'remote destination, and it is THREE-VALUED: true, false, or null where ' +
+    'the system reported no value this tool could read. Null is NOT false — ' +
+    'nothing has been established about off-box logging. Where the remote ' +
+    'destination is, and whether it is reachable, are not reported here. ' +
+    '`retention_days` is how many days audit entries are kept before the ' +
+    'system removes them, and is null where the system reported no number this ' +
+    'tool could read. `space_available_bytes` is how much room the audit ' +
+    'dataset has left, in bytes, and is null on the same terms. It does not ' +
+    'say how long that room lasts: that depends on how busy the system is, ' +
+    'which this tool does not read. This tool reads configuration. It does not ' +
+    'change what is audited, how long entries are kept, or anything else — ' +
+    'that is `audit.update`, and it is not in this catalog. A configuration ' +
+    'that could not be read at all is an error naming what the system said, ' +
+    'not a result of nulls.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }) {
+    const config = await firstValueFrom(system.client.api.call('audit.config'));
+    // The payload is read through this guard rather than reached into, because
+    // a system answering the call with something that is not a configuration
+    // would otherwise throw on the first property access — and the error a
+    // caller then sees names a property rather than the read that failed.
+    const settings = recordOrNull(config);
+    if (settings === null) {
+      throw new Error('audit.config did not answer with an audit configuration');
+    }
+    // Named one at a time, so a field a later TrueNAS release adds to the audit
+    // configuration does not appear in this result without a change here.
+    const space = recordOrNull(settings['space']);
+    return {
+      enabled_services: enabledServices(settings['enabled_services']),
+      // Not defaulted to false: a system that reported no value has not been
+      // shown to be keeping its audit records on the box.
+      remote_logging_enabled:
+        typeof settings['remote_logging_enabled'] === 'boolean'
+          ? settings['remote_logging_enabled']
+          : null,
+      retention_days: numberOrNull(settings['retention']),
+      space_available_bytes: space === null ? null : numberOrNull(space['available']),
     };
   },
 };
