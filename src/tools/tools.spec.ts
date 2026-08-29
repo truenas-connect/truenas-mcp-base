@@ -4355,6 +4355,8 @@ describe('nvmeof_list', () => {
     unsupported_reason: string | null;
     subsystems: Record<string, unknown>[] | null;
     failures: Record<string, unknown>[];
+    unattributed_namespaces: Record<string, unknown>[];
+    unattributed_hosts: Record<string, unknown>[];
   };
 
   const listed = async (
@@ -4404,6 +4406,8 @@ describe('nvmeof_list', () => {
         },
       ],
       failures: [],
+      unattributed_namespaces: [],
+      unattributed_hosts: [],
     });
   });
 
@@ -4418,6 +4422,8 @@ describe('nvmeof_list', () => {
       'unsupported_reason',
       'subsystems',
       'failures',
+      'unattributed_namespaces',
+      'unattributed_hosts',
     ]);
     const only = (listing.subsystems ?? [])[0];
     expect(Object.keys(only)).toEqual([
@@ -4561,24 +4567,74 @@ describe('nvmeof_list', () => {
     ]);
   });
 
-  it('leaves out a row the system did not attribute to a subsystem', async () => {
+  it('reports a row the system did not attribute to a subsystem rather than dropping it', async () => {
     // Filing it under a subsystem it may not belong to would report a namespace
-    // on the wrong device, and a host as allowed onto one it is not.
+    // on the wrong device, and a host as allowed onto one it is not. Dropping
+    // it instead leaves an empty list saying the subsystem has none, which is
+    // the answer that gets acted on — so it is reported beside the listing.
     const listing = await listed({
       ['nvmet.namespace.query']: [namespace({ subsys: { name: 'nvme0' } })],
       ['nvmet.host_subsys.query']: [hostJoin({ subsys: {} })],
     });
     expect((listing.subsystems ?? [])[0]).toMatchObject({ namespaces: [], hosts: [] });
+    expect(listing.unattributed_namespaces).toEqual([
+      {
+        id: 7,
+        nsid: 1,
+        device_type: 'ZVOL',
+        device_path: 'zvol/tank/nvme0',
+        size_bytes: null,
+        enabled: true,
+        locked: false,
+        // The record named a name and no id, so the name is what is left to
+        // report it by. Both are null where it named neither, as here for the
+        // host row.
+        subsystem_id: null,
+        subsystem: 'nvme0',
+      },
+    ]);
+    expect(listing.unattributed_hosts).toEqual([
+      {
+        hostnqn: 'nqn.2014-08.org.nvmexpress:uuid:esx1',
+        subsystem_id: null,
+        subsystem: null,
+      },
+    ]);
     expect(listing.failures).toEqual([]);
   });
 
-  it('leaves out a host row carrying no NQN to report', async () => {
+  it('reports a row naming a subsystem the listing does not contain', async () => {
+    // The id is readable and answers to nothing, which drops the row as surely
+    // as an unreadable one: it is filed under a key no subsystem ever reads.
+    const listing = await listed({
+      ['nvmet.namespace.query']: [namespace({ subsys: { id: 99, name: 'nvme9' } })],
+      ['nvmet.host_subsys.query']: [hostJoin({ subsys: { id: 99, name: 'nvme9' } })],
+    });
+    expect((listing.subsystems ?? [])[0]).toMatchObject({ namespaces: [], hosts: [] });
+    expect(listing.unattributed_namespaces).toMatchObject([
+      { id: 7, subsystem_id: 99, subsystem: 'nvme9' },
+    ]);
+    expect(listing.unattributed_hosts).toEqual([
+      {
+        hostnqn: 'nqn.2014-08.org.nvmexpress:uuid:esx1',
+        subsystem_id: 99,
+        subsystem: 'nvme9',
+      },
+    ]);
+    expect(listing.failures).toEqual([]);
+  });
+
+  it('reports a host row carrying no NQN rather than listing a nameless entry', async () => {
     for (const missing of [null, '', undefined]) {
-      expect(
-        await onlySubsystem({
-          ['nvmet.host_subsys.query']: [hostJoin({ host: { id: 3, hostnqn: missing } })],
-        }),
-      ).toMatchObject({ hosts: [] });
+      const listing = await listed({
+        ['nvmet.host_subsys.query']: [hostJoin({ host: { id: 3, hostnqn: missing } })],
+      });
+      expect((listing.subsystems ?? [])[0]).toMatchObject({ hosts: [] });
+      // The one kind that names a subsystem and still cannot be listed under
+      // it: the grant is real, and there is no name to put in a list of names.
+      expect(listing.unattributed_hosts).toEqual([
+        { hostnqn: null, subsystem_id: 1, subsystem: 'nvme0' },
+      ]);
     }
   });
 
@@ -4595,6 +4651,25 @@ describe('nvmeof_list', () => {
       namespaces: null,
     });
     expect(listing.failures).toEqual([]);
+    // The rows named a subsystem this listing cannot answer to, so they are
+    // reported rather than lost with the id that would have placed them.
+    expect(listing.unattributed_namespaces).toMatchObject([{ id: 7, subsystem_id: 1 }]);
+    expect(listing.unattributed_hosts).toMatchObject([{ subsystem_id: 1 }]);
+  });
+
+  it('reports nothing as unattributed where the read that would fill it failed', async () => {
+    // Empty because no row was read to place, not because every row was placed.
+    // `failures` is what carries the difference.
+    const listing = await listed(
+      {},
+      {
+        ['nvmet.namespace.query']: new Error('denied'),
+        ['nvmet.host_subsys.query']: new Error('denied'),
+      },
+    );
+    expect(listing.unattributed_namespaces).toEqual([]);
+    expect(listing.unattributed_hosts).toEqual([]);
+    expect(listing.failures).toHaveLength(2);
   });
 
   it('distinguishes namespaces that could not be read from a subsystem with none', async () => {
@@ -4672,8 +4747,11 @@ describe('nvmeof_list', () => {
         supported: false,
         subsystems: null,
         // The other two reads fail the same way on such a system; naming them
-        // would report one absent feature three times, as three defects.
+        // would report one absent feature three times, as three defects. No row
+        // was read either, so nothing was left out of a list.
         failures: [],
+        unattributed_namespaces: [],
+        unattributed_hosts: [],
       });
     }
     expect(
@@ -4709,6 +4787,8 @@ describe('nvmeof_list', () => {
       unsupported_reason: null,
       subsystems: [],
       failures: [],
+      unattributed_namespaces: [],
+      unattributed_hosts: [],
     });
   });
 

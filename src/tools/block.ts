@@ -409,20 +409,68 @@ interface Namespace {
 }
 
 /**
- * The namespaces of each subsystem, indexed by subsystem id.
+ * One row of a secondary read, with the subsystem its record named.
  *
- * A namespace names its subsystem with the whole subsystem record nested inside
- * it rather than with a bare id, so the join is on a value read out of that
- * untyped record. One the system did not identify that way has nothing to be
- * filed under and is left out — the alternative is filing it under a subsystem
- * it may not belong to, which would report a namespace on the wrong device.
+ * Both reads name their subsystem with the whole subsystem record nested inside
+ * the row rather than with a bare id, so the join is on a value read out of that
+ * untyped record. `subsystem_id` is that value and `subsystem` the name beside
+ * it, kept because it is all there is left to report the row by where the id is
+ * missing or answers to no subsystem in the listing.
+ *
+ * `value` is what the row says, and is null for a row that carries nothing
+ * statable even where its subsystem is known — a host grant with no NQN.
  */
-async function readNamespaces(system: SystemHandle): Promise<Map<number, Namespace[]>> {
+interface Claim<T> {
+  value: T;
+  subsystem_id: number | null;
+  subsystem: string | null;
+}
+
+/** Rows filed under the subsystem each named, and the ones that could not be. */
+interface Attribution<T> {
+  bySubsystem: Map<number, T[]>;
+  unattributed: Claim<T>[];
+}
+
+/**
+ * The rows of one read, each filed under the subsystem it named where that can
+ * be done and set aside where it cannot.
+ *
+ * A row is set aside where its record named no readable subsystem id, where
+ * that id answers to no subsystem in the listing, or where the row itself says
+ * nothing statable. Filing any of those under a subsystem anyway would report a
+ * namespace on the wrong device, or a host as allowed onto one it is not — but
+ * dropping them outright is the failure this exists to prevent: a subsystem's
+ * empty list would then say the rows are not there, when what is true is that
+ * they could not be placed. The caller reports them beside the listing instead.
+ */
+function attribute<T>(rows: Claim<T>[], listed: Set<number>): Attribution<T> {
+  const bySubsystem = new Map<number, T[]>();
+  const unattributed: Claim<T>[] = [];
+  for (const row of rows) {
+    const id = row.subsystem_id;
+    if (row.value === null || id === null || !listed.has(id)) {
+      unattributed.push(row);
+      continue;
+    }
+    const filed = bySubsystem.get(id);
+    if (filed === undefined) bySubsystem.set(id, [row.value]);
+    else filed.push(row.value);
+  }
+  return { bySubsystem, unattributed };
+}
+
+/**
+ * Every namespace the system reported, each with the subsystem its row named.
+ *
+ * The rows are not grouped here because grouping needs the subsystem listing to
+ * decide what a named id attributes to, and this read is issued before that
+ * listing has arrived.
+ */
+async function readNamespaces(system: SystemHandle): Promise<Claim<Namespace>[]> {
   const namespaces = await firstValueFrom(system.client.api.query('nvmet.namespace.query'));
-  const bySubsystem = new Map<number, Namespace[]>();
+  const claims: Claim<Namespace>[] = [];
   for (const namespace of namespaces) {
-    const subsystem = numberOrNull(namespace.subsys['id']);
-    if (subsystem === null) continue;
     const row: Namespace = {
       id: numberOrNull(namespace.id),
       // The identifier an initiator addresses the namespace by, which is not
@@ -440,36 +488,34 @@ async function readNamespaces(system: SystemHandle): Promise<Map<number, Namespa
       enabled: booleanOrNull(namespace.enabled),
       locked: booleanOrNull(namespace.locked),
     };
-    const mapped = bySubsystem.get(subsystem);
-    if (mapped === undefined) bySubsystem.set(subsystem, [row]);
-    else mapped.push(row);
+    claims.push({
+      value: row,
+      subsystem_id: numberOrNull(namespace.subsys['id']),
+      subsystem: textOrNull(namespace.subsys['name']),
+    });
   }
-  return bySubsystem;
+  return claims;
 }
 
 /**
- * The NQNs of the hosts allowed onto each subsystem, indexed by subsystem id.
+ * The NQN of every host grant the system reported, each with the subsystem its
+ * row named.
  *
  * `nvmet.host_subsys.query` is the join table and it embeds both sides whole:
  * the host record it points at carries the NQN, so the hosts do not have to be
  * read separately and no row can point at a host that was not returned.
+ *
+ * A grant whose host carries no NQN is not the host any initiator connects as,
+ * so its `value` is null: it cannot go in a list whose whole content is names,
+ * and `attribute` sets it aside rather than putting a nameless entry there.
  */
-async function readHosts(system: SystemHandle): Promise<Map<number, string[]>> {
+async function readHosts(system: SystemHandle): Promise<Claim<string | null>[]> {
   const joins = await firstValueFrom(system.client.api.query('nvmet.host_subsys.query'));
-  const bySubsystem = new Map<number, string[]>();
-  for (const join of joins) {
-    const subsystem = numberOrNull(join.subsys['id']);
-    const hostnqn = textOrNull(join.host.hostnqn);
-    // A host with no NQN cannot be the host any initiator connects as, and one
-    // with no subsystem has nothing to be allowed onto; either way the row
-    // grants nothing that can be stated, and stating it anyway would put a
-    // nameless entry in a list whose whole content is names.
-    if (subsystem === null || hostnqn === null) continue;
-    const allowed = bySubsystem.get(subsystem);
-    if (allowed === undefined) bySubsystem.set(subsystem, [hostnqn]);
-    else allowed.push(hostnqn);
-  }
-  return bySubsystem;
+  return joins.map((join) => ({
+    value: textOrNull(join.host.hostnqn),
+    subsystem_id: numberOrNull(join.subsys['id']),
+    subsystem: textOrNull(join.subsys['name']),
+  }));
 }
 
 /** The JSON-RPC code for a method the server does not have. */
@@ -574,14 +620,26 @@ export const nvmeofList: ReadOnlyTool = {
     'is switched on and `locked` whether its dataset is locked; a locked or ' +
     'disabled namespace is configured but serves no data, and both are null ' +
     'where the system reported no value. AN EMPTY `namespaces` AND A NULL ONE ' +
-    'ARE DIFFERENT ANSWERS: empty means the namespaces were read and none is ' +
-    'on this subsystem; null means they could not be read at all. `hosts` is ' +
-    'null in the same way and for the same reason. Both are also null where ' +
-    "`id` is null, because the subsystem's own identity is what each is joined " +
-    'on and there is then nothing to attribute to it. `failures` names each ' +
-    'read that failed, as `source` — `namespaces` or `hosts` — and `error`, ' +
-    'and is empty when both were read, which is what tells a list that could ' +
-    'not be read from one that could not be attributed. This tool reads only ' +
+    'ARE DIFFERENT ANSWERS: empty means the namespaces were read and none of ' +
+    'them was placed on this subsystem; null means they could not be read at ' +
+    'all. `hosts` is null in the same way and for the same reason. Both are ' +
+    "also null where `id` is null, because the subsystem's own identity is " +
+    'what each is joined on and there is then nothing to attribute to it. ' +
+    '`failures` names each read that failed, as `source` — `namespaces` or ' +
+    '`hosts` — and `error`, and is empty when both were read. ' +
+    '`unattributed_namespaces` and `unattributed_hosts` hold the rows that ' +
+    'WERE read and could not be placed on any subsystem listed here. Each ' +
+    'carries the `subsystem_id` and `subsystem` name its own record named, so ' +
+    'what it claimed is visible: both are null where the record named neither, ' +
+    'and `subsystem_id` is set where it named an id no subsystem here answers ' +
+    'to. An entry in `unattributed_hosts` whose `hostnqn` is null is a grant ' +
+    'naming no host to report, which is the one kind that names a subsystem ' +
+    'and still cannot be listed under it. WHILE EITHER LIST IS NOT EMPTY THE ' +
+    'PER-SUBSYSTEM `namespaces` AND `hosts` LISTS ARE INCOMPLETE, and an empty ' +
+    'one there is not a subsystem with nothing on it. Both are empty when a ' +
+    'read failed, because nothing was read to place — `failures` is what says ' +
+    'so, and is also what tells a list that could not be read from one that ' +
+    'could not be attributed. This tool reads only ' +
     'NVMe-oF: iSCSI targets are `iscsi_list`, and SMB or NFS shares are ' +
     '`shares_list`. It does not report which ports a subsystem is published ' +
     'on, so a subsystem listed here is not necessarily reachable over the ' +
@@ -610,8 +668,11 @@ export const nvmeofList: ReadOnlyTool = {
         unsupported_reason: errorText(subsystems.reason),
         subsystems: null,
         // The other two reads fail the same way on such a system. Naming them
-        // would report one absent feature three times, as three defects.
+        // would report one absent feature three times, as three defects — and
+        // no row was read, so nothing was left out of a list either.
         failures: [],
+        unattributed_namespaces: [],
+        unattributed_hosts: [],
       };
     }
 
@@ -619,32 +680,52 @@ export const nvmeofList: ReadOnlyTool = {
     if (namespaces.failure !== null) failures.push(namespaces.failure);
     if (hosts.failure !== null) failures.push(hosts.failure);
 
+    // Read rather than trusted, and read once: the id is both the reported
+    // identity and what the other two reads are attributed by, so a subsystem
+    // the system did not number is one nothing can be attached to.
+    const identified = subsystems.rows.map((subsystem) => ({
+      subsystem,
+      id: numberOrNull(subsystem['id']),
+    }));
+    // What a namespace or host row has to name to be filed under a subsystem
+    // this listing actually reports. A row naming anything else is set aside
+    // rather than dropped, because a dropped row leaves an empty list behind
+    // that says the subsystem has none.
+    const listed = new Set(identified.flatMap(({ id }) => (id === null ? [] : [id])));
+    const attributed = namespaces.value === null ? null : attribute(namespaces.value, listed);
+    const allowed = hosts.value === null ? null : attribute(hosts.value, listed);
+
     return {
       supported: true,
       unsupported_reason: null,
-      subsystems: subsystems.rows.map((subsystem) => {
-        // Read rather than trusted, and read once: it is both the reported
-        // identity and what the other two reads are attributed by, so a
-        // subsystem the system did not number is one nothing can be attached to.
-        const id = numberOrNull(subsystem['id']);
-        return {
-          id,
-          name: textOrNull(subsystem['name']),
-          nqn: textOrNull(subsystem['subnqn']),
-          // Reported because it decides whether `hosts` means anything: where
-          // it is true the list does not restrict, and without this field an
-          // empty one reads as a subsystem nobody may attach to.
-          allow_any_host: booleanOrNull(subsystem['allow_any_host']),
-          // Null for a read that failed and for a subsystem with no id to join
-          // on; an empty list for a read that succeeded and found none.
-          hosts: hosts.value === null || id === null ? null : (hosts.value.get(id) ?? []),
-          namespaces:
-            namespaces.value === null || id === null
-              ? null
-              : (namespaces.value.get(id) ?? []),
-        };
-      }),
+      subsystems: identified.map(({ subsystem, id }) => ({
+        id,
+        name: textOrNull(subsystem['name']),
+        nqn: textOrNull(subsystem['subnqn']),
+        // Reported because it decides whether `hosts` means anything: where
+        // it is true the list does not restrict, and without this field an
+        // empty one reads as a subsystem nobody may attach to.
+        allow_any_host: booleanOrNull(subsystem['allow_any_host']),
+        // Null for a read that failed and for a subsystem with no id to join
+        // on; an empty list for a read that succeeded and found none.
+        hosts: allowed === null || id === null ? null : (allowed.bySubsystem.get(id) ?? []),
+        namespaces:
+          attributed === null || id === null ? null : (attributed.bySubsystem.get(id) ?? []),
+      })),
       failures,
+      // Flat rather than nested, as `iscsi_list` reports its own unattributable
+      // rows: what the row said is beside what it named, so a caller reading one
+      // entry sees both the namespace and why it is here rather than in a list.
+      unattributed_namespaces: (attributed?.unattributed ?? []).map((row) => ({
+        ...row.value,
+        subsystem_id: row.subsystem_id,
+        subsystem: row.subsystem,
+      })),
+      unattributed_hosts: (allowed?.unattributed ?? []).map((row) => ({
+        hostnqn: row.value,
+        subsystem_id: row.subsystem_id,
+        subsystem: row.subsystem,
+      })),
     };
   },
 };
