@@ -457,12 +457,15 @@ function jobError(run: LastRun | null): string | null {
  * One named string field of a record the pinned client's types do not describe
  * field by field, or null where the record or the field is not readable.
  *
- * Three of the four places a cloud sync row is read from are like that: the
- * task's `attributes` and its credential are open records, and `description` is
- * not declared on the row at all — the server sends it and the generated dump
- * omits it, the same way it omits a job's own `description`, which the client
- * corrects by hand for exactly that reason. Each is read as `unknown` because
- * nothing in the pinned types vouches for it.
+ * Each of the three places this is used needs it for its own reason. A task's
+ * `attributes` is an open record — the client types it `Record<string,
+ * unknown>`, so `bucket` and `folder` arrive as `unknown`. `description` is not
+ * declared on the row at all: the server sends it and the generated dump omits
+ * it, the same way it omits a job's own `description`, which the client
+ * corrects by hand for exactly that reason. A task's credential IS declared,
+ * with a `name` typed a string — but the middleware also sends the id-only
+ * form, so a row that does not honour the type is the case a direct read would
+ * have got wrong.
  */
 function stringField(record: unknown, field: string): string | null {
   if (typeof record !== 'object' || record === null) return null;
@@ -541,9 +544,10 @@ export const cloudsyncTasksList: ReadOnlyTool = {
     return tasks.map((task) => {
       const cron = cronOf(task.schedule);
       const schedule = cron === null ? null : cronFieldsOf(cron);
-      // Read once and passed to `jobFinishedAt`, so that the state reported and
-      // the decision about whether the recorded time is a finish time cannot be
-      // made from two different readings of the same record.
+      // Both derived from `task.job` rather than from each other, and the state
+      // reported is then passed to `jobFinishedAt` — so whether the recorded
+      // time counts as a finish time is decided from the state the caller is
+      // given, not from a second reading of the record.
       const run = lastRunOf(task.job);
       const reported = lastRunState(task.job);
       return {
