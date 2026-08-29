@@ -16,7 +16,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   operations are rejected at registration by policy. Read-only family:
   `system_info`, `storage_pool_status`, `storage_pool_topology`,
   `storage_scrub_history`, `storage_list_datasets`, `datasets_quota_report`,
-  `disks_list`, `apps_list`, `alerts_list`, `snapshots_list`,
+  `disks_list`, `apps_list`, `vms_list`, `alerts_list`, `snapshots_list`,
   `replication_status`, `snapshot_tasks_list`, `cloudsync_tasks_list`,
   `tasks_recent_runs`, `shares_list`, `share_access`, `iscsi_list`,
   `nvmeof_list`, `users_list`, `directory_services_status`,
