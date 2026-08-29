@@ -715,9 +715,12 @@ interface DiskMeasurement {
  * recorded operation counts and I/O wait times would plausibly call them, and
  * on every release this was written against the graph carries neither — which
  * is why the tool's description says those two are commonly unavailable rather
- * than promising them. A name guessed wrong costs a stated `unavailable`, never
- * a wrong number, which is the whole reason the dimension travels with the
- * derivation; see {@link Derivation}.
+ * than promising them. A name that no release carries costs a stated
+ * `unavailable` rather than a number, which is the whole reason the dimension
+ * travels with the derivation; see {@link Derivation}. What that does NOT cover
+ * is a name a release carries under other semantics — the value would then be
+ * reported under the unit asserted here — so the four guessed names are ones
+ * netdata uses for these quantities and nothing else.
  */
 const DISK_MEASUREMENTS: DiskMeasurement[] = [
   { metric: 'read_throughput', unit: DISK_THROUGHPUT_UNIT, derive: magnitude('reads') },
@@ -769,9 +772,10 @@ function graphedNames(rows: unknown[], cap: number): Omit<Graphed, 'error'> {
  */
 async function interfaceNames(system: SystemHandle): Promise<Graphed> {
   try {
-    // Inlined rather than shared with `diskNames` below: the client types
-    // `query` per method, and a method name reaching it through a variable
-    // widens to `string` and loses the row type with it.
+    // The call is inlined rather than shared with `diskNames` below, as the
+    // graph reads are inlined above: the client types `query` per method, so a
+    // method name reaching it through a variable widens to `string` and no
+    // longer selects an overload. Only the sort-and-cap step is shared.
     const rows = await firstValueFrom(system.client.api.query('interface.query'));
     return { ...graphedNames(rows, MAX_INTERFACES), error: null };
   } catch (reason) {
