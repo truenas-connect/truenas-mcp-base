@@ -8088,6 +8088,18 @@ describe('reporting_utilisation', () => {
     expect(report.truncated_interfaces).toBe(false);
   });
 
+  it('still reports both network metrics when the system named no interface', async () => {
+    const fake = reportingSystem({ cpu: cpuGraph, memory: memoryGraph }, { interfaces: [] });
+    const report = await reported(fake);
+    // Dropping them would be indistinguishable from a system with no network.
+    expect(metric(report, 'network_received')).toMatchObject({
+      interface: null,
+      buckets: [],
+      unavailable: 'the system named no interface to graph',
+    });
+    expect(metric(report, 'network_sent').unavailable).toBe('the system named no interface to graph');
+  });
+
   it('covers six interfaces in name order and says when it left some out', async () => {
     const fake = reportingSystem(
       { cpu: cpuGraph, memory: memoryGraph },
@@ -8179,11 +8191,14 @@ describe('reporting_utilisation', () => {
   });
 
   it('reports no memory percentage where nothing accounts for the total', async () => {
-    const missing = ['time', 'free', 'cached'];
-    const zero = ['time', 'free', 'used'];
     const cases: [unknown[], unknown[]][] = [
-      [missing, [[at(60_000), 100, 20]]],
-      [zero, [[at(60_000), 0, 0]]],
+      // No `used` to report.
+      [['time', 'free', 'cached'], [[at(60_000), 100, 20]]],
+      // `used` alone is its own total, and dividing it by itself would report
+      // every system as fully out of memory.
+      [['time', 'used'], [[at(60_000), 500]]],
+      // Nothing to take a share of.
+      [['time', 'free', 'used'], [[at(60_000), 0, 0]]],
     ];
     for (const [legend, data] of cases) {
       const fake = reportingSystem({ memory: graph(legend, data) });

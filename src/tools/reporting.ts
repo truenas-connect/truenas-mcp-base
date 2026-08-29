@@ -70,6 +70,12 @@ const NO_REASON = 'the system reported no reason';
 const NO_DATA = 'the system collected no data for this metric in this range';
 
 /**
+ * What the network metrics are marked with where the interface listing was read
+ * and named nothing to graph.
+ */
+const NO_INTERFACES = 'the system named no interface to graph';
+
+/**
  * What a metric whose graph came back without the dimension it is derived from
  * is marked with. Not the same as {@link NO_DATA}: the system answered with a
  * series, and it is not one this reduction can be computed from.
@@ -538,13 +544,21 @@ const MEMORY_PARTS = ['free', 'used', 'cached', 'buffers'];
  *
  * A percentage rather than a byte count deliberately: the graph's unit is not
  * stated anywhere this tool can read, and a ratio of two values in the same
- * unit is right whatever that unit turns out to be. Null where the graph
- * carried no `used` dimension, or where the parts it did carry sum to nothing
- * to take a share of.
+ * unit is right whatever that unit turns out to be.
+ *
+ * BOTH `used` and `free` are required, and the second is what stops the answer
+ * being a tautology. `used` is itself one of the parts summed into the total, so
+ * a graph carrying `used` and nothing else divides a number by itself and
+ * reports 100% — a system at three percent of its memory presented as one out of
+ * it, which is worse than no answer. `free` is the dimension that makes the
+ * total account for memory nothing is using; `cached` and `buffers` refine it
+ * and are optional, because a release that folds them into `free` is still
+ * partitioning the same memory. Null where either is missing, and null where the
+ * parts sum to nothing to take a share of.
  */
 const memoryUsedPercent: Derivation = (dimensions) => {
   const used = dimensions.get('used');
-  if (used === undefined) return null;
+  if (used === undefined || dimensions.get('free') === undefined) return null;
   let total = 0;
   for (const part of MEMORY_PARTS) total += dimensions.get(part) ?? 0;
   if (total <= 0) return null;
@@ -630,7 +644,8 @@ export const reportingUtilisation: ReadOnlyTool = {
     'were left out. Bridges, VLANs and link aggregations are reported ' +
     'alongside the physical ports beneath them, so ADDING THE INTERFACES ' +
     'TOGETHER DOUBLE-COUNTS traffic that crossed both; compare interfaces ' +
-    'rather than summing them. `buckets` is always exactly twelve entries: the ' +
+    'rather than summing them. `buckets` is twelve entries on every metric that ' +
+    'was measured: the ' +
     'range is divided into twelve equal intervals and each entry is the MEAN of ' +
     'the samples inside its interval, oldest first, so the width of one is a ' +
     'twelfth of the range and is given as `bucket_seconds`. A bucket the system ' +
@@ -641,8 +656,10 @@ export const reportingUtilisation: ReadOnlyTool = {
     'whatever range is asked for. `unavailable` is null on a metric that was ' +
     'measured, and otherwise names why there is nothing to report — the system ' +
     'collected no data in the range, its graph carried no series this metric ' +
-    'could be derived from, or the read itself failed with the reason the ' +
-    'system gave. WHERE IT IS NON-NULL, `min`, `max`, `mean` and `latest` ARE ' +
+    'could be derived from, the read itself failed with the reason the ' +
+    'system gave, or — on the network metrics, which then carry a null ' +
+    '`interface` — the system named no interface to graph at all. WHERE IT IS ' +
+    'NON-NULL, `min`, `max`, `mean` and `latest` ARE ' +
     'ALL NULL AND `buckets` IS EMPTY, and that is never a system that was idle: ' +
     'nothing was measured. Metrics fail independently, so a result can report ' +
     'CPU and memory while every network metric is unavailable. `start` and ' +
@@ -690,13 +707,15 @@ export const reportingUtilisation: ReadOnlyTool = {
       graphMetric('cpu_percent', null, PERCENT, cpu, range, cpuPercent),
       graphMetric('memory_used_percent', null, PERCENT, memory, range, memoryUsedPercent),
     ];
-    if (interfaces.error !== null) {
+    if (interfaces.names.length === 0) {
       // Both network metrics are still reported, carrying the reason no
-      // interface could be graphed. An absent metric would read as a system
-      // with no network at all.
+      // interface could be graphed — the listing failed, or it was read and
+      // named none. Absent metrics would read as a system with no network at
+      // all, which is the one thing a result must not imply here.
+      const reason = interfaces.error ?? NO_INTERFACES;
       metrics.push(
-        unavailable('network_received', null, NETWORK_UNIT, interfaces.error),
-        unavailable('network_sent', null, NETWORK_UNIT, interfaces.error),
+        unavailable('network_received', null, NETWORK_UNIT, reason),
+        unavailable('network_sent', null, NETWORK_UNIT, reason),
       );
     }
     interfaces.names.forEach((name, position) => {
