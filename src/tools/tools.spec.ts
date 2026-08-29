@@ -2876,6 +2876,9 @@ describe('share_access', () => {
     enabled: true,
     comment: 'Films and music',
     readonly: false,
+    // The host rules live under `options`, whose other keys differ by what the
+    // share is for and are not read here.
+    options: { purpose: 'LEGACY_SHARE', hostsallow: ['10.0.0.5'], hostsdeny: ['ALL'] },
     ...over,
   });
 
@@ -3014,7 +3017,8 @@ describe('share_access', () => {
       path: '/mnt/tank/media',
       enabled: true,
       read_only: false,
-      // SMB has no export restrictions and no id mapping.
+      smb: { hosts_allow: ['10.0.0.5'], hosts_deny: ['ALL'] },
+      // An NFS export's restrictions and id mapping are a different protocol's.
       nfs: null,
       share_acl: shareAcl,
       share_acl_error: null,
@@ -3033,6 +3037,9 @@ describe('share_access', () => {
       path: '/mnt/tank/backups',
       enabled: true,
       read_only: false,
+      // An NFS export is not served by the SMB service, so it has no host
+      // rules of that kind rather than unread ones.
+      smb: null,
       nfs,
       // NFS has no share-level ACL, so neither half of that answer is present.
       share_acl: null,
@@ -3178,7 +3185,14 @@ describe('share_access', () => {
     const result = await answered(
       { share: 'media' },
       {
-        ['sharing.smb.query']: [smbShare({ future_field: 'added later' })],
+        ['sharing.smb.query']: [
+          smbShare({
+            future_field: 'added later',
+            // `options` is read key by key, so a later release adding one
+            // there must not reach the caller either.
+            options: { purpose: 'LEGACY_SHARE', hostsallow: [], future_field: 'added later' },
+          }),
+        ],
         ['filesystem.getacl']: aclOf({
           future_field: 'added later',
           acl: [ace({ future_field: 'added later' })],
@@ -3196,6 +3210,7 @@ describe('share_access', () => {
       'path',
       'enabled',
       'read_only',
+      'smb',
       'nfs',
       'share_acl',
       'share_acl_error',
@@ -3203,6 +3218,7 @@ describe('share_access', () => {
       'acl_error',
       'failures',
     ]);
+    expect(Object.keys(result['smb'] as object)).toEqual(['hosts_allow', 'hosts_deny']);
     expect(Object.keys((result['share_acl'] as object[])[0])).toEqual([
       'name',
       'id',
@@ -3395,6 +3411,57 @@ describe('share_access', () => {
       { ['sharing.nfs.query']: [nfsExport({ hosts: [42], networks: [''] })] },
     );
     expect(allDropped['nfs']).toMatchObject({ hosts: null, networks: null });
+  });
+
+  it('reports the host rules an SMB share carries, which run before both ACLs', async () => {
+    // A share whose ACLs grant everyone is still reached by nobody the SMB
+    // service turns away here, so an answer without these overstates access.
+    const result = await answered(
+      { share: 'media' },
+      {
+        ['sharing.smb.query']: [
+          smbShare({
+            options: {
+              purpose: 'LEGACY_SHARE',
+              hostsallow: ['10.0.0.0/24', 'trusted.example'],
+              hostsdeny: [],
+            },
+          }),
+        ],
+      },
+    );
+    expect(result['smb']).toEqual({
+      hosts_allow: ['10.0.0.0/24', 'trusted.example'],
+      // Empty is a rule the share does not have, and turns nobody away.
+      hosts_deny: [],
+    });
+  });
+
+  it('does not read an absent SMB host rule as a share that turns nobody away', async () => {
+    // The keys are optional, and every option shape but the legacy one omits
+    // them, so their absence is a rule this tool could not read rather than
+    // one the share does not have. `[]` would say the opposite.
+    for (const options of [undefined, null, 'DEFAULT_SHARE', { purpose: 'DEFAULT_SHARE' }]) {
+      const result = await answered(
+        { share: 'media' },
+        { ['sharing.smb.query']: [smbShare({ options })] },
+      );
+      expect(result['smb']).toEqual({ hosts_allow: null, hosts_deny: null });
+    }
+  });
+
+  it('reports an SMB host rule it could not read whole as null, never in part', async () => {
+    // Same reading as the NFS lists above: a rule reported in part is a
+    // different rule, and here a narrower one lets machines in.
+    const result = await answered(
+      { share: 'media' },
+      {
+        ['sharing.smb.query']: [
+          smbShare({ options: { hostsallow: ['10.0.0.5', 42], hostsdeny: 'ALL' } }),
+        ],
+      },
+    );
+    expect(result['smb']).toEqual({ hosts_allow: null, hosts_deny: null });
   });
 
   it('states why a share that serves no path here has no ACL', async () => {

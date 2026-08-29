@@ -96,6 +96,22 @@ interface NfsExport {
 }
 
 /**
+ * What an SMB share says about which machines may reach it, beyond its ACLs.
+ *
+ * The SMB service applies these before either ACL is consulted, so a share
+ * whose ACLs grant everyone can still be reachable by almost nobody. They live
+ * under the share's `options`, whose shape differs by what the share is for —
+ * the client's directory declares them on the legacy shape alone, while the
+ * middleware accepts them on the others — so `options` is read as an untyped
+ * record for the same reason an ACL entry is: a key one variant lacks would
+ * need narrowing that the row itself is what decides.
+ */
+interface SmbShare {
+  hosts_allow: string[] | null;
+  hosts_deny: string[] | null;
+}
+
+/**
  * One share, with everything the share record itself says about reaching it.
  *
  * Both tools in this family read the same two queries, so this is what those
@@ -107,22 +123,23 @@ interface AccessTarget {
   share: Share;
   /** Read-only however the ACL reads, or null where the switch was not readable. */
   readOnly: boolean | null;
+  smb: SmbShare | null;
   nfs: NfsExport | null;
 }
 
 /**
- * An NFS export's host or network restriction list.
+ * One host, network or address-pattern restriction list, on either protocol.
  *
- * Only a list the export actually carries is reported. `[]` says the export
- * restricts nothing of that kind and ANY machine may mount it, which is the
+ * Only a list the share actually carries is reported. `[]` says the share
+ * restricts nothing of that kind and ANY machine may reach it, which is the
  * strongest claim this function makes — so it is made only where the system
  * sent an empty list and said so. An absent field is not that: the field is
- * optional on the client's own type, so its absence is a middleware that did
- * not report the restriction rather than an export that has none, and reading
+ * optional on the client's own types, so its absence is a middleware that did
+ * not report the restriction rather than a share that has none, and reading
  * the two as one would fail open in the direction that matters here.
  *
  * The list is also reported whole or not at all: dropping the entries that
- * could not be read would answer with a narrower restriction than the export
+ * could not be read would answer with a narrower restriction than the share
  * carries, and dropping all of them would answer `[]`, which again means the
  * opposite.
  */
@@ -132,6 +149,23 @@ function restrictionList(value: unknown): string[] | null {
     (item): item is string => typeof item === 'string' && item.length > 0,
   );
   return restrictions.length === value.length ? restrictions : null;
+}
+
+/**
+ * The host rules on an SMB share, read out of its `options`.
+ *
+ * A share whose options could not be read reports both lists null, which by
+ * the rule above is "no list this tool could read" rather than a share that
+ * restricts nothing — the same reading an absent field gets, and the only one
+ * that does not turn an unread gate into an open one.
+ */
+function smbHostRules(options: unknown): SmbShare {
+  const record =
+    options !== null && typeof options === 'object' ? (options as Record<string, unknown>) : {};
+  return {
+    hosts_allow: restrictionList(record['hostsallow']),
+    hosts_deny: restrictionList(record['hostsdeny']),
+  };
 }
 
 /** Every SMB share the system holds. */
@@ -157,12 +191,16 @@ async function smbTargets(system: SystemHandle): Promise<AccessTarget[]> {
       comment: textOrNull(share.comment),
     },
     readOnly: share.readonly ?? null,
-    // Null rather than an empty set: nothing in this shape has an NFS
-    // counterpart. The share row the targeted surface returns
-    // (`SharingSMBEntry$2`) carries no host or network restriction and no id
-    // mapping at all — older TrueNAS releases had `hostsallow`/`hostsdeny` on
-    // the SMB share, and the client's directory for this version does not, so
-    // there is no field here to drop rather than a field being ignored.
+    // `options` is where the SMB share's host rules moved: the row the client
+    // returns declares `hostsallow`/`hostsdeny` on the legacy option shape, and
+    // the middleware takes them on the others too, so they are read from the
+    // object whatever the share is for rather than only where a type says to
+    // expect them. Naming `options` here is what makes a rename of that field a
+    // compile error; the keys inside it differ by variant and are read as data.
+    smb: smbHostRules(share.options),
+    // Null rather than an empty set: an NFS export's restrictions and id
+    // mapping are a different protocol's record, and there is nothing on an SMB
+    // share to fill them with.
     nfs: null,
   }));
 }
@@ -185,6 +223,9 @@ async function nfsTargets(system: SystemHandle): Promise<AccessTarget[]> {
       comment: textOrNull(share.comment),
     },
     readOnly: share.ro ?? null,
+    // An NFS export is not served by the SMB service, so it has no host rules
+    // of that kind rather than unread ones.
+    smb: null,
     nfs: {
       hosts: restrictionList(share.hosts),
       networks: restrictionList(share.networks),
@@ -287,17 +328,20 @@ export const sharesList: ReadOnlyTool = {
  * Who may reach one share, and with what rights.
  *
  * `shares_list` says what is shared and from where. This says who can get at
- * it, and the answer is in two different places depending on the protocol —
- * neither of them the share record on its own:
+ * it, and the answer is in several places depending on the protocol — none of
+ * them the share record on its own:
  *
- *     SMB   the filesystem ACL on the shared path, which is what decides what
- *           each user may do once a client has connected
+ *     SMB   the share's own host rules, which decide which MACHINES may
+ *           connect; the share-level ACL, a second gate on who may; and the
+ *           filesystem ACL on the shared path, which is what decides what each
+ *           user may do once a client has connected
  *     NFS   the export's own host and network restrictions, which decide which
  *           MACHINES may mount it at all, and then that same filesystem ACL,
  *           which decides what the ids arriving over the mount may do
  *
- * So the ACL is read for both and the restrictions are read for NFS, and
- * neither half is presented as the whole answer.
+ * So the filesystem ACL is read for both, the share-level ACL and host rules
+ * for SMB, and the restrictions for NFS. No half is presented as the whole
+ * answer: access is the narrowest of all of them.
  */
 
 /** Which share the caller asked about. */
@@ -673,7 +717,18 @@ export const shareAccess: ReadOnlyTool = {
     '`read_only` true CAPS EVERY WRITE PERMISSION reported anywhere below — the ' +
     'share or export is served read-only whatever its ACLs say — and null is a ' +
     'switch the system reported no value for, which is not the same as false. ' +
-    '`nfs` is the export record\'s own say in who may reach it, and is null on ' +
+    '`smb` is the SMB share record\'s own say in WHICH MACHINES may reach it, ' +
+    'applied by the SMB service before either ACL below is consulted, and is ' +
+    'null on an NFS export, which is not served by that service. Within it, ' +
+    '`hosts_allow` and `hosts_deny` are the share\'s host patterns — names, ' +
+    'addresses or subnets — and where both name a machine the SMB service lets ' +
+    'it in, `hosts_allow` being the one it applies first. AN EMPTY LIST MEANS ' +
+    'NO RULE OF THAT KIND, so two empty lists mean no machine is turned away ' +
+    'here. Null is not that: it means the system reported no list this tool ' +
+    'could read — the field absent, the share\'s `options` absent, or a list ' +
+    'holding something that is not a host pattern — and it is NOT evidence ' +
+    'that the share is unrestricted. `nfs` is the export record\'s own say in ' +
+    'who may reach it, and is null on ' +
     'an SMB share, where the protocol has none of it. Within it, `hosts` and ' +
     '`networks` are which machines may mount the export at all. AN EMPTY LIST ' +
     'MEANS UNRESTRICTED — an empty `hosts` and an empty `networks` together ' +
@@ -820,6 +875,7 @@ export const shareAccess: ReadOnlyTool = {
       path: target.share.path,
       enabled: target.share.enabled,
       read_only: target.readOnly,
+      smb: target.smb,
       nfs: target.nfs,
       share_acl: shareAcl.entries,
       share_acl_error: shareAcl.error,
