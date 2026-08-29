@@ -399,9 +399,12 @@ export const directoryServicesStatus: ReadOnlyTool = {
     'directory service is the ordinary case and is not a failure. `status` is ' +
     'the live state of the join, one of `HEALTHY` (joined and working), ' +
     '`FAULTED` (configured and NOT working), `JOINING` or `LEAVING` (a join or ' +
-    'a departure is in progress), and `DISABLED` (configured but switched ' +
-    'off); it is null where the system reported no state, WHICH IS NOT THE ' +
-    'SAME AS HEALTHY. So "no directory service" is `service_type` null, and ' +
+    'a departure is in progress), and `DISABLED` (no directory service is in ' +
+    'effect, which is what a system with none configured reports as well as ' +
+    'one that is configured and switched off — `service_type` is what tells ' +
+    'those two apart); it is null where the system reported no state, WHICH ' +
+    'IS NOT THE SAME AS HEALTHY. So "no directory service" is `service_type` ' +
+    'null, and ' +
     '"a directory service that is not working" is `service_type` set with ' +
     '`status` `FAULTED` — the two never have to be told apart by reading ' +
     'prose. `status_message` is what the system said about that state, which ' +
