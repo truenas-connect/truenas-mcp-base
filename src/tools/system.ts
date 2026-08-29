@@ -451,7 +451,13 @@ export const auditLogQuery: ReadOnlyTool = {
     '`since` bounds the result to entries recorded at or after an ISO 8601 ' +
     'instant; omitted, THE LAST 24 HOURS, so an empty result means nothing ' +
     'matched inside that window rather than that the system has never recorded ' +
-    'the action in question. Pass `since` to look further back. `user` and ' +
+    'the action in question. An entry whose own timestamp could not be read is ' +
+    'returned under any window, because nothing places it outside one. `since` ' +
+    'NARROWS WHAT CAME BACK RATHER THAN REACHING PAST IT: the system is asked ' +
+    'for its most recent entries and the window is applied to those, so on a ' +
+    'system busy enough to fill the bound inside an hour, an older `since` ' +
+    'returns the same recent entries and says `truncated`. Narrow with `user` ' +
+    'or `service` to see further back than the bound reaches. `user` and ' +
     '`service` narrow it to one account or one trail, matched exactly, and an ' +
     'entry whose own `user` or `service` could not be read is NOT returned ' +
     'when the matching argument is given — it has not been shown to be that ' +
