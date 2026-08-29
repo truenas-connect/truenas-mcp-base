@@ -451,7 +451,7 @@ interface CertificateRead {
   expired: number;
   expiring_soon: number;
   expiry_unknown: number;
-  /** Every certificate that is not comfortably valid, in the order reported. */
+  /** Every certificate that is not comfortably valid, worst first — see {@link certificateRank}. */
   notable: CertificateEntry[];
 }
 
@@ -485,6 +485,29 @@ function certificateState(
   return days <= EXPIRY_HORIZON_DAYS ? 'expiring_soon' : 'valid';
 }
 
+/**
+ * Where a certificate sorts. Already expired first, then one whose expiry this
+ * report could not read, then one expiring inside the horizon.
+ *
+ * The same job {@link exposureRank} does for shares: the ordering is what makes
+ * the cap below honest, so what survives it is the worst of what was found
+ * rather than whichever ones the system happened to list first. An already
+ * lapsed certificate takes the web UI and every API client down now, where one
+ * expiring soon has not broken anything yet; an expiry that would not read sorts
+ * between them for the reason it is counted separately — it is not shown to be
+ * fine, and it is the one an auditor most wants to look at by hand.
+ *
+ * It ranks off {@link certificateState} rather than off the fields directly, so
+ * the order of the list and the counts beside it can never disagree about where
+ * a certificate stands — including where the system's own `expired` verdict
+ * contradicts the day count, which that function settles and this one inherits.
+ */
+function certificateRank(entry: CertificateEntry): number {
+  const state = certificateState(entry.days_until_expiry, entry.expired);
+  if (state === 'expired') return 0;
+  return state === 'unknown' ? 1 : 2;
+}
+
 /** What `certificates_list` reported, read back through this report's guards. */
 function certificateRead(answer: unknown): CertificateRead {
   const rows = (answer as Record<string, unknown>[]).map((row) => ({
@@ -513,6 +536,11 @@ function certificateRead(answer: unknown): CertificateRead {
     else read.expiry_unknown += 1;
     read.notable.push(row);
   }
+  // Sorted after the walk rather than during it, so the counts are taken over
+  // every certificate in the order the system reported them and only the list
+  // is reordered. `sort` is stable, so certificates at the same rank keep that
+  // order.
+  read.notable.sort((a, b) => certificateRank(a) - certificateRank(b));
   return read;
 }
 
@@ -972,7 +1000,11 @@ export const fleetComplianceReport: ReadOnlyTool = {
     'taken from; it is fixed rather than an argument, so that one system\'s ' +
     'report can be compared with another\'s. `entries` lists the certificates ' +
     'in those three ' +
-    'categories individually and lists no comfortably-valid one, each with its ' +
+    'categories individually and lists no comfortably-valid one, ALREADY-' +
+    'EXPIRED ONES FIRST, THEN THOSE WHOSE EXPIRY COULD NOT BE READ, THEN THOSE ' +
+    'EXPIRING SOON, so that what survives truncation is the worst of what was ' +
+    'found; certificates in the same category keep the order the system listed ' +
+    'them in, which is not an ordering by date. Each entry carries its ' +
     '`name`, `common_name`, `not_after` exactly as the system formatted it, ' +
     '`days_until_expiry` — negative where it has already expired, by that many ' +
     'days — and `expired`, WHICH IS THE SYSTEM\'S OWN VERDICT and can disagree ' +
