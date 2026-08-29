@@ -1,6 +1,7 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+import { effectiveLimit, errorText, numberOrNull, textOrNull } from '@/tools/common';
 
 /**
  * Accounts family: who has an account on this system, what each belongs to, and
@@ -76,53 +77,12 @@ interface Attempt {
 }
 
 /**
- * One string field of a row, or null where the system reported no value.
- *
- * An empty string is read as no value rather than as text of no characters: an
- * account with no full name set is what the middleware sends `""` for, and
- * passing that through would put a field in the result that says nothing.
- *
- * `shares.ts`, `tasks.ts` and `block.ts` each hold the same reading under their
- * own names, and this restates rather than shares it for the reason `shares.ts`
- * gives for restating its own guards: a tool file is read on its own.
+ * `textOrNull` reads the account's full name, which the middleware sends as
+ * `""` when it is unset; `numberOrNull` reads the primary group's id, which the
+ * account record embeds as `Record<string, unknown>` so every field of it
+ * arrives as `unknown`. Both come from `common.ts`, as does `errorText` for the
+ * group read below.
  */
-function textOrNull(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
-}
-
-/**
- * A number the system reported, or null where it reported anything else.
- *
- * Needed only for the primary group, which the account record embeds as
- * `Record<string, unknown>` on the pinned client: every field of it arrives as
- * `unknown` and has to be read rather than trusted. Non-finite is not a number
- * here — a group id that is `NaN` resolves against nothing.
- */
-function numberOrNull(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-/** What a failure carrying no text of its own is reported as. */
-const NO_REASON = 'the system reported no reason';
-
-/**
- * Why the group read failed, in words.
- *
- * A rejection is not necessarily an `Error` — the client rejects with whatever
- * the transport gave it — so a bare string is read too, and so are the two
- * shapes the client documents as its own: a JSON-RPC error object carrying
- * `message`, and a middleware error object carrying `reason`. Anything else
- * still becomes a stated absence rather than `"[object Object]"`, and the
- * result is never empty: a failure with no text still has to read as a failure.
- */
-function errorText(reason: unknown): string {
-  if (reason instanceof Error) return textOrNull(reason.message) ?? NO_REASON;
-  if (typeof reason === 'object' && reason !== null) {
-    const carrier = reason as Record<string, unknown>;
-    return textOrNull(carrier['reason']) ?? textOrNull(carrier['message']) ?? NO_REASON;
-  }
-  return textOrNull(reason) ?? NO_REASON;
-}
 
 /**
  * The groups the system knows, with a failure named rather than thrown.
@@ -203,19 +163,16 @@ function primaryGroup(
 }
 
 /**
- * The bound actually applied, from whatever the caller asked for.
+ * The bound this family applies, from whatever the caller asked for.
  *
  * Lenient rather than strict, as `snapshots_list` is about its own limit: a
  * misread bound only changes how many of the right rows come back, and the
  * number applied is returned beside them, so a caller can see that its argument
- * was not taken.
+ * was not taken. The bounding is `common.ts`'s; the two numbers are this
+ * family's.
  */
-function effectiveLimit(raw: unknown): number {
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) return DEFAULT_LIMIT;
-  // Rounded down because a fractional limit reaches the middleware as one, and
-  // floored at 1 because a limit of zero or less would return nothing while
-  // reporting the system as holding more — true, and not an answer.
-  return Math.min(MAX_LIMIT, Math.max(1, Math.floor(raw)));
+function accountLimit(raw: unknown): number {
+  return effectiveLimit(raw, DEFAULT_LIMIT, MAX_LIMIT);
 }
 
 export const usersList: ReadOnlyTool = {
@@ -289,7 +246,7 @@ export const usersList: ReadOnlyTool = {
   requiredRole: Role.ReadOnly,
   mutating: false,
   async handler({ system }, args) {
-    const limit = effectiveLimit(args['limit']);
+    const limit = accountLimit(args['limit']);
     // Both reads are issued before either is awaited, so neither waits on the
     // other. Only the account read may fail the tool: the groups are what the
     // memberships resolve against, and with no accounts there is nothing for

@@ -34,6 +34,7 @@ src/registry/         SystemRegistry, connectSystems, the client factory
 src/execution/        the executor, fan-out, and plan/confirm
 src/content/          bounded file content (see the decision below)
 src/tools/            one file per family; all registered by createDefaultCatalog()
+src/tools/common.ts   the guards every family shares; not a family, not exported
 src/index.ts          the public barrel — an export here is a contract
 ```
 
@@ -182,6 +183,40 @@ re-judges nothing: no threshold, band or severity is read a second time, because
 a rollup that scored health its own way would be the drifting second opinion
 composites exist to prevent. **Summarise by dropping fields, never by
 recomputing them**, and point the caller at the composed tool for the detail.
+
+### The shared guards live in `src/tools/common.ts` (#86)
+
+Every tool file reads middleware payloads whose fields arrive as `unknown`, so
+each needed the same narrowings — `textOrNull`, `numberOrNull`, `booleanOrNull`,
+`recordOrNull`, `textList` — and the same reading of a rejection, `errorText`.
+Each file grew a private copy, on the stated ground that a tool file is read on
+its own. Eleven copies of `textOrNull` later, they had not all stayed identical:
+`shares.ts`'s `errorText` had lost the branch that reads the `{ reason }` and
+`{ message }` carriers the client documents, so a real middleware rejection
+there reported as having said nothing while every sibling reported its reason.
+**That is the cost this file was cut to stop — a fix applied to one copy is not
+a fix applied to the rest, and nothing makes the divergence visible.**
+
+Where the line falls, since "shared" is not the same as "generic":
+
+- **What belongs there says the same thing for every family** — a type
+  narrowing, the wording of a stated absence, the `Date` bound.
+- **What does not is anything whose meaning is a family's own**: a limit's
+  default, a state vocabulary, a field name. `effectiveLimit` is shared and
+  takes its two bounds as arguments precisely because the bounding is common
+  and the numbers are not.
+- **A per-family `Attempt`/`attempt` pair is NOT this.** Four files hold one and
+  they look alike, but each is typed by its own failure shape and names its own
+  sources — the overlap is the shape, not the function. Sharing it would mean
+  generalising over the failure type, which buys nothing and couples five
+  families to one signature.
+- **`common.ts` is internal.** It is not a family, `createDefaultCatalog()` does
+  not know about it, and it must not reach `src/index.ts` — an export there is
+  a contract, and none of this is one.
+
+Reaching for a private copy of something already in `common.ts` is the thing to
+notice in review. The comment that used to justify each copy — *a tool file is
+read on its own* — is what produced the drift, and is no longer the rule.
 
 ## Conventions
 

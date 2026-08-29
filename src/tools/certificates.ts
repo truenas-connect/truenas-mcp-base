@@ -1,6 +1,7 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool } from '@/catalog/tool';
+import { textList, textOrNull } from '@/tools/common';
 
 /**
  * Certificates family: which certificates this system holds, and when each one
@@ -26,35 +27,12 @@ import { ReadOnlyTool } from '@/catalog/tool';
  */
 
 /**
- * One string field of a row, or null where the system reported no value.
- *
- * An empty string is read as no value rather than as text of no characters: the
- * middleware sends `""` for a subject component a certificate does not carry,
- * and passing it through would put a field in the result that says nothing.
- *
- * `network.ts`, `accounts.ts`, `shares.ts`, `tasks.ts` and `block.ts` each hold
- * this same reading under their own names, and it is restated here for the
- * reason those files give for restating it: a tool file is read on its own.
+ * Two guards come from `common.ts` and both matter here. `textOrNull` reads the
+ * subject components, which the middleware sends as `""` where a certificate
+ * does not carry them. `textList` keeps an empty SAN list distinct from a
+ * missing one: a certificate that reported an empty list carries no alternative
+ * name, and one that reported no list said nothing about them.
  */
-function textOrNull(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
-}
-
-/**
- * The non-empty strings of a list field, or null where the field was not a list
- * at all.
- *
- * The two are kept apart for the reason `network.ts` keeps them apart: a
- * certificate that reported an empty SAN list carries no alternative name, and
- * one that reported no list said nothing about them.
- */
-function textList(value: unknown): string[] | null {
-  if (!Array.isArray(value)) return null;
-  return value.flatMap((entry) => {
-    const text = textOrNull(entry);
-    return text === null ? [] : [text];
-  });
-}
 
 /** Month names in the order the C `asctime` format abbreviates them. */
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];

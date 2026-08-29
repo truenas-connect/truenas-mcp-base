@@ -1,6 +1,7 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool } from '@/catalog/tool';
+import { booleanOrNull, errorText, recordOrNull, textOrNull } from '@/tools/common';
 
 /**
  * The system's own health verdict. `system_info` and the storage tools describe
@@ -72,63 +73,17 @@ export const alertsList: ReadOnlyTool = {
  */
 
 /**
- * One string field of a row, or null where the system reported no value.
- *
- * An empty string is read as no value rather than as text of no characters, the
- * same reading `credentials.ts`, `network.ts`, `block.ts` and `shares.ts` each
- * hold under their own names — and restated here for the reason those files
- * give for restating it: a tool file is read on its own.
- */
-function textOrNull(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
-}
-
-/** A boolean the system reported, or null where it reported anything else. */
-function booleanOrNull(value: unknown): boolean | null {
-  return typeof value === 'boolean' ? value : null;
-}
-
-/**
- * A nested object of a row, or null where the row held anything else.
- *
- * `typeof null` is `'object'`, so the null check is what stops a reported-as-null
- * `attributes` being indexed. An array is an object too and is excluded: the two
- * things read through this — a destination's `attributes` and the per-class
+ * `recordOrNull` from `common.ts` is what stops a reported-as-null `attributes`
+ * being indexed, and what keeps a list from being read as a record: the two
+ * things read through it here — a destination's `attributes` and the per-class
  * settings map — are records, and reading a list as one would answer null for
  * every field rather than saying the shape was not what this tool reads.
  */
-function recordOrNull(value: unknown): Record<string, unknown> | null {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-  return value as Record<string, unknown>;
-}
 
 /** The one supplementary read of this tool, named for the field it fills. */
 interface SettingsFailure {
   source: 'class_overrides';
   error: string;
-}
-
-/** What a failure carrying no text of its own is reported as. */
-const NO_REASON = 'the system reported no reason';
-
-/**
- * Why a read failed, in words.
- *
- * A rejection is not necessarily an `Error` — the client rejects with whatever
- * the transport gave it — so a bare string is read too, and so are the two
- * shapes the client documents as its own: a JSON-RPC error object carrying
- * `message`, and a middleware error object carrying `reason`. `block.ts`,
- * `network.ts` and `shares.ts` each hold this same reading under their own
- * names. The result is never empty, because a failure with no text still has to
- * read as a failure.
- */
-function errorText(reason: unknown): string {
-  if (reason instanceof Error) return textOrNull(reason.message) ?? NO_REASON;
-  if (typeof reason === 'object' && reason !== null) {
-    const carrier = reason as Record<string, unknown>;
-    return textOrNull(carrier['reason']) ?? textOrNull(carrier['message']) ?? NO_REASON;
-  }
-  return textOrNull(reason) ?? NO_REASON;
 }
 
 /** A read that produced a value, or the failure that stopped it. */

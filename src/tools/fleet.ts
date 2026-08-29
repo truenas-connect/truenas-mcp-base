@@ -8,6 +8,7 @@ import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
 // this one, so there is no cycle.
 import { directoryServicesStatus } from '@/tools/accounts';
 import { certificatesList } from '@/tools/certificates';
+import { booleanOrNull, errorText, numberOrNull, plural, textOrNull } from '@/tools/common';
 import { HEALTH_SECTIONS, systemHealthReport } from '@/tools/reporting';
 import { sharesList } from '@/tools/shares';
 import { auditLogQuery, updateStatus } from '@/tools/system';
@@ -18,43 +19,10 @@ import { auditLogQuery, updateStatus } from '@/tools/system';
  */
 
 /**
- * A string the system reported, or null where it reported anything else.
- *
- * An empty string is read as no value rather than as text of no characters: a
- * status of no characters names nothing a caller could act on, and passing it
- * through would put a field in the result that says nothing.
- *
- * `system.ts`, `accounts.ts`, `shares.ts` and `block.ts` each hold the same
- * reading under their own names, and this restates rather than shares it for the
- * reason `shares.ts` gives for restating its own guards: a tool file is read on
- * its own.
+ * `textOrNull` from `common.ts` reads the HA status below, where an empty
+ * string names nothing a caller could act on, and `errorText` names a read that
+ * did not complete — which for a composite is most of what it reports.
  */
-function textOrNull(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
-}
-
-/** What a failure carrying no text of its own is reported as. */
-const NO_REASON = 'the system reported no reason';
-
-/**
- * Why a read failed, in words.
- *
- * A rejection is not necessarily an `Error` — the client rejects with whatever
- * the transport gave it — so a bare string is read too, and so are the two
- * shapes the client documents as its own: a JSON-RPC error object carrying
- * `message`, and a middleware error object carrying `reason`. Anything else
- * still becomes a stated absence rather than `"[object Object]"`, and the
- * result is never empty: a failure with no text still has to read as a failure.
- * The same reading `system.ts` holds of a failed version read.
- */
-function errorText(reason: unknown): string {
-  if (reason instanceof Error) return textOrNull(reason.message) ?? NO_REASON;
-  if (typeof reason === 'object' && reason !== null) {
-    const carrier = reason as Record<string, unknown>;
-    return textOrNull(carrier['reason']) ?? textOrNull(carrier['message']) ?? NO_REASON;
-  }
-  return textOrNull(reason) ?? NO_REASON;
-}
 
 /**
  * The status a system reports when it is not one node of an HA pair.
@@ -305,20 +273,12 @@ const EXPIRY_HORIZON_DAYS = 30;
 /** The five sections of the report, each backed by exactly one composed tool. */
 type SectionName = 'auditing' | 'certificates' | 'directory_service' | 'shares' | 'updates';
 
-/** A boolean the system reported, or null where it reported anything else. */
-function booleanOrNull(value: unknown): boolean | null {
-  return typeof value === 'boolean' ? value : null;
-}
-
-/** A finite number the system reported, or null where it reported anything else. */
-function numberOrNull(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-/** `1 certificate` / `2 certificates`, so a detail reads as English at either count. */
-function plural(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? '' : 's'}`;
-}
+/**
+ * `booleanOrNull` and `numberOrNull` re-read the composed handlers' results,
+ * which arrive as `Promise<unknown>`; `plural` is what makes a detail read as
+ * English at either count (`1 certificate` / `2 certificates`). All three are
+ * `common.ts`'s.
+ */
 
 /** A section that was read, or the reason it could not be. */
 interface SectionRead<T> {

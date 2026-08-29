@@ -1,6 +1,7 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool } from '@/catalog/tool';
+import { errorText, numberOrNull, recordOrNull, textList, textOrNull } from '@/tools/common';
 
 /**
  * Networking family. Two tools split it by what is being asked about:
@@ -37,38 +38,13 @@ import { ReadOnlyTool } from '@/catalog/tool';
  */
 
 /**
- * One string field of a row, or null where the system reported no value.
- *
- * An empty string is read as no value rather than as text of no characters: a
- * media subtype the system has nothing to say about arrives as `""`, and
- * passing it through would put a field in the result that says nothing.
- *
- * `accounts.ts`, `shares.ts`, `tasks.ts` and `block.ts` each hold this same
- * reading under their own names, and it is restated here for the reason those
- * files give for restating their own guards: a tool file is read on its own.
+ * The pinned client answers `interface.query` as a bare record, so every field
+ * and every sub-object of one arrives as `unknown` and is read through
+ * `common.ts`'s guards. `recordOrNull` is what stops a reported-as-null `state`
+ * being indexed, and what keeps a list from being read as a record: `state` and
+ * a port entry are records, and reading a list as one would answer null for
+ * every field rather than saying the shape was not what this tool reads.
  */
-function textOrNull(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
-}
-
-/** A number the system reported, or null where it reported anything else. */
-function numberOrNull(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-/**
- * A nested object of a row, or null where the row held anything else.
- *
- * Every sub-object of an interface arrives as `unknown`, and `typeof null` is
- * `'object'`, so the null check is what stops a reported-as-null `state` being
- * indexed. An array is an object too and is excluded here: `state` and a port
- * entry are records, and reading a list as one would answer null for every
- * field rather than saying the shape was not what this tool reads.
- */
-function recordOrNull(value: unknown): Record<string, unknown> | null {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-  return value as Record<string, unknown>;
-}
 
 /** The entries of a list field, or an empty list where the field was not one. */
 function listOf(value: unknown): unknown[] {
@@ -404,30 +380,6 @@ interface ConfigFailure {
   error: string;
 }
 
-/** What a failure carrying no text of its own is reported as. */
-const NO_REASON = 'the system reported no reason';
-
-/**
- * Why a read failed, in words.
- *
- * A rejection is not necessarily an `Error` — the client rejects with whatever
- * the transport gave it — so a bare string is read too, and so are the two
- * shapes the client documents as its own: a JSON-RPC error object carrying
- * `message`, and a middleware error object carrying `reason`. `block.ts` and
- * `shares.ts` each hold this same reading under their own names, and it is
- * restated here for the reason those files give: a tool file is read on its
- * own. The result is never empty, because a failure with no text still has to
- * read as a failure.
- */
-function errorText(reason: unknown): string {
-  if (reason instanceof Error) return textOrNull(reason.message) ?? NO_REASON;
-  if (typeof reason === 'object' && reason !== null) {
-    const carrier = reason as Record<string, unknown>;
-    return textOrNull(carrier['reason']) ?? textOrNull(carrier['message']) ?? NO_REASON;
-  }
-  return textOrNull(reason) ?? NO_REASON;
-}
-
 /** A read that produced a value, or the failure that stopped it. */
 interface Attempt<T> {
   value: T | null;
@@ -453,22 +405,10 @@ async function attempt<T>(
 }
 
 /**
- * The non-empty strings of a list field, or null where the field was not a list
- * at all.
- *
- * The two are kept apart everywhere this is used: a system that reported an
- * empty search-domain list has none, and one that reported no list said
- * nothing. An entry that is not a string, or is the empty string the middleware
- * sends for "no value", names nothing and is dropped — the same reading
- * `textOrNull` holds above.
+ * `textList` from `common.ts` keeps the two apart everywhere it is used here: a
+ * system that reported an empty search-domain list has none, and one that
+ * reported no list said nothing.
  */
-function textList(value: unknown): string[] | null {
-  if (!Array.isArray(value)) return null;
-  return value.flatMap((entry) => {
-    const text = textOrNull(entry);
-    return text === null ? [] : [text];
-  });
-}
 
 /** Where a value in effect came from, as far as this tool can tell. */
 type ValueSource = 'STATIC' | 'AUTOMATIC';

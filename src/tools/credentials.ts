@@ -1,6 +1,7 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool } from '@/catalog/tool';
+import { textOrNull } from '@/tools/common';
 
 /**
  * Cloud credentials family: which stored cloud credentials this system holds,
@@ -30,19 +31,6 @@ import { ReadOnlyTool } from '@/catalog/tool';
  * releases before the one the pinned types describe, and is an object carrying
  * the configuration in this one.
  */
-
-/**
- * One string field of a row, or null where the system reported no value.
- *
- * An empty string is read as no value rather than as text of no characters, the
- * same reading `certificates.ts`, `network.ts`, `accounts.ts`, `shares.ts`,
- * `tasks.ts` and `block.ts` each hold under their own names — and restated here
- * for the reason those files give for restating it: a tool file is read on its
- * own.
- */
-function textOrNull(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
-}
 
 /**
  * The credential's numeric id, or null where the system reported none this
