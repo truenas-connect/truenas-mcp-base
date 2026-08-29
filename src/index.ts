@@ -110,5 +110,6 @@ export {
   reportingSpaceTrends,
   reportingAppVmUsage,
   haStatus,
+  systemHealthReport,
   createSnapshot,
 } from '@/tools/index';

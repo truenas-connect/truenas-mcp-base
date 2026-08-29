@@ -15,6 +15,7 @@ import {
   reportingDiskIo,
   reportingSpaceTrends,
   reportingUtilisation,
+  systemHealthReport,
 } from '@/tools/reporting';
 import { shareAccess, sharesList } from '@/tools/shares';
 import { createSnapshot, snapshotsList } from '@/tools/snapshots';
@@ -23,7 +24,7 @@ import { auditLogQuery, systemInfo, updateStatus } from '@/tools/system';
 import { cloudsyncTasksList, snapshotTasksList, tasksRecentRuns } from '@/tools/tasks';
 import { vmsList } from '@/tools/vms';
 
-/** The sketch's catalog: thirty-three read-only tools plus one mutating tool. */
+/** The sketch's catalog: thirty-four read-only tools plus one mutating tool. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -59,6 +60,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(reportingSpaceTrends);
   catalog.register(reportingAppVmUsage);
   catalog.register(haStatus);
+  catalog.register(systemHealthReport);
   catalog.register(createSnapshot);
   return catalog;
 }
@@ -93,6 +95,7 @@ export {
   sharesList,
   snapshotsList,
   snapshotTasksList,
+  systemHealthReport,
   systemInfo,
   tasksRecentRuns,
   updateStatus,

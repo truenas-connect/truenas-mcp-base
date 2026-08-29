@@ -91,6 +91,33 @@ connected to, which `client.connection.hostname$` reports; the configured
 `hostnames` list does not say which of them won a failover, and a download
 fetched from a host that did not mint the token fails.
 
+### A composite tool calls handlers, not the API (#44)
+
+`system_health_report` is the first tool that answers from other tools rather
+than from the middleware: it calls `poolStatus.handler`, `alertsList.handler`,
+`poolTopology.handler` and `updateStatus.handler` and adds no endpoint of its
+own. That is what keeps it from being a second, drifting opinion about what a
+pool's health *is* — there is one normalization per subject and composites read
+through it.
+
+Three things follow, and they are the shape any later composite should take:
+
+- **Every read is caught and its section says why it is empty.** A report that
+  throws because one subsystem is unreachable is useless exactly when it is
+  needed, so each section carries `unavailable`, and null in a section that
+  could not be read means "not read" rather than "nothing to report".
+- **Counts and findings are computed over everything; only the detail lists are
+  capped.** A cap can drop the line describing a finding; it must never drop the
+  finding. That is what makes a fixed-size response safe to act on.
+- **A verdict has a fourth value.** `OK` is the narrow claim that every section
+  was read and none raised anything; anything not established is `UNKNOWN`, not
+  `OK`. This is the null/empty/unreadable convention below, applied one level up
+  to a summary.
+
+A composed handler is typed `Promise<unknown>`, so a composite re-reads every
+field through its own guard and names it explicitly — which is also what keeps a
+field one of those tools grows later out of the composite's result.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
