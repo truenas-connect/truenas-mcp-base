@@ -246,8 +246,11 @@ export const certificatesList: ReadOnlyTool = {
     'and where they do, `expired` is what the system believes and ' +
     '`days_until_expiry` is what this tool computed from the date beside it. ' +
     '`expiring_within_days` restricts the result to certificates with that ' +
-    'many days or fewer left, and ALREADY-EXPIRED CERTIFICATES ARE ALWAYS ' +
-    'INCLUDED because their day count is negative and so below any threshold. ' +
+    'many days or fewer left. An already-expired certificate has a NEGATIVE ' +
+    'day count, so ANY THRESHOLD OF ZERO OR MORE INCLUDES IT, which is what ' +
+    'makes one call answer "what is about to break, and what already has". A ' +
+    'NEGATIVE THRESHOLD asks the narrower question instead — the certificates ' +
+    'that expired at least that many days ago — and returns only those. ' +
     'Omitted, every certificate is returned. A CERTIFICATE WHOSE EXPIRY COULD ' +
     'NOT BE READ IS NOT RETURNED WHEN THIS ARGUMENT IS GIVEN, since no ' +
     'threshold can be applied to it — call without the argument to see those. ' +
@@ -264,7 +267,8 @@ export const certificatesList: ReadOnlyTool = {
         type: 'number',
         description:
           'Only report certificates with this many days or fewer left before ' +
-          'they expire. Already-expired certificates are always included. ' +
+          'they expire. An already-expired certificate counts as a negative ' +
+          'number of days, so any threshold of zero or more includes it. ' +
           'Omitted, every certificate is reported.',
       },
     },
