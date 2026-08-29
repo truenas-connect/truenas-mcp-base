@@ -9,6 +9,7 @@ import { disksList } from '@/tools/disks';
 import { networkConfig, networkInterfaces } from '@/tools/network';
 import { poolTopology, scrubHistory } from '@/tools/pools';
 import { replicationStatus } from '@/tools/replication';
+import { reportingUtilisation } from '@/tools/reporting';
 import { shareAccess, sharesList } from '@/tools/shares';
 import { createSnapshot, snapshotsList } from '@/tools/snapshots';
 import { listDatasets, poolStatus, quotaReport } from '@/tools/storage';
@@ -16,7 +17,7 @@ import { auditLogQuery, systemInfo, updateStatus } from '@/tools/system';
 import { cloudsyncTasksList, snapshotTasksList, tasksRecentRuns } from '@/tools/tasks';
 import { vmsList } from '@/tools/vms';
 
-/** The sketch's catalog: twenty-eight read-only tools plus one mutating tool. */
+/** The sketch's catalog: twenty-nine read-only tools plus one mutating tool. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -47,6 +48,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(certificatesList);
   catalog.register(cloudCredentialsList);
   catalog.register(alertSettings);
+  catalog.register(reportingUtilisation);
   catalog.register(createSnapshot);
   return catalog;
 }
@@ -71,6 +73,7 @@ export {
   poolTopology,
   quotaReport,
   replicationStatus,
+  reportingUtilisation,
   scrubHistory,
   shareAccess,
   sharesList,

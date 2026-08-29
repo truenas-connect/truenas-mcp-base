@@ -88,5 +88,6 @@ export {
   networkConfig,
   certificatesList,
   cloudCredentialsList,
+  reportingUtilisation,
   createSnapshot,
 } from '@/tools/index';
