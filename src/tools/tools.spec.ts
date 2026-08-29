@@ -5,6 +5,7 @@ import { Role } from '@/interfaces';
 import {
   alertsList,
   appsList,
+  cloudsyncTasksList,
   createDefaultCatalog,
   createSnapshot,
   disksList,
@@ -37,7 +38,7 @@ function fakeSystem(responses: Partial<Record<string, unknown>>): {
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the thirteen sketch tools', () => {
+  it('registers the fourteen sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'storage_pool_status',
@@ -51,6 +52,7 @@ describe('createDefaultCatalog', () => {
       'snapshots_list',
       'replication_status',
       'snapshot_tasks_list',
+      'cloudsync_tasks_list',
       'snapshots_create',
     ]);
   });
@@ -100,6 +102,12 @@ describe('createDefaultCatalog', () => {
   it('advertises snapshot_tasks_list to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
       'snapshot_tasks_list',
+    );
+  });
+
+  it('advertises cloudsync_tasks_list to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'cloudsync_tasks_list',
     );
   });
 });
@@ -2028,5 +2036,268 @@ describe('snapshot_tasks_list', () => {
     ]) {
       expect(await described(shape)).toBeNull();
     }
+  });
+});
+
+describe('cloudsync_tasks_list', () => {
+  /**
+   * A cloud sync task as `cloudsync.query` reports one.
+   *
+   * `credentials` carries a `provider` because a real row does, and it is here
+   * to be dropped: it is where the access key lives, and the test that no
+   * secret survives is only worth anything if one was there to survive.
+   * `transfer_mode`, `snapshot`, `include`, `exclude`, `locked` and
+   * `pre_script` are here to be dropped too — fields of the real payload the
+   * tool does not name.
+   */
+  const task = (over: Record<string, unknown> = {}) => ({
+    id: 3,
+    description: 'Nightly offsite',
+    direction: 'PUSH',
+    path: '/mnt/tank/media',
+    attributes: { bucket: 'offsite-backups', folder: '/media', region: 'us-east-1' },
+    credentials: {
+      id: 7,
+      name: 'Backblaze B2',
+      provider: { type: 'B2', account: '00abc', key: 'SECRET-KEY-MATERIAL' },
+    },
+    enabled: true,
+    schedule: { minute: '0', hour: '2', dom: '*', month: '*', dow: '*' },
+    job: {
+      id: 91,
+      state: 'SUCCESS',
+      time_started: { $date: 1_700_000_000_000 },
+      time_finished: { $date: 1_700_000_600_000 },
+      error: null,
+    },
+    transfer_mode: 'SYNC',
+    snapshot: false,
+    include: [],
+    exclude: [],
+    locked: false,
+    pre_script: 'echo hello',
+    ...over,
+  });
+
+  const listed = async (rows: unknown[]): Promise<Record<string, unknown>[]> => {
+    const { ctx } = fakeSystem({ ['cloudsync.query']: rows });
+    return (await cloudsyncTasksList.handler(ctx, {})) as Record<string, unknown>[];
+  };
+
+  /** One task, differing only in the fields the case is about. */
+  const one = async (over: Record<string, unknown>): Promise<Record<string, unknown>> =>
+    (await listed([task(over)]))[0];
+
+  it('maps a task to its remote, credential, schedule and last run', async () => {
+    expect(await listed([task()])).toEqual([
+      {
+        id: 3,
+        description: 'Nightly offsite',
+        direction: 'PUSH',
+        path: '/mnt/tank/media',
+        bucket: 'offsite-backups',
+        folder: '/media',
+        credential_id: 7,
+        credential_name: 'Backblaze B2',
+        enabled: true,
+        schedule: { minute: '0', hour: '2', dom: '*', month: '*', dow: '*' },
+        schedule_description: 'at 02:00, every day',
+        state: 'SUCCESS',
+        finished_at: '2023-11-14T22:23:20.000Z',
+        error: null,
+      },
+    ]);
+  });
+
+  it('surfaces no field a later release adds, at either level', async () => {
+    const rows = await listed([
+      task({
+        future_field: 'added by a later TrueNAS release',
+        schedule: { minute: '0', hour: '2', dom: '*', month: '*', dow: '*', timezone: 'UTC' },
+      }),
+    ]);
+    expect(Object.keys(rows[0])).toEqual([
+      'id',
+      'description',
+      'direction',
+      'path',
+      'bucket',
+      'folder',
+      'credential_id',
+      'credential_name',
+      'enabled',
+      'schedule',
+      'schedule_description',
+      'state',
+      'finished_at',
+      'error',
+    ]);
+    // No daily window: a cloud sync schedule carries none, and reporting two
+    // permanently null fields would say it does.
+    expect(Object.keys(rows[0]['schedule'] as object)).toEqual([
+      'minute',
+      'hour',
+      'dom',
+      'month',
+      'dow',
+    ]);
+  });
+
+  it('never lets key material out, whatever the credential carries', async () => {
+    const rows = await listed([task()]);
+    expect(JSON.stringify(rows)).not.toContain('SECRET-KEY-MATERIAL');
+    expect(JSON.stringify(rows)).not.toContain('provider');
+    // The credential is still identified — dropping the secret must not cost
+    // the caller the ability to say which credential a task uses.
+    expect(rows[0]['credential_id']).toBe(7);
+    expect(rows[0]['credential_name']).toBe('Backblaze B2');
+  });
+
+  it('reads an id-only credential, and reports one it cannot read as null', async () => {
+    expect((await one({ credentials: 11 }))['credential_id']).toBe(11);
+    // Named on an id-only credential is nothing this tool can invent.
+    expect((await one({ credentials: 11 }))['credential_name']).toBeNull();
+    for (const unreadable of [undefined, null, 'B2', Number.NaN, {}]) {
+      const row = await one({ credentials: unreadable });
+      expect(row['credential_id']).toBeNull();
+      expect(row['credential_name']).toBeNull();
+    }
+  });
+
+  it('asks for every task, with no filters and no options', async () => {
+    const { ctx, query } = fakeSystem({ ['cloudsync.query']: [task()] });
+    await cloudsyncTasksList.handler(ctx, {});
+    expect(query).toHaveBeenCalledWith('cloudsync.query');
+  });
+
+  it('returns [] for a system with no cloud sync tasks', async () => {
+    expect(await listed([])).toEqual([]);
+  });
+
+  it('lists a disabled task, and reports a switch it cannot read as null', async () => {
+    // A task that exists and is off is the case worth surfacing: the offsite
+    // copy stops either way, and only one of the two announces itself.
+    expect((await one({ enabled: false }))['enabled']).toBe(false);
+    expect((await one({ enabled: undefined }))['enabled']).toBeNull();
+  });
+
+  it('reports a description it cannot read as null', async () => {
+    for (const unreadable of [undefined, '', 42, null]) {
+      expect((await one({ description: unreadable }))['description']).toBeNull();
+    }
+  });
+
+  it('names the remote end, and reports either part it cannot read as null', async () => {
+    // A provider with no buckets — SFTP, WebDAV — carries a folder alone.
+    const sftp = await one({ attributes: { folder: '/backups' } });
+    expect(sftp['bucket']).toBeNull();
+    expect(sftp['folder']).toBe('/backups');
+    for (const unreadable of [undefined, null, 'offsite-backups', 42]) {
+      const row = await one({ attributes: unreadable });
+      expect(row['bucket']).toBeNull();
+      expect(row['folder']).toBeNull();
+    }
+  });
+
+  it('reports a schedule it cannot read at all as null, with no words for it', async () => {
+    for (const unreadable of [undefined, null, '0 2 * * *', 42]) {
+      const row = await one({ schedule: unreadable });
+      expect(row['schedule']).toBeNull();
+      expect(row['schedule_description']).toBeNull();
+    }
+  });
+
+  it('reports a cron field it cannot read as null, and renders no words then', async () => {
+    const row = await one({ schedule: { minute: '', hour: 2, dom: '*', dow: null } });
+    expect(row['schedule']).toEqual({
+      minute: null,
+      hour: null,
+      dom: '*',
+      month: null,
+      dow: null,
+    });
+    expect(row['schedule_description']).toBeNull();
+  });
+
+  it('renders a schedule in words without a window to name', async () => {
+    // The same renderer as a periodic snapshot task, which reaches it with a
+    // window; a cloud sync schedule reaches it with none and reads the same.
+    expect(
+      (await one({ schedule: { minute: '15', hour: '*/4', dom: '*', month: '*', dow: '1,4' } }))[
+        'schedule_description'
+      ],
+    ).toBe('every 4 hours at :15, on Monday and Thursday');
+  });
+
+  it('separates a task that has never run from one it cannot read', async () => {
+    // `job: null` is the middleware saying there is no run record, which is
+    // what this tool exists to keep apart from a failure.
+    const never = await one({ job: null });
+    expect(never['state']).toBe('NEVER_RUN');
+    expect(never['finished_at']).toBeNull();
+    expect(never['error']).toBeNull();
+    // Null is not that: a record in a shape this tool could not read, or one
+    // naming no state. Neither has been shown to be working.
+    for (const unreadable of [undefined, 42, 'SUCCESS', {}, { state: '' }, { state: 7 }]) {
+      const row = await one({ job: unreadable });
+      expect(row['state']).toBeNull();
+      expect(row['finished_at']).toBeNull();
+    }
+  });
+
+  it('passes a state through as the system spelled it', async () => {
+    for (const state of ['FAILED', 'RUNNING', 'WAITING', 'ABORTED', 'A_LATER_RELEASE_STATE']) {
+      expect((await one({ job: { state } }))['state']).toBe(state);
+    }
+  });
+
+  it('reports a finish time only for a run that ended', async () => {
+    const at = { $date: 1_700_000_600_000 };
+    for (const state of ['SUCCESS', 'FINISHED', 'FAILED', 'ERROR', 'ABORTED']) {
+      expect((await one({ job: { state, time_finished: at } }))['finished_at']).toBe(
+        '2023-11-14T22:23:20.000Z',
+      );
+    }
+    // The system holds one job record per task, so while a run is going the
+    // time in it belongs to the run before — naming it as this run's finish
+    // would state a real timestamp as something it is not.
+    for (const state of ['RUNNING', 'WAITING', 'PENDING', 'HOLD', 'LOCKED']) {
+      expect((await one({ job: { state, time_finished: at } }))['finished_at']).toBeNull();
+    }
+  });
+
+  it('reads a bare epoch beside the $date envelope, and nothing else', async () => {
+    const finishedAt = async (time_finished: unknown): Promise<unknown> =>
+      (await one({ job: { state: 'SUCCESS', time_finished } }))['finished_at'];
+    // The envelope exists only to tag a number as a date in transit.
+    expect(await finishedAt(1_700_000_600_000)).toBe('2023-11-14T22:23:20.000Z');
+    for (const unreadable of [
+      undefined,
+      null,
+      // A formatted string is not guessed at: guessing wrong about a timezone
+      // produces a timestamp confidently off by hours.
+      '2023-11-14T22:23:20Z',
+      { $date: '1700000600000' },
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      // Beyond what a Date can hold, where `toISOString` throws rather than
+      // answering — one absurd time must not take the whole listing down.
+      8.64e15 + 1,
+      -(8.64e15 + 1),
+    ]) {
+      expect(await finishedAt(unreadable)).toBeNull();
+    }
+  });
+
+  it('carries the reason a run failed, and reports no reason as null', async () => {
+    expect((await one({ job: { state: 'FAILED', error: 'rclone exited 1' } }))['error']).toBe(
+      'rclone exited 1',
+    );
+    // A task in FAILED with a null error failed for a reason the system did
+    // not record; it has not succeeded.
+    for (const unreadable of [undefined, null, '', 42]) {
+      expect((await one({ job: { state: 'FAILED', error: unreadable } }))['error']).toBeNull();
+    }
+    expect((await one({ job: null }))['error']).toBeNull();
   });
 });

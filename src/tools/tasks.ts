@@ -6,11 +6,16 @@ import { ReadOnlyTool } from '@/catalog/tool';
  * Tasks family: the work a system does to itself on a schedule, with nobody
  * asking.
  *
- * `snapshots_list` says what protection exists; this says what protection is
- * automatic. The two are not visible in each other: a dataset with a month of
- * snapshots and no periodic task is protected up to the last manual action and
- * no further, and a snapshot taken by hand looks exactly like one a schedule
- * took. The task is the only place the difference is recorded.
+ * `snapshots_list` says what protection exists; `snapshot_tasks_list` says what
+ * protection is automatic. The two are not visible in each other: a dataset
+ * with a month of snapshots and no periodic task is protected up to the last
+ * manual action and no further, and a snapshot taken by hand looks exactly like
+ * one a schedule took. The task is the only place the difference is recorded.
+ *
+ * `cloudsync_tasks_list` is the same argument one step further out. A snapshot
+ * is on the same hardware as what it protects, so the copy that survives losing
+ * the system is the one a cloud sync task made — and a task that stopped
+ * succeeding announces itself nowhere until someone needs the copy.
  */
 
 /**
@@ -31,16 +36,28 @@ interface Cron {
   end?: unknown;
 }
 
-/** The seven cron fields as this tool reports them: a string, or null. */
-interface Schedule {
+/** The five cron fields every scheduled task carries: a string, or null. */
+interface CronFields {
   minute: string | null;
   hour: string | null;
   dom: string | null;
   month: string | null;
   dow: string | null;
+}
+
+/**
+ * The daily window a periodic snapshot task carries and a cloud sync task does
+ * not — the client types the latter's schedule as the five cron fields alone.
+ * Kept separate so the difference between the two is in the types rather than
+ * in two null fields a cloud sync task would report on every call.
+ */
+interface DailyWindow {
   begin: string | null;
   end: string | null;
 }
+
+/** The seven cron fields a periodic snapshot task reports. */
+type Schedule = CronFields & DailyWindow;
 
 /**
  * The daily window a task carries when nothing restricts it. Rendering it into
@@ -209,8 +226,11 @@ function windowPhrase(begin: string | null, end: string | null): string {
  * with it, and one it can decode wrongly without anything saying so. This is
  * the same schedule stated so that restating it is reading rather than
  * decoding — and null wherever that cannot be done exactly.
+ *
+ * The window is optional because a cloud sync task has none, and a schedule
+ * without one is rendered exactly as one whose window restricts nothing.
  */
-function describeSchedule(schedule: Schedule): string | null {
+function describeSchedule(schedule: CronFields & Partial<DailyWindow>): string | null {
   const { minute, hour, dom, month, dow } = schedule;
   if (minute === null || hour === null || dom === null || month === null || dow === null) {
     return null;
@@ -218,7 +238,23 @@ function describeSchedule(schedule: Schedule): string | null {
   const time = timePhrase(minute, hour);
   const days = dayPhrase(dom, month, dow);
   if (time === null || days === null) return null;
-  return `${time}, ${days}${windowPhrase(schedule.begin, schedule.end)}`;
+  return `${time}, ${days}${windowPhrase(schedule.begin ?? null, schedule.end ?? null)}`;
+}
+
+/**
+ * The five cron fields of a schedule, normalized. Named field by field rather
+ * than spread from the row, so that a field a later TrueNAS release adds to the
+ * schedule does not reach the caller without a change here — the same rule the
+ * task rows themselves are built under.
+ */
+function cronFieldsOf(cron: Cron): CronFields {
+  return {
+    minute: fieldOrNull(cron.minute),
+    hour: fieldOrNull(cron.hour),
+    dom: fieldOrNull(cron.dom),
+    month: fieldOrNull(cron.month),
+    dow: fieldOrNull(cron.dow),
+  };
 }
 
 export const snapshotTasksList: ReadOnlyTool = {
@@ -260,18 +296,13 @@ export const snapshotTasksList: ReadOnlyTool = {
     const tasks = await firstValueFrom(system.client.api.query('pool.snapshottask.query'));
     return tasks.map((task) => {
       const cron = cronOf(task.schedule);
-      // Named field by field rather than passed through, so that a field a
-      // later TrueNAS release adds to the schedule does not reach the caller
-      // without a change here — the same rule the row itself is built under.
+      // The window is read here rather than in `cronFieldsOf`, which is shared
+      // with the cloud sync task below and whose schedule carries none.
       const schedule: Schedule | null =
         cron === null
           ? null
           : {
-              minute: fieldOrNull(cron.minute),
-              hour: fieldOrNull(cron.hour),
-              dom: fieldOrNull(cron.dom),
-              month: fieldOrNull(cron.month),
-              dow: fieldOrNull(cron.dow),
+              ...cronFieldsOf(cron),
               begin: fieldOrNull(cron.begin),
               end: fieldOrNull(cron.end),
             };
@@ -292,6 +323,260 @@ export const snapshotTasksList: ReadOnlyTool = {
         schedule_description: schedule === null ? null : describeSchedule(schedule),
         lifetime_value: task.lifetime_value ?? null,
         lifetime_unit: task.lifetime_unit ?? null,
+      };
+    });
+  },
+};
+
+/**
+ * The job states that describe a run that has ENDED, and so the only ones under
+ * which the recorded finish time is a finish time.
+ *
+ * This is the middleware's own terminal set, which the client spells out in
+ * `isJobFinished`. Under a state outside it the job is still going or still
+ * waiting, and its `time_finished` is whatever the record held before the
+ * current run started — reporting that as the last finish would name a real
+ * timestamp as something it is not, which is worse than reporting none.
+ */
+const ENDED_JOB_STATES = new Set(['SUCCESS', 'FAILED', 'ABORTED', 'ERROR', 'FINISHED']);
+
+/**
+ * The largest instant a `Date` can hold. `toISOString` throws beyond it rather
+ * than answering, so one absurd recorded time would otherwise take the whole
+ * listing down with it — the same guard `replication.ts` and `snapshots.ts`
+ * each apply to a time of their own, restated here for the same reason they
+ * restate it rather than share it: a tool file is read on its own.
+ */
+const MAX_TIME_MS = 8.64e15;
+
+/**
+ * The job record a cloud sync task carries for its last run, restated with
+ * every field optional and untyped.
+ *
+ * The client declares `job` as `{ [k: string]: unknown } | null` — an open
+ * record naming nothing — so every field of it arrives as `unknown`, the same
+ * way a replication task's state record does. Only the three fields read here
+ * are named.
+ */
+interface LastRun {
+  state?: unknown;
+  time_finished?: unknown;
+  error?: unknown;
+}
+
+/**
+ * A time as the middleware sends one: `{ "$date": <epoch milliseconds> }`,
+ * which is the only date representation the client's own types declare
+ * (`TrueNasDate`). Restated with `$date` untyped because it arrives inside an
+ * open record.
+ */
+interface MiddlewareDate {
+  $date?: unknown;
+}
+
+/**
+ * The task's job record, or null where the row carries nothing to read one
+ * from.
+ *
+ * Guarded rather than asserted: the record arrives as `unknown`, and a row that
+ * sends something other than an object is exactly the case an assertion would
+ * have got wrong.
+ */
+function lastRunOf(job: unknown): LastRun | null {
+  return typeof job === 'object' && job !== null ? (job as LastRun) : null;
+}
+
+/**
+ * An instant the job record carries, in milliseconds since the epoch, or null
+ * where the system reported no time this tool can read.
+ *
+ * A bare number is accepted beside the `{ "$date": … }` envelope because the
+ * envelope exists only to tag a number as a date in transit; both are epoch
+ * milliseconds. Anything else — a formatted string, a date in another shape —
+ * is not read rather than guessed at, because guessing wrong about a timezone
+ * produces a timestamp that is confidently off by hours.
+ */
+function jobMillis(value: unknown): number | null {
+  const raw =
+    typeof value === 'object' && value !== null ? (value as MiddlewareDate).$date : value;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return null;
+  return Math.abs(raw) <= MAX_TIME_MS ? raw : null;
+}
+
+/**
+ * The state of the task's last run: the job's own state string, or
+ * `NEVER_RUN`, or null.
+ *
+ * `job: null` is what a task carries until the system has run it. The field is
+ * declared non-optional and nullable, so null is the middleware saying there is
+ * no run record rather than that it could not send one — and that is the answer
+ * this tool exists to keep separate from a failure.
+ *
+ * Null is neither of those: a job record in a shape this tool cannot read, or
+ * one naming no state. It must not read as a task the system has never run,
+ * which is a fact about the task rather than about this tool. A task in either
+ * has not been shown to be working.
+ *
+ * Any other state is passed through as the system spelled it, so a state a
+ * later TrueNAS release adds reaches the caller rather than being flattened
+ * into one of these.
+ */
+function lastRunState(job: unknown): string | null {
+  if (job === null) return 'NEVER_RUN';
+  const reported = lastRunOf(job)?.state;
+  return typeof reported === 'string' && reported.length > 0 ? reported : null;
+}
+
+/**
+ * When the last run ended, as an ISO 8601 UTC timestamp, or null where nothing
+ * this tool can read says a run ended.
+ *
+ * The state must be one that describes an ended run — see
+ * {@link ENDED_JOB_STATES} — before the recorded time is read as a finish time
+ * at all.
+ */
+function jobFinishedAt(run: LastRun | null, reported: string | null): string | null {
+  if (run === null || reported === null || !ENDED_JOB_STATES.has(reported)) return null;
+  const millis = jobMillis(run.time_finished);
+  return millis === null ? null : new Date(millis).toISOString();
+}
+
+/**
+ * The error text recorded with the last run, or null where none was recorded.
+ *
+ * An empty string is read as no text rather than as an error message of no
+ * characters: it names nothing a caller could act on, and reporting it beside a
+ * `FAILED` state would suggest the reason is available when it is not.
+ */
+function jobError(run: LastRun | null): string | null {
+  const error = run?.error;
+  return typeof error === 'string' && error.length > 0 ? error : null;
+}
+
+/**
+ * One named string field of a record the pinned client's types do not describe
+ * field by field, or null where the record or the field is not readable.
+ *
+ * Each of the three places this is used needs it for its own reason. A task's
+ * `attributes` is an open record — the client types it `Record<string,
+ * unknown>`, so `bucket` and `folder` arrive as `unknown`. `description` is not
+ * declared on the row at all: the server sends it and the generated dump omits
+ * it, the same way it omits a job's own `description`, which the client
+ * corrects by hand for exactly that reason. A task's credential IS declared,
+ * with a `name` typed a string — but the middleware also sends the id-only
+ * form, so a row that does not honour the type is the case a direct read would
+ * have got wrong.
+ */
+function stringField(record: unknown, field: string): string | null {
+  if (typeof record !== 'object' || record === null) return null;
+  return fieldOrNull((record as Record<string, unknown>)[field]);
+}
+
+/**
+ * The credential's numeric id, or null where the row carries nothing to read
+ * one from.
+ *
+ * The client types `credentials` as a whole credential record, and the
+ * middleware also has an id-only form, so both are read. Nothing else of the
+ * credential is: its `provider` is where the access key, token or password
+ * lives, and this tool never looks inside it.
+ */
+function credentialId(credentials: unknown): number | null {
+  const id =
+    typeof credentials === 'object' && credentials !== null
+      ? (credentials as { id?: unknown }).id
+      : credentials;
+  return typeof id === 'number' && Number.isFinite(id) ? id : null;
+}
+
+export const cloudsyncTasksList: ReadOnlyTool = {
+  name: 'cloudsync_tasks_list',
+  description:
+    'Every cloud sync task on the system: what it copies where, when it runs ' +
+    "and how its last run went. `id` is the task's numeric identity and " +
+    '`description` the name it was given, null where the system reported ' +
+    'none. `direction` is `PUSH`, copying from this system out to the remote, ' +
+    'or `PULL`, copying onto it. `path` is the local end — the source on a ' +
+    '`PUSH` and the destination on a `PULL`. `bucket` and `folder` are the ' +
+    'remote end; `bucket` is null on a provider that has no buckets, such as ' +
+    'SFTP or WebDAV, and either is null where the system reported no value. ' +
+    '`credential_id` and `credential_name` identify the stored credential the ' +
+    'task authenticates with, and are the only account of it: no key, token, ' +
+    'password or other secret appears anywhere in this result. `enabled` is ' +
+    'whether the task is switched on and is null where the system reported no ' +
+    'value; a disabled task is still listed, because a task nobody switched ' +
+    'back on is exactly the one worth finding. `schedule` carries the cron ' +
+    'fields as the system holds them: `minute`, `hour`, `dom` (day of the ' +
+    'month), `month` and `dow` (day of the week). Each field is null where the ' +
+    'system reported no value, and `schedule` itself is null where the task ' +
+    'carries no readable schedule at all. A cloud sync task has no daily ' +
+    'window, unlike a periodic snapshot task, so none is reported. ' +
+    '`schedule_description` restates those fields in words — `at 02:00, every ' +
+    'day`, or `every 4 hours at :00, on Monday and Thursday`. It is null where ' +
+    'the schedule is in a shape this tool does not render in words, and a null ' +
+    'there says nothing about the task: it is a limit of this tool rather than ' +
+    'a task without a schedule, and `schedule` is the exact account of when ' +
+    'the task runs either way. `state` is the state the system recorded for ' +
+    'the last run. `SUCCESS`, `FINISHED`, `FAILED`, `ERROR` and `ABORTED` ' +
+    'describe a run that ended; `RUNNING`, `WAITING`, `PENDING`, `HOLD` and ' +
+    '`LOCKED` describe one that has not. `NEVER_RUN` is a task the system ' +
+    'holds no run record for at all, and null is a run record this tool could ' +
+    'not read — those two are different answers, and a task in either has not ' +
+    'been shown to be working. A state a later TrueNAS release adds is passed ' +
+    'through as the system spelled it, so `state` is not limited to that ' +
+    'list. `finished_at` is when the last run ended, as an ISO 8601 UTC ' +
+    'timestamp. It is reported only under the states that describe a run that ' +
+    'ended, and is null under every other state including `RUNNING` — the ' +
+    'system holds one job record per task, and while a run is going the time ' +
+    'in it belongs to the run before. `error` is the text recorded with that ' +
+    'run and is null where none was recorded, so a task in `FAILED` with a ' +
+    'null `error` failed for a reason the system did not record; it has not ' +
+    'succeeded. This tool reports tasks and their last run, not the contents ' +
+    'of the remote — what is actually stored there is not among these fields.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }) {
+    // No filters and no options: a system holds tens of cloud sync tasks at
+    // most, and every field this tool reads is part of a task row as it stands
+    // — there is nothing to bound and no option that changes how it arrives.
+    const tasks = await firstValueFrom(system.client.api.query('cloudsync.query'));
+    return tasks.map((task) => {
+      const cron = cronOf(task.schedule);
+      const schedule = cron === null ? null : cronFieldsOf(cron);
+      // Both derived from `task.job` rather than from each other, and the state
+      // reported is then passed to `jobFinishedAt` — so whether the recorded
+      // time counts as a finish time is decided from the state the caller is
+      // given, not from a second reading of the record.
+      const run = lastRunOf(task.job);
+      const reported = lastRunState(task.job);
+      return {
+        id: task.id,
+        description: stringField(task, 'description'),
+        direction: task.direction,
+        path: task.path,
+        // Named rather than passed through: `attributes` is an open record
+        // whose contents differ per provider, so a field a later TrueNAS
+        // release adds to it does not reach the caller without a change here.
+        bucket: stringField(task.attributes, 'bucket'),
+        folder: stringField(task.attributes, 'folder'),
+        // The credential by id and name and nothing else — its `provider` holds
+        // the access key, token or password, and is never read.
+        credential_id: credentialId(task.credentials),
+        credential_name: stringField(task.credentials, 'name'),
+        // Optional on the client's own type, so a middleware that omits it
+        // reports null rather than a default. Not defaulted either way: a task
+        // whose switch cannot be read must not be presented as one that is
+        // definitely on or definitely off.
+        enabled: task.enabled ?? null,
+        schedule,
+        // Rendered from the normalized fields rather than from the row, so that
+        // what is described and what is reported cannot be two different
+        // readings of the same schedule.
+        schedule_description: schedule === null ? null : describeSchedule(schedule),
+        state: reported,
+        finished_at: jobFinishedAt(run, reported),
+        error: jobError(run),
       };
     });
   },
