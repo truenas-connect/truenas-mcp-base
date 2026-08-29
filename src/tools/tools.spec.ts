@@ -29,6 +29,7 @@ import {
   snapshotTasksList,
   tasksRecentRuns,
   usersList,
+  vmsList,
 } from '@/tools/index';
 
 /**
@@ -73,7 +74,7 @@ function failingSystem(
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the twenty-six sketch tools', () => {
+  it('registers the twenty-seven sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'storage_pool_status',
@@ -83,6 +84,7 @@ describe('createDefaultCatalog', () => {
       'datasets_quota_report',
       'disks_list',
       'apps_list',
+      'vms_list',
       'alerts_list',
       'snapshots_list',
       'replication_status',
@@ -128,6 +130,10 @@ describe('createDefaultCatalog', () => {
 
   it('advertises disks_list to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('disks_list');
+  });
+
+  it('advertises vms_list to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('vms_list');
   });
 
   it('advertises apps_list to a read-only credential', () => {
@@ -6914,5 +6920,257 @@ describe('alert_settings', () => {
     await alertSettings.handler(ctx, {});
     expect(query).toHaveBeenCalledWith('alertservice.query');
     expect(call).toHaveBeenCalledWith('alertclasses.config');
+  });
+});
+
+describe('vms_list', () => {
+  /**
+   * A libvirt-backed VM as `vm.query` reports one: memory in MiB, the vCPU
+   * allocation split across three fields, and the state nested in `status`
+   * beside libvirt's own.
+   *
+   * The devices are on the fixture because they are the bulk of a real row and
+   * the allowlist is what keeps them out.
+   */
+  const vm = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    name: 'buildbox',
+    vcpus: 1,
+    cores: 2,
+    threads: 2,
+    memory: 4096,
+    min_memory: null,
+    autostart: true,
+    status: { state: 'RUNNING', pid: 1234, domain_state: 'RUNNING' },
+    devices: [{ dtype: 'DISK', attributes: { path: '/dev/zvol/tank/buildbox' } }],
+    ...over,
+  });
+
+  /**
+   * An incus-backed VM as `virt.instance.query` reports one: memory already in
+   * bytes, the CPU allocation a single string, and one flat status word.
+   *
+   * `environment` carries real-looking material for the reason the alert
+   * destination fixture does — the test that it does not survive the mapping is
+   * only worth anything if some was there to survive.
+   */
+  const instance = (over: Record<string, unknown> = {}) => ({
+    id: 'web',
+    name: 'web',
+    type: 'VM',
+    status: 'STOPPED',
+    cpu: '4',
+    memory: 8589934592,
+    autostart: false,
+    environment: { API_TOKEN: 'SECRET-GUEST-TOKEN' },
+    raw: { config: { 'limits.memory': '8GiB' } },
+    aliases: [],
+    image: { os: 'Debian' },
+    ...over,
+  });
+
+  const read = async (
+    vms: unknown[] = [vm()],
+    instances: unknown[] = [instance()],
+  ): Promise<Record<string, unknown>> => {
+    const { ctx } = fakeSystem({ ['vm.query']: vms, ['virt.instance.query']: instances });
+    return (await vmsList.handler(ctx, {})) as Record<string, unknown>;
+  };
+
+  const rows = async (vms?: unknown[], instances?: unknown[]): Promise<Record<string, unknown>[]> =>
+    (await read(vms, instances))['vms'] as Record<string, unknown>[];
+
+  /** One libvirt VM, differing only in the fields the case is about. */
+  const oneVm = async (over: Record<string, unknown>): Promise<Record<string, unknown>> =>
+    (await rows([vm(over)], []))[0];
+
+  /** One incus VM, the same way. */
+  const oneInstance = async (over: Record<string, unknown>): Promise<Record<string, unknown>> =>
+    (await rows([], [instance(over)]))[0];
+
+  /** The same two reads, with one of them rejecting instead. */
+  const readFailing = async (
+    failures: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> => {
+    const { ctx } = failingSystem(
+      { ['vm.query']: [vm()], ['virt.instance.query']: [instance()] },
+      failures,
+    );
+    return (await vmsList.handler(ctx, {})) as Record<string, unknown>;
+  };
+
+  it('reports a VM from each stack, tagged with the stack it came from', async () => {
+    expect(await read()).toEqual({
+      vms: [
+        {
+          source: 'vm',
+          id: 1,
+          name: 'buildbox',
+          state: 'RUNNING',
+          domain_state: 'RUNNING',
+          vcpus: 4,
+          cpu_set: null,
+          memory_bytes: 4294967296,
+          min_memory_bytes: null,
+          autostart: true,
+        },
+        {
+          source: 'virt_instance',
+          id: 'web',
+          name: 'web',
+          state: 'STOPPED',
+          domain_state: null,
+          vcpus: 4,
+          cpu_set: null,
+          memory_bytes: 8589934592,
+          min_memory_bytes: null,
+          autostart: false,
+        },
+      ],
+      failures: [],
+    });
+  });
+
+  it('reports memory in bytes from both stacks, converting the MiB the vm stack stores', async () => {
+    // 4096 MiB and 8 GiB, which is the whole point of converting: without it
+    // the smaller VM reports the larger number.
+    expect(await oneVm({ memory: 4096 })).toMatchObject({ memory_bytes: 4294967296 });
+    expect(await oneInstance({ memory: 8589934592 })).toMatchObject({
+      memory_bytes: 8589934592,
+    });
+    // Unreadable stays unreadable rather than being converted into a zero the
+    // caller would read as a VM with no memory.
+    expect(await oneVm({ memory: null })).toMatchObject({ memory_bytes: null });
+    expect(await oneInstance({ memory: null })).toMatchObject({ memory_bytes: null });
+  });
+
+  it('reports a memory floor where the vm stack has one, in the same unit', async () => {
+    expect(await oneVm({ min_memory: 1024 })).toMatchObject({ min_memory_bytes: 1073741824 });
+  });
+
+  it('counts vCPUs as sockets times cores times threads', async () => {
+    // The guest sees four CPUs; `vcpus` alone says one.
+    expect(await oneVm({ vcpus: 1, cores: 2, threads: 2 })).toMatchObject({ vcpus: 4 });
+  });
+
+  it('states no vCPU count where the vm stack did not report all three', async () => {
+    // Not defaulted to 1: a guessed component is indistinguishable in the
+    // result from one the system reported.
+    expect(await oneVm({ threads: undefined })).toMatchObject({ vcpus: null });
+    expect(await oneVm({ cores: 'two' })).toMatchObject({ vcpus: null });
+  });
+
+  it('reports a pinned CPU set verbatim and states no count for it', async () => {
+    // How many CPUs `0-3` comes to is an inference about the host, not
+    // something the system said.
+    expect(await oneInstance({ cpu: '0-3' })).toMatchObject({ vcpus: null, cpu_set: '0-3' });
+    expect(await oneInstance({ cpu: '1,3' })).toMatchObject({ vcpus: null, cpu_set: '1,3' });
+    expect(await oneInstance({ cpu: '4' })).toMatchObject({ vcpus: 4, cpu_set: null });
+    expect(await oneInstance({ cpu: null })).toMatchObject({ vcpus: null, cpu_set: null });
+  });
+
+  it('distinguishes a stopped VM from one in an error state', async () => {
+    // On the incus stack the state word does it on its own.
+    expect(await oneInstance({ status: 'ERROR' })).toMatchObject({ state: 'ERROR' });
+    expect(await oneInstance({ status: 'STOPPED' })).toMatchObject({ state: 'STOPPED' });
+    // On the libvirt stack both VMs read STOPPED and only the domain state
+    // separates them, which is why it is reported beside rather than merged.
+    const shutdown = await oneVm({ status: { state: 'STOPPED', domain_state: 'SHUTOFF' } });
+    const crashed = await oneVm({ status: { state: 'STOPPED', domain_state: 'CRASHED' } });
+    expect(shutdown).toMatchObject({ state: 'STOPPED', domain_state: 'SHUTOFF' });
+    expect(crashed).toMatchObject({ state: 'STOPPED', domain_state: 'CRASHED' });
+  });
+
+  it('reports a state it could not read as null rather than as a state', async () => {
+    expect(await oneVm({ status: null })).toMatchObject({ state: null, domain_state: null });
+    expect(await oneVm({ status: ['RUNNING'] })).toMatchObject({ state: null });
+    expect(await oneVm({ status: {} })).toMatchObject({ state: null, domain_state: null });
+    expect(await oneVm({ name: '', id: null, autostart: 'yes' })).toMatchObject({
+      name: null,
+      id: null,
+      autostart: null,
+    });
+  });
+
+  it('returns no VMs and no failures on a system with none in either stack', async () => {
+    expect(await read([], [])).toEqual({ vms: [], failures: [] });
+  });
+
+  it('reports a stack it could not read as a failure rather than as no VMs', async () => {
+    // The distinction the empty list cannot carry: a system whose VMs all live
+    // in the stack that failed is not a system without any.
+    expect(await readFailing({ ['virt.instance.query']: new Error('unknown method') })).toEqual({
+      vms: [expect.objectContaining({ source: 'vm', name: 'buildbox' })],
+      failures: [{ source: 'virt_instance', error: 'unknown method' }],
+    });
+  });
+
+  it('keeps the VMs of the stack that answered when the other one fails', async () => {
+    const result = await readFailing({ ['vm.query']: new Error('service not running') });
+    expect(result['vms']).toEqual([expect.objectContaining({ source: 'virt_instance' })]);
+    expect(result['failures']).toEqual([{ source: 'vm', error: 'service not running' }]);
+  });
+
+  it('returns no VMs and both failures where neither stack could be read', async () => {
+    const result = await readFailing({
+      ['vm.query']: new Error('down'),
+      ['virt.instance.query']: new Error('down'),
+    });
+    expect(result['vms']).toEqual([]);
+    expect(result['failures']).toEqual([
+      { source: 'vm', error: 'down' },
+      { source: 'virt_instance', error: 'down' },
+    ]);
+  });
+
+  it('names the reason whatever shape the client rejected with', async () => {
+    const error = async (reason: unknown): Promise<unknown> =>
+      ((await readFailing({ ['vm.query']: reason }))['failures'] as Record<string, unknown>[])[0][
+        'error'
+      ];
+    expect(await error(new Error('an Error'))).toBe('an Error');
+    expect(await error({ reason: 'a middleware error' })).toBe('a middleware error');
+    expect(await error({ message: 'a JSON-RPC error' })).toBe('a JSON-RPC error');
+    expect(await error('a bare string')).toBe('a bare string');
+    // A failure with no text still has to read as a failure.
+    expect(await error({})).toBe('the system reported no reason');
+    expect(await error(new Error(''))).toBe('the system reported no reason');
+    expect(await error(null)).toBe('the system reported no reason');
+  });
+
+  it('excludes containers, whether or not the middleware applied the filter', async () => {
+    // An unrecognised filter is dropped rather than refused, and the result of
+    // that is containers in a list of virtual machines.
+    const listed = await rows([], [instance(), instance({ id: 'plex', type: 'CONTAINER' })]);
+    expect(listed.map((row) => row['id'])).toEqual(['web']);
+  });
+
+  it('carries no field the tool does not name, including one a later release adds', async () => {
+    const [libvirt, incus] = await rows(
+      [vm({ enable_secure_boot: true })],
+      [instance({ vnc_password: 'SECRET-VNC-PASSWORD', unheard_of_field: 'SECRET-NEW-SHAPE' })],
+    );
+    const named = [
+      'source',
+      'id',
+      'name',
+      'state',
+      'domain_state',
+      'vcpus',
+      'cpu_set',
+      'memory_bytes',
+      'min_memory_bytes',
+      'autostart',
+    ];
+    expect(Object.keys(libvirt)).toEqual(named);
+    expect(Object.keys(incus)).toEqual(named);
+    expect(JSON.stringify([libvirt, incus])).not.toContain('SECRET');
+  });
+
+  it('asks each stack for its own VMs', async () => {
+    const { ctx, query } = fakeSystem({ ['vm.query']: [], ['virt.instance.query']: [] });
+    await vmsList.handler(ctx, {});
+    expect(query).toHaveBeenCalledWith('vm.query');
+    expect(query).toHaveBeenCalledWith('virt.instance.query', [['type', '=', 'VM']]);
   });
 });

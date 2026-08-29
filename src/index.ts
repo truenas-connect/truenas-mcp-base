@@ -68,6 +68,7 @@ export {
   quotaReport,
   disksList,
   appsList,
+  vmsList,
   alertsList,
   alertSettings,
   snapshotsList,
