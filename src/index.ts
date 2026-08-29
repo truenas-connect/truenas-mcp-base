@@ -63,6 +63,7 @@ export {
   systemInfo,
   poolStatus,
   poolTopology,
+  scrubHistory,
   listDatasets,
   disksList,
   appsList,

@@ -11,6 +11,7 @@ import {
   listDatasets,
   poolStatus,
   poolTopology,
+  scrubHistory,
 } from '@/tools/index';
 
 /**
@@ -32,11 +33,12 @@ function fakeSystem(responses: Partial<Record<string, unknown>>): {
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the eight sketch tools', () => {
+  it('registers the nine sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'storage_pool_status',
       'storage_pool_topology',
+      'storage_scrub_history',
       'storage_list_datasets',
       'disks_list',
       'apps_list',
@@ -60,6 +62,12 @@ describe('createDefaultCatalog', () => {
   it('advertises storage_pool_topology to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
       'storage_pool_topology',
+    );
+  });
+
+  it('advertises storage_scrub_history to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'storage_scrub_history',
     );
   });
 });
@@ -421,6 +429,301 @@ describe('storage_pool_topology', () => {
   it('returns [] for a system with no pools', async () => {
     const { ctx } = fakeSystem({ ['pool.query']: [] });
     expect(await poolTopology.handler(ctx, {})).toEqual([]);
+  });
+});
+
+describe('storage_scrub_history', () => {
+  // Every field a scan record carries, so the assertions below show what the
+  // tool drops as well as what it keeps. `bytes_to_process`, `bytes_processed`,
+  // `bytes_issued`, `percentage` and `total_secs_left` are the progress
+  // counters, and are here to be dropped: they describe how far a scrub got,
+  // where this tool answers what it found and how long ago.
+  const scan = (over: Record<string, unknown>) => ({
+    function: 'SCRUB',
+    state: 'FINISHED',
+    start_time: '2026-08-20T01:00:00+00:00',
+    end_time: '2026-08-20T04:30:00+00:00',
+    percentage: 100,
+    bytes_to_process: 4000787030016,
+    bytes_processed: 4000787030016,
+    bytes_issued: 4000787030016,
+    pause: null,
+    errors: 0,
+    total_secs_left: null,
+    ...over,
+  });
+
+  const pool = (over: Record<string, unknown>) => ({
+    id: 1,
+    name: 'tank',
+    status: 'ONLINE',
+    healthy: true,
+    // Present on every pool the system is reading, and null on one it is not.
+    topology: { data: [{ name: 'sda2', type: 'DISK' }] },
+    scan: scan({}),
+    ...over,
+  });
+
+  /** A pool or scan row from a middleware that did not send one of the keys. */
+  const without = (key: string, row: Record<string, unknown>): Record<string, unknown> => {
+    const copy = { ...row };
+    delete copy[key];
+    return copy;
+  };
+
+  it('reports the outcome and age of the last finished scrub', async () => {
+    const { ctx, query } = fakeSystem({ ['pool.query']: [pool({})] });
+    expect(await scrubHistory.handler(ctx, {})).toEqual([
+      {
+        pool: 'tank',
+        state: 'FINISHED',
+        started_at: '2026-08-20T01:00:00+00:00',
+        finished_at: '2026-08-20T04:30:00+00:00',
+        duration_seconds: 12600,
+        errors: 0,
+      },
+    ]);
+    // `scan` is part of a pool row as it stands, so the tool asks for the pool
+    // list with no filters and no options.
+    expect(query.mock.calls).toEqual([['pool.query']]);
+  });
+
+  it('keeps a scrub that found errors apart from a clean one', async () => {
+    const { ctx } = fakeSystem({
+      ['pool.query']: [
+        pool({ name: 'tank' }),
+        pool({ name: 'vault', scan: scan({ errors: 3 }) }),
+      ],
+    });
+    const result = (await scrubHistory.handler(ctx, {})) as Record<string, unknown>[];
+    expect(result.map((p) => [p['pool'], p['errors']])).toEqual([
+      ['tank', 0],
+      ['vault', 3],
+    ]);
+  });
+
+  it('distinguishes a scrub in progress from a finished one', async () => {
+    // A running scrub has no end time, so it has no duration either — the
+    // alternative is a duration measured against now, which would read as a
+    // finished scrub of that length.
+    const { ctx } = fakeSystem({
+      ['pool.query']: [pool({ scan: scan({ state: 'SCANNING', end_time: null, percentage: 40 }) })],
+    });
+    expect(await scrubHistory.handler(ctx, {})).toEqual([
+      {
+        pool: 'tank',
+        state: 'SCANNING',
+        started_at: '2026-08-20T01:00:00+00:00',
+        finished_at: null,
+        duration_seconds: null,
+        errors: 0,
+      },
+    ]);
+  });
+
+  it('distinguishes a paused scrub from one that is still running', async () => {
+    // ZFS reports a paused scrub as SCANNING with the time it was paused, and
+    // it stays that way until someone resumes it. Reported as SCANNING it
+    // would read as a verification in progress when nothing is progressing.
+    const { ctx } = fakeSystem({
+      ['pool.query']: [
+        pool({ name: 'running', scan: scan({ state: 'SCANNING', end_time: null }) }),
+        pool({
+          name: 'paused',
+          scan: scan({
+            state: 'SCANNING',
+            end_time: null,
+            pause: '2026-08-20T02:00:00+00:00',
+          }),
+        }),
+      ],
+    });
+    const result = (await scrubHistory.handler(ctx, {})) as Record<string, unknown>[];
+    expect(result.map((p) => [p['pool'], p['state']])).toEqual([
+      ['running', 'SCANNING'],
+      ['paused', 'PAUSED'],
+    ]);
+  });
+
+  it('reports a cancelled scrub as CANCELED rather than as a completed one', async () => {
+    const { ctx } = fakeSystem({
+      ['pool.query']: [
+        pool({
+          scan: scan({ state: 'CANCELED', end_time: '2026-08-20T01:30:00+00:00', percentage: 12 }),
+        }),
+      ],
+    });
+    const [result] = (await scrubHistory.handler(ctx, {})) as Record<string, unknown>[];
+    expect(result['state']).toBe('CANCELED');
+    expect(result['duration_seconds']).toBe(1800);
+  });
+
+  it('reports a pool that has never been scanned instead of omitting it', async () => {
+    // An absent pool reads as a pool with nothing wrong, and never-scrubbed is
+    // the finding this tool exists for. `scan` is null on a pool ZFS has never
+    // scanned; an older middleware sends no `scan` key at all.
+    const { ctx } = fakeSystem({
+      ['pool.query']: [
+        pool({ name: 'fresh', scan: null }),
+        without('scan', pool({ name: 'silent' })),
+      ],
+    });
+    expect(await scrubHistory.handler(ctx, {})).toEqual([
+      {
+        pool: 'fresh',
+        state: 'NEVER_SCRUBBED',
+        started_at: null,
+        finished_at: null,
+        duration_seconds: null,
+        errors: null,
+      },
+      {
+        pool: 'silent',
+        state: 'NEVER_SCRUBBED',
+        started_at: null,
+        finished_at: null,
+        duration_seconds: null,
+        errors: null,
+      },
+    ]);
+  });
+
+  it('does not present the resilver that replaced a scrub as a scrub', async () => {
+    // A pool records one scan, so a resilver overwrites the scrub before it.
+    // Passing its times and error count through would report a scrub that
+    // never ran — and on a pool that resilvered because a disk failed, which
+    // is exactly when a stale scrub matters most.
+    const { ctx } = fakeSystem({
+      ['pool.query']: [
+        pool({
+          scan: scan({
+            function: 'RESILVER',
+            end_time: '2026-08-27T09:00:00+00:00',
+            errors: 5,
+          }),
+        }),
+      ],
+    });
+    expect(await scrubHistory.handler(ctx, {})).toEqual([
+      {
+        pool: 'tank',
+        state: 'UNKNOWN',
+        started_at: null,
+        finished_at: null,
+        duration_seconds: null,
+        errors: null,
+      },
+    ]);
+  });
+
+  it('does not claim a pool the system is not reading has never been scrubbed', async () => {
+    // A pool that is not imported carries no topology and no scan, and the
+    // missing scan is then an absence of evidence: the record it would be read
+    // from is not there. Reported as NEVER_SCRUBBED it would raise the one
+    // alarm this tool exists to raise, about a pool nobody can answer for.
+    // The second pool is the same case carrying a stale scan anyway: the
+    // record cannot be read as current, so the state and the four fields agree
+    // that nothing is known rather than reporting a scrub the state denies.
+    const { ctx } = fakeSystem({
+      ['pool.query']: [
+        pool({ name: 'exported', topology: null, scan: null }),
+        pool({ name: 'stale', topology: null }),
+      ],
+    });
+    expect(await scrubHistory.handler(ctx, {})).toEqual([
+      {
+        pool: 'exported',
+        state: 'UNKNOWN',
+        started_at: null,
+        finished_at: null,
+        duration_seconds: null,
+        errors: null,
+      },
+      {
+        pool: 'stale',
+        state: 'UNKNOWN',
+        started_at: null,
+        finished_at: null,
+        duration_seconds: null,
+        errors: null,
+      },
+    ]);
+  });
+
+  it('normalizes a scan whose keys the middleware did not send', async () => {
+    // An omitted field is reported as null, so the caller meets the shape the
+    // description promised with a value missing rather than a key missing.
+    // A scrub with no state of its own is still a scrub on record, so its
+    // times and error count stand: a null state says only that ZFS's own word
+    // for the outcome is missing, where UNKNOWN says the scrub is unreadable.
+    const { ctx } = fakeSystem({
+      ['pool.query']: [
+        pool({
+          scan: without('errors', without('state', without('start_time', scan({})))),
+        }),
+      ],
+    });
+    const results = (await scrubHistory.handler(ctx, {})) as Record<string, unknown>[];
+    expect(results).toEqual([
+      {
+        pool: 'tank',
+        state: null,
+        started_at: null,
+        finished_at: '2026-08-20T04:30:00+00:00',
+        duration_seconds: null,
+        errors: null,
+      },
+    ]);
+    // Expecting null above is what enforces the normalization: `toEqual`
+    // reads an absent key and an undefined one alike, so a field that stopped
+    // being normalized would arrive as undefined and fail against that null.
+    // The keys below restate it in the terms the caller sees, and are the
+    // weaker of the two — `Object.keys` lists a key holding undefined as well.
+    expect(Object.keys(results[0])).toContain('started_at');
+    expect(Object.keys(results[0])).toContain('errors');
+    expect(Object.keys(results[0])).toContain('state');
+  });
+
+  it('gives no duration for a timestamp it cannot read', async () => {
+    // The middleware's own types call these strings, so a value that is not a
+    // timestamp is a shape this tool was not told about. It yields no duration
+    // rather than a NaN the caller would have to detect.
+    const { ctx } = fakeSystem({
+      ['pool.query']: [
+        pool({ name: 'bad-start', scan: scan({ start_time: 'not a timestamp' }) }),
+        pool({ name: 'bad-end', scan: scan({ end_time: 'not a timestamp' }) }),
+      ],
+    });
+    const result = (await scrubHistory.handler(ctx, {})) as Record<string, unknown>[];
+    expect(result.map((p) => [p['pool'], p['duration_seconds']])).toEqual([
+      ['bad-start', null],
+      ['bad-end', null],
+    ]);
+  });
+
+  it('surfaces neither the progress counters nor a field a later release adds', async () => {
+    const { ctx } = fakeSystem({
+      ['pool.query']: [
+        pool({
+          scan: scan({ future_field: 'added by a later TrueNAS release' }),
+          future_field: 'added by a later TrueNAS release',
+        }),
+      ],
+    });
+    const [result] = (await scrubHistory.handler(ctx, {})) as Record<string, unknown>[];
+    expect(Object.keys(result)).toEqual([
+      'pool',
+      'state',
+      'started_at',
+      'finished_at',
+      'duration_seconds',
+      'errors',
+    ]);
+  });
+
+  it('returns [] for a system with no pools', async () => {
+    const { ctx } = fakeSystem({ ['pool.query']: [] });
+    expect(await scrubHistory.handler(ctx, {})).toEqual([]);
   });
 });
 
