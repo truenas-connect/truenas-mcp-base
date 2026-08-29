@@ -91,5 +91,6 @@ export {
   reportingUtilisation,
   reportingDiskIo,
   reportingSpaceTrends,
+  reportingAppVmUsage,
   createSnapshot,
 } from '@/tools/index';
