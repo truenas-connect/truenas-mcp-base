@@ -10991,7 +10991,9 @@ describe('fleet_compliance_report', () => {
         cert({ name: 'valid', until: inDays(200) }),
         cert({ name: 'boundary', until: inDays(30) }),
         cert({ name: 'soon', until: inDays(5) }),
-        cert({ name: 'gone', until: inDays(-3), expired: true }),
+        // The system has not caught up with its own date, which is the other
+        // direction the two can disagree in: the day count settles it.
+        cert({ name: 'gone', until: inDays(-3), expired: false }),
         cert({ name: 'unreadable', until: 'the ides of March' }),
         cert({ name: 'just-outside', until: inDays(31) }),
       ],
@@ -11023,7 +11025,7 @@ describe('fleet_compliance_report', () => {
           common_name: 'truenas.local',
           not_after: inDays(-3),
           days_until_expiry: -3,
-          expired: true,
+          expired: false,
         },
         {
           name: 'unreadable',
@@ -11035,6 +11037,28 @@ describe('fleet_compliance_report', () => {
       ],
       truncated: false,
     });
+  });
+
+  it('counts a certificate the system calls expired as expired, whatever its date says', async () => {
+    const result = await report({
+      // The two disagree: a clock that differs, or a date read differently.
+      // Classifying on the day count alone drops it from the report entirely,
+      // which is the one answer this section must never give.
+      ['certificate.query']: [cert({ name: 'disputed', until: inDays(200), expired: true })],
+    });
+    expect(result.certificates['expired']).toBe(1);
+    expect(result.certificates['entries']).toEqual([
+      expect.objectContaining({ name: 'disputed', days_until_expiry: 200, expired: true }),
+    ]);
+  });
+
+  it('places a certificate on its day count where the system gave no verdict', async () => {
+    const result = await report({
+      ['certificate.query']: [cert({ until: inDays(200), expired: 'probably' })],
+    });
+    expect(result.certificates['expired']).toBe(0);
+    expect(result.certificates['expiring_soon']).toBe(0);
+    expect(result.certificates['entries']).toEqual([]);
   });
 
   it('returns no certificate or private key material', async () => {
@@ -11117,6 +11141,18 @@ describe('fleet_compliance_report', () => {
     // Not the one readable URL: an auditor asking where identities come from
     // would be told a narrower answer than the truth.
     expect(result.directory_service['server_urls']).toBeNull();
+    // And the null is named, so it can be told from the Active Directory case
+    // above, where the same null means the system carries no such list at all.
+    expect(result.unreadable).toEqual([
+      {
+        system: 'nas',
+        section: 'directory_service',
+        detail:
+          'the system named a list of directory servers holding an entry this report could ' +
+          'not read, so which servers it binds to is not established — the readable part of ' +
+          'it is not reported, because a partial list names a different set of servers',
+      },
+    ]);
   });
 
   it('does not establish what a system is joined to when the configuration read failed', async () => {
@@ -11289,6 +11325,23 @@ describe('fleet_compliance_report', () => {
         detail:
           'the running version could not be read, so what this system is on is not established: ' +
           'no version',
+      },
+    ]);
+  });
+
+  it('names a version read that worked and named no version', async () => {
+    const result = await report({ ['system.version']: null });
+    expect(result.updates['current_version']).toBeNull();
+    expect(result.updates['version_error']).toBeNull();
+    // The third case: not a failure, and not an answer either. Without this it
+    // is the one hole in the report with nothing naming it.
+    expect(result.unreadable).toEqual([
+      {
+        system: 'nas',
+        section: 'updates',
+        detail:
+          'the system answered the version read without naming a version, so what it is ' +
+          'running is not established',
       },
     ]);
   });

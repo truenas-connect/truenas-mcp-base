@@ -336,8 +336,20 @@ interface SectionRead<T> {
  * `shape` runs inside the same `try`, deliberately. The composed handlers are
  * typed `Promise<unknown>`, so each reader below takes the container it is given
  * on the evidence of the tool it reads and reads every FIELD within it through a
- * guard. A handler that one day answers some other container makes its reader
- * throw, and it lands in this same catch and is stated as the same kind of gap.
+ * guard. Where a reader walks a LIST — the audit entries, the certificates, the
+ * shares — a handler that one day answers some other container makes it throw,
+ * and it lands in this same catch and is stated as the same kind of gap.
+ *
+ * The two readers over a single RECORD — `directoryRead` and `updateRead` — do
+ * not have that: indexing something that is not the expected record yields
+ * undefined per field rather than throwing, so those two would answer a section
+ * of nulls with `unavailable` null. That is a REAL LIMIT of this seam and not a
+ * gap in the report, because those two sections say what each of their nulls
+ * means and put the ones that are holes into `unreadable` — an all-null
+ * `directory_service` names its own missing state and switch there, and an
+ * all-null `updates` names its unfinished check and its unread version. So the
+ * container being wrong is reported as every field being unread, which is what
+ * it is.
  */
 async function section<T>(
   read: () => Promise<unknown>,
@@ -436,14 +448,30 @@ interface CertificateRead {
 }
 
 /**
- * Where a certificate stands, from the day count `certificates_list` computed.
+ * Where a certificate stands, from the SYSTEM'S OWN VERDICT first and the day
+ * count `certificates_list` computed second.
  *
- * `unknown` is its own answer rather than folded into either side. A certificate
- * whose expiry could not be read is the one an auditor most wants to look at by
- * hand, and counting it as valid would be the fail-open this whole report exists
- * to avoid.
+ * The order is the whole of this function. `certificates_list` says the two can
+ * disagree — a clock that differs, a date it could not read the same way — and
+ * classifying on the day count alone means a certificate the system CALLS
+ * expired, with a positive count beside it, is counted valid, left out of
+ * `entries`, and named nowhere. That is the one wrong answer this section can
+ * give: an expired certificate takes the web UI and every API client down at
+ * once, and a compliance report that dropped it would be silent about the thing
+ * it exists to surface. So `expired: true` is expired here whatever the date
+ * says, and the two values are still reported side by side for a reader to see
+ * the disagreement.
+ *
+ * `unknown` is its own answer rather than folded into either side, and for the
+ * same reason: a certificate whose expiry could not be read is the one an auditor
+ * most wants to look at by hand, and counting it as valid would be the same
+ * fail-open one step further along.
  */
-function certificateState(days: number | null): 'expired' | 'expiring_soon' | 'unknown' | 'valid' {
+function certificateState(
+  days: number | null,
+  expired: boolean | null,
+): 'expired' | 'expiring_soon' | 'unknown' | 'valid' {
+  if (expired === true) return 'expired';
   if (days === null) return 'unknown';
   if (days < 0) return 'expired';
   return days <= EXPIRY_HORIZON_DAYS ? 'expiring_soon' : 'valid';
@@ -470,7 +498,7 @@ function certificateRead(answer: unknown): CertificateRead {
     notable: [],
   };
   for (const row of rows) {
-    const state = certificateState(row.days_until_expiry);
+    const state = certificateState(row.days_until_expiry, row.expired);
     if (state === 'valid') continue;
     if (state === 'expired') read.expired += 1;
     else if (state === 'expiring_soon') read.expiring_soon += 1;
@@ -488,9 +516,26 @@ interface DirectoryRead {
   enabled: boolean | null;
   domain: string | null;
   server_urls: string[] | null;
+  /** Whether a server list the system DID send was refused — see {@link serverUrls}. */
+  server_urls_partial: boolean;
   kerberos_realm: string | null;
   credential_type: string | null;
   config_error: string | null;
+}
+
+/**
+ * The LDAP servers the system binds to, and whether a list it DID send was
+ * refused for holding an entry that would not read.
+ *
+ * The two are kept apart because `value` null means both things and only one of
+ * them is a hole in the report: Active Directory and IPA carry no such list at
+ * all, which is an answer, while a list refused for being partial is a fact the
+ * system holds and this report does not — so `partial` is what puts it in
+ * `unreadable` without putting every AD system there too.
+ */
+interface ServerUrlsRead {
+  value: string[] | null;
+  partial: boolean;
 }
 
 /**
@@ -504,10 +549,11 @@ interface DirectoryRead {
  * Null on Active Directory and IPA, which are identified by their domain and
  * carry no such list at all.
  */
-function serverUrls(value: unknown): string[] | null {
-  if (!Array.isArray(value)) return null;
+function serverUrls(value: unknown): ServerUrlsRead {
+  if (!Array.isArray(value)) return { value: null, partial: false };
   const urls = value.filter((url): url is string => typeof url === 'string' && url.length > 0);
-  return urls.length === value.length ? urls : null;
+  if (urls.length === value.length) return { value: urls, partial: false };
+  return { value: null, partial: true };
 }
 
 /**
@@ -520,13 +566,15 @@ function serverUrls(value: unknown): string[] | null {
  */
 function directoryRead(answer: unknown): DirectoryRead {
   const row = answer as Record<string, unknown>;
+  const urls = serverUrls(row['server_urls']);
   return {
     service_type: textOrNull(row['service_type']),
     status: textOrNull(row['status']),
     status_message: textOrNull(row['status_message']),
     enabled: booleanOrNull(row['enabled']),
     domain: textOrNull(row['domain']),
-    server_urls: serverUrls(row['server_urls']),
+    server_urls: urls.value,
+    server_urls_partial: urls.partial,
     kerberos_realm: textOrNull(row['kerberos_realm']),
     credential_type: textOrNull(row['credential_type']),
     config_error: textOrNull(row['config_error']),
@@ -739,6 +787,16 @@ function directoryUnreadable(read: DirectoryRead, system: string): Unreadable[] 
         'switched on, so that is not established — which is not the same as switched off',
     });
   }
+  if (read.server_urls_partial) {
+    facts.push({
+      system,
+      section: 'directory_service',
+      detail:
+        'the system named a list of directory servers holding an entry this report could not ' +
+        'read, so which servers it binds to is not established — the readable part of it is ' +
+        'not reported, because a partial list names a different set of servers',
+    });
+  }
   return facts;
 }
 
@@ -798,6 +856,19 @@ function updateUnreadable(read: UpdateRead, system: string): Unreadable[] {
       system,
       section: 'updates',
       detail: `the running version could not be read, so what this system is on is not established: ${read.version_error}`,
+    });
+  }
+  // The third case, and the quiet one: the version read did not FAIL, it just
+  // came back with no version in it. `system_update_status` keeps that distinct
+  // from a failure on purpose, and without this it would be the one hole in this
+  // report with nothing anywhere naming it.
+  if (read.version_error === null && read.current_version === null) {
+    facts.push({
+      system,
+      section: 'updates',
+      detail:
+        'the system answered the version read without naming a version, so what it is running ' +
+        'is not established',
     });
   }
   return facts;
@@ -875,7 +946,14 @@ export const fleetComplianceReport: ReadOnlyTool = {
     'inside the window. Call `audit_log_query` narrowed to one service to ' +
     'settle it either way. NO AUDIT ENTRY ITSELF IS RETURNED: those name people and ' +
     'what they did, which is `audit_log_query`\'s answer and not this one. ' +
-    '`certificates` reports expiry. `reported` is how many certificates the ' +
+    '`certificates` reports expiry. EACH CERTIFICATE IS PLACED BY THE ' +
+    'SYSTEM\'S OWN `expired` VERDICT FIRST AND BY THE COMPUTED DAY COUNT ONLY ' +
+    'WHERE THE SYSTEM GAVE NO VERDICT OR SAID IT HAS NOT EXPIRED — so a ' +
+    'certificate the system calls expired is counted and listed as expired ' +
+    'however many days its date appears to leave, because the two can disagree ' +
+    'and being silent about one the system itself calls expired is the one ' +
+    'answer this section must never give. `reported` is how many certificates ' +
+    'the ' +
     'system holds; `expired` how many have already lapsed, `expiring_soon` how ' +
     `many have ${EXPIRY_HORIZON_DAYS} days or fewer left, and ` +
     '`expiry_unknown` how many reported no expiry date this report could read ' +
@@ -910,7 +988,9 @@ export const fleetComplianceReport: ReadOnlyTool = {
     'Directory and IPA. `server_urls` IS REPORTED WHOLE OR NOT AT ALL — a list ' +
     'holding an entry this report could not read is null rather than the ' +
     'readable part of it, since a partial list names a different set of servers ' +
-    'from the one the system holds. `credential_type` names HOW the system ' +
+    'from the one the system holds — and `unreadable` says when that happened, ' +
+    'so a null there can be told from the Active Directory case where the ' +
+    'system carries no such list at all. `credential_type` names HOW the system ' +
     'binds and NEVER ' +
     'WITH WHAT — NO PASSWORD, BIND PASSWORD, KEYTAB OR CERTIFICATE PASSES ' +
     'THROUGH THIS TOOL. `config_error` names what the system said when the ' +
@@ -945,7 +1025,10 @@ export const fleetComplianceReport: ReadOnlyTool = {
     'from a SEPARATE read, so it survives a failed check; `new_version` and ' +
     '`train` are null while `update_available` is null, because they come from ' +
     'the status the check did not produce. `check_error` and `version_error` ' +
-    'name those two failures independently. EVERY COUNT IS COMPUTED OVER ' +
+    'name those two failures independently, and `current_version` null with ' +
+    '`version_error` null is a THIRD case — the read worked and named no ' +
+    'version — which `unreadable` states rather than leaving as a bare null. ' +
+    'EVERY COUNT IS COMPUTED OVER ' +
     'EVERYTHING THE SECTION READ, and only the two lists — ' +
     '`certificates.entries` and `shares.entries` — are capped, at ' +
     `${MAX_LISTED} entries each with a ` +
