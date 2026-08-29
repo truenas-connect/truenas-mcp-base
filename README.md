@@ -33,6 +33,11 @@ confirmation UX, audit sinks) enters through injected interfaces.
   (the exact API calls to be made), phase two executes only with a single-use,
   expiring confirmation token bound to the plan's tool + arguments + targets.
   Exercised end to end by `snapshots_create`.
+- **Bounded file content** — an optional `SystemHandle.files` reader giving a
+  tool the last N lines of a path on one system, over `core.download` and an
+  adapter-supplied `ContentFetcher`. The line and byte bounds are enforced on
+  this side, and the minted download URL never reaches a tool. Absent unless
+  `connectSystems` is given a `ContentReaderFactory`; see `CLAUDE.md`.
 - **Stubs** — role mapping (always Full), audit sinks (console/noop).
 
 ## Usage sketch

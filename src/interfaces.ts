@@ -67,6 +67,80 @@ export const fullAccessRoleMapper: RoleMapper = {
   roleFor: () => Promise.resolve(Role.Full),
 };
 
+/**
+ * One chunk-at-a-time reader over a response body.
+ *
+ * Structurally what `ReadableStream.getReader()` returns, so an adapter over
+ * `fetch` needs no wrapper beyond `response.body?.getReader() ?? null`. A
+ * reader rather than an async iterable because `ReadableStream` is only
+ * async-iterable in Node — browsers still require `getReader()`, and this
+ * library runs in both.
+ */
+export interface ContentByteReader {
+  read(): Promise<{ done: boolean; value?: Uint8Array }>;
+  /**
+   * Releases the underlying resource. Called once the byte bound has stopped
+   * the read part-way through a body, so a bounded read does not leave the
+   * rest of the file streaming.
+   */
+  cancel(): Promise<unknown>;
+}
+
+/** What a {@link ContentFetcher} answers. Headers are deliberately absent: see the fetcher. */
+export interface ContentFetchResponse {
+  /** HTTP status. Anything outside 200–299 is a failure. */
+  status: number;
+  /** The body, or null where the response carried none. */
+  body: ContentByteReader | null;
+}
+
+/**
+ * Performs one HTTP GET and hands back the body as a stream.
+ *
+ * Injected rather than defaulted to the global `fetch`: TrueNAS appliances
+ * routinely present self-signed certificates, so TLS trust is a policy the
+ * adapter holds and the core cannot choose (the README's own smoke test needs
+ * `NODE_TLS_REJECT_UNAUTHORIZED=0`). The URL passed in is minted by the
+ * middleware and carries a single-use download token in its query string —
+ * an implementation must not log it.
+ */
+export type ContentFetcher = (url: string) => Promise<ContentFetchResponse>;
+
+/** The last lines of one file on one system. */
+export interface FileTail {
+  /** The path that was read, echoed back. */
+  path: string;
+  /**
+   * The lines, oldest first, at most the `maxLines` asked for. Empty means the
+   * file held no content — never an error, and never a failure to read (those
+   * throw).
+   */
+  lines: string[];
+  /**
+   * True when these lines are not the whole file: content was skipped before
+   * them, the byte ceiling stopped the read, or the file held more lines than
+   * `maxLines`.
+   */
+  truncated: boolean;
+}
+
+/**
+ * Reads bounded file content from one system (route (a); see CLAUDE.md).
+ *
+ * The seam a tool sees is this reader and nothing else — no hostname, no
+ * download URL, no credential — so a tool cannot put any of them into its
+ * arguments or its result, where the audit trail records them verbatim (S3.3).
+ */
+export interface FileContentReader {
+  /**
+   * The last `maxLines` lines of `path`.
+   *
+   * Rejects with a `FileContentError` naming the path when the path cannot be
+   * read at all; a file with no content resolves to an empty `lines` instead.
+   */
+  readTail(path: string, maxLines: number): Promise<FileTail>;
+}
+
 /** One tool execution, as reported to the {@link AuditSink} (ER-172 S3.3, V5.1). */
 export interface AuditEvent {
   /** Milliseconds since epoch. */

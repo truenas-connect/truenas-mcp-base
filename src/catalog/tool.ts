@@ -1,5 +1,6 @@
 import type { DefaultApiDirectory, TrueNasApiClient } from '@truenas/api-client';
 import { Role } from '@/interfaces';
+import type { FileContentReader } from '@/interfaces';
 
 /**
  * The API surface the tools are written against. `DefaultApiDirectory` is the
@@ -15,6 +16,14 @@ export type ApiSurface = DefaultApiDirectory;
 export interface SystemHandle {
   name: string;
   client: TrueNasApiClient<ApiSurface>;
+  /**
+   * Bounded file content, where the adapter wired one up. Optional because
+   * reading content needs an HTTP fetch the core will not choose for itself
+   * (see `ContentFetcher` in `@/interfaces`), so a registry built without one
+   * has no reader to offer — a tool that needs content must say so when this
+   * is absent rather than assume it is there.
+   */
+  files?: FileContentReader;
 }
 
 /**

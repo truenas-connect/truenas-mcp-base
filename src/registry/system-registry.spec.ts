@@ -233,6 +233,79 @@ describe('connectSystems', () => {
     expect(connected.close).toHaveBeenCalled();
     expect(registry.names()).toEqual([]);
   });
+
+  it('leaves every system without a content reader when no factory is given', async () => {
+    const registry = new SystemRegistry();
+    await connectSystems(
+      registry,
+      { getSystems: async () => [spec('a')] },
+      async () => ({ close: vi.fn() }) as unknown as TrueNasApiClient,
+    );
+    expect(registry.get('a').files).toBeUndefined();
+  });
+
+  it('attaches the content reader the factory builds, per system', async () => {
+    const registry = new SystemRegistry();
+    const seen: { name: string; hostnames: string[] }[] = [];
+    const files = { readTail: vi.fn() };
+    await connectSystems(
+      registry,
+      { getSystems: async () => [spec('a'), spec('b')] },
+      async () => ({ close: vi.fn() }) as unknown as TrueNasApiClient,
+      (target) => {
+        seen.push(target);
+        // Only "a" gets one: a factory may decline a system, and declining
+        // must leave that system usable rather than unregistered.
+        return target.name === 'a' ? files : undefined;
+      },
+    );
+    // The factory sees how to address the system and not what it is
+    // authenticated with — no apiKey, no username.
+    expect(seen).toEqual([
+      { name: 'a', hostnames: ['a.local'] },
+      { name: 'b', hostnames: ['b.local'] },
+    ]);
+    expect(registry.get('a').files).toBe(files);
+    expect(registry.get('b').files).toBeUndefined();
+  });
+
+  it('treats a throwing content-reader factory as a connect failure, closing the client', async () => {
+    const registry = new SystemRegistry();
+    const connected = { close: vi.fn() } as unknown as TrueNasApiClient;
+    await expect(
+      connectSystems(
+        registry,
+        { getSystems: async () => [spec('a')] },
+        async () => connected,
+        () => {
+          throw new Error('no base URL for this system');
+        },
+      ),
+    ).rejects.toThrow(/a: no base URL for this system/);
+    expect(connected.close).toHaveBeenCalled();
+    expect(registry.names()).toEqual([]);
+  });
+
+  it('a throwing close after a failed content-reader factory does not mask it', async () => {
+    const registry = new SystemRegistry();
+    const connected = {
+      close: vi.fn(() => {
+        throw new Error('socket already gone');
+      }),
+    } as unknown as TrueNasApiClient;
+    await expect(
+      connectSystems(
+        registry,
+        { getSystems: async () => [spec('a')] },
+        async () => connected,
+        () => {
+          throw new Error('no base URL for this system');
+        },
+      ),
+    ).rejects.toThrow(/a: no base URL for this system/);
+    expect(connected.close).toHaveBeenCalled();
+    expect(registry.names()).toEqual([]);
+  });
 });
 
 describe('defaultClientFactory', () => {
