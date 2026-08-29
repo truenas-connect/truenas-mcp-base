@@ -24,7 +24,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `certificates_list`, `cloud_credentials_list`, `alert_settings`,
   `reporting_utilisation`, `reporting_disk_io`, `reporting_space_trends`,
   `reporting_app_vm_usage`, `ha_status`, `system_health_report`,
-  `fleet_compliance_report`.
+  `fleet_compliance_report`, `fleet_health_rollup`.
 - **System registry** — 1..N named systems, each owning its own
   `@truenas/api-client` instance and credentials; `systems` selector
   (name / list / `all`, defaulting when one system is registered).

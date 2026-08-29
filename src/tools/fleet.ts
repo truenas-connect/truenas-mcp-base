@@ -1,11 +1,14 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
-// `fleet_compliance_report` is composite: it calls these five handlers rather
-// than the API, so that what it reports is by construction what those tools
-// report. None of the four files imports this one, so there is no cycle.
+// Both composites in this file call handlers rather than the API, so that what
+// they report is by construction what those tools report: `fleet_compliance_report`
+// reads five of them, and `fleet_health_rollup` reads `system_health_report`,
+// which is itself a composite over four more. None of the imported files imports
+// this one, so there is no cycle.
 import { directoryServicesStatus } from '@/tools/accounts';
 import { certificatesList } from '@/tools/certificates';
+import { HEALTH_SECTIONS, systemHealthReport } from '@/tools/reporting';
 import { sharesList } from '@/tools/shares';
 import { auditLogQuery, updateStatus } from '@/tools/system';
 
@@ -1134,6 +1137,218 @@ export const fleetComplianceReport: ReadOnlyTool = {
         check_error: updates.value?.check_error ?? null,
         version_error: updates.value?.version_error ?? null,
       },
+    };
+  },
+};
+
+/**
+ * `fleet_health_rollup`: which of my systems needs attention, one short answer
+ * each.
+ *
+ * The third composite, and the one that composes another composite: it calls
+ * `system_health_report.handler` and adds no endpoint and no read of its own, so
+ * "healthy" here is by construction what that tool means by it — one
+ * normalization per subject, read through rather than restated.
+ *
+ * **The fleet dimension is the fan-out, not this tool.** Every handler in this
+ * catalog is written single-system and the executor runs it once per target
+ * (`fanOut`), which already returns one labelled result per system and reports a
+ * call it could not run at all as an `ERROR` entry rather than dropping it. So
+ * this is a per-system tool like every other, and a caller asking for `all` systems
+ * gets the registry-wide rollup the name promises. Adding a second concurrency
+ * path here would duplicate that and lose the partial-failure reporting that
+ * comes with it.
+ *
+ * **What it drops is the point.** `system_health_report` already answers one
+ * system thoroughly, at a size that is fine once and expensive ten times over. So
+ * this keeps the verdict, the counts behind it and the worst few reasons, and
+ * drops every section — the pools, the alerts, the devices, the versions. A row
+ * that names something is the cue to call `system_health_report` on THAT system,
+ * which is the round trip the fleet-wide call was avoiding for the other nine.
+ *
+ * **Nothing is re-judged here.** The verdict is passed through as that tool
+ * derived it and no threshold, band or severity is re-read: a rollup that scored
+ * health a second way would be the drifting second opinion composites exist to
+ * avoid. What this file adds is arithmetic over the reasons and a cap on the list.
+ */
+
+/**
+ * How many reasons a row names individually.
+ *
+ * Small on purpose, and smaller than the ten `system_health_report` and
+ * `fleet_compliance_report` each allow: this is read as one row among many, where
+ * three is about what a reader takes in per system before opening the full report
+ * on the one that looks worst. Every count is over EVERY reason, so the cap can
+ * drop the line describing a finding and can never drop the finding — the same
+ * rule both other composites follow, and the whole of why a fixed-size row is
+ * safe to act on.
+ */
+const MAX_REASONS = 3;
+
+/**
+ * The severities `system_health_report` states, WORST FIRST. Position is the
+ * rank, so there is one place a severity can be added and no map that can
+ * disagree with the order.
+ */
+const SEVERITIES = ['critical', 'warning', 'unknown'] as const;
+
+/**
+ * Which verdicts mean someone has to look, and which mean nobody does.
+ *
+ * `UNKNOWN` is deliberately absent rather than mapped to either: it is a report
+ * with a hole in it, so it has NOT been established that the system is fine and
+ * it has NOT been established that anything is wrong. A verdict missing from this
+ * map answers null, which is the same reading applied to a verdict a later
+ * release of that tool might add.
+ */
+const ATTENTION = new Map<string | null, boolean>([
+  ['CRITICAL', true],
+  ['WARNING', true],
+  ['OK', false],
+]);
+
+/** One finding, carried forward exactly as `system_health_report` stated it. */
+interface RollupReason {
+  section: string | null;
+  severity: string | null;
+  detail: string | null;
+}
+
+/**
+ * Where a severity sits in {@link SEVERITIES}, or -1 for one this rollup does not
+ * rank.
+ *
+ * -1 sorts a reason FIRST, ahead of `critical`, which is the conservative
+ * direction: a severity this rollup cannot place has not been shown to be
+ * harmless, and putting it where the cap could hide it would be reading an
+ * unrecognised finding as a mild one.
+ */
+function severityRank(severity: unknown): number {
+  return (SEVERITIES as readonly unknown[]).indexOf(severity);
+}
+
+/** How many of `reasons` stand at one severity. Over every reason, never the listed few. */
+function countAt(reasons: RollupReason[], severity: string): number {
+  return reasons.filter((reason) => reason.severity === severity).length;
+}
+
+export const fleetHealthRollup: ReadOnlyTool = {
+  name: 'fleet_health_rollup',
+  description:
+    'One call that answers "which of my TrueNAS systems needs attention": one ' +
+    'health verdict per system, with the worst few reasons behind it and ' +
+    'nothing else. Run it across the fleet and each system answers separately, ' +
+    'as one short row. IT COMPOSES `system_health_report` AND ADDS NOTHING OF ' +
+    'ITS OWN — same verdict, same reasons, same thresholds, nothing re-judged ' +
+    'here — AND IT DELIBERATELY DROPS EVERY SECTION OF THAT REPORT: no pools, no ' +
+    'alerts, no devices, no versions. A ROW NAMING SOMETHING IS THE CUE TO CALL ' +
+    '`system_health_report` ON THAT SYSTEM for the detail; that is the round trip ' +
+    'this call is avoiding for all the systems that named nothing. `system` is ' +
+    'the system this row is about, repeated in the row so that rows collected ' +
+    'from several systems stay attributable one by one. A SYSTEM THAT COULD NOT ' +
+    'BE REACHED IS NEVER SILENTLY ABSENT AND IS ANSWERED HERE RATHER THAN AS A ' +
+    'FAILED CALL: every read beneath it fails, so it comes back as an ordinary ' +
+    'row with `verdict` `UNKNOWN`, `needs_attention` null, `sections_unreadable` ' +
+    'equal to `sections_total`, and a reason per section naming what the system ' +
+    'said. THAT ROW IS NOT A HEALTHY SYSTEM. Separately, the multi-system fan-out ' +
+    'labels every row with the system it came from and reports a system whose ' +
+    'call could not be run at all as a failed result carrying the error, so no ' +
+    'system in the registry is missing from the answer either way. `verdict` is ' +
+    '`system_health_report`\'s own verdict ' +
+    'passed through verbatim: `CRITICAL` where something is already broken, ' +
+    '`WARNING` where something needs attention before it breaks, `UNKNOWN` where ' +
+    'nothing bad was found AND SOMETHING COULD NOT BE ESTABLISHED, and `OK` — ' +
+    'which is the narrow claim that every section was read and none raised ' +
+    'anything. `UNKNOWN` IS NEVER "HEALTHY". `verdict` is null only where that ' +
+    'report named no verdict this rollup could read, which is itself not a ' +
+    'healthy answer. `needs_attention` IS THE FIELD TO SORT AND FILTER A FLEET ' +
+    'ON, so that a system needing work is told from a healthy one by a field ' +
+    'rather than by reading prose: true at `CRITICAL` and `WARNING`, FALSE ONLY ' +
+    'AT `OK`, and NULL AT `UNKNOWN` AND AT ANY VERDICT THIS ROLLUP DOES NOT ' +
+    'RANK. NULL IS NOT FALSE — it is a system whose health was not established, ' +
+    'and treating it as healthy is exactly the fail-open the `UNKNOWN` verdict ' +
+    'exists to prevent. TO ACT ON EVERYTHING NOT CONFIRMED HEALTHY, READ ' +
+    '`needs_attention !== false` RATHER THAN `=== true`. `reason_counts` counts ' +
+    'the findings behind the verdict over EVERY reason: `critical` is something ' +
+    'already broken, `warning` something to fix before it breaks, and `unknown` a ' +
+    'part of the report that could not be established — which is present at every ' +
+    'verdict, so a `CRITICAL` row still says which parts of itself are ' +
+    'incomplete. `unranked` counts findings at a severity this rollup does not ' +
+    'rank; it is 0 against every severity that report states today, and a nonzero ' +
+    'value means it has grown one, NOT that those findings were dropped — they ' +
+    'are in `reasons_reported` and sort FIRST in `reasons`. `reasons_reported` is ' +
+    'how many findings there are in total, and IT IS 0 ONLY WHEN `verdict` IS ' +
+    '`OK`. `reasons` names the worst of them individually, WORST FIRST, each with ' +
+    'the `severity`, the `section` of `system_health_report` that found it — ' +
+    '`pools`, `alerts`, `disks` or `updates` — and the `detail` in words. IT IS ' +
+    `CAPPED AT ${MAX_REASONS} ENTRIES, with \`reasons_truncated\` saying whether ` +
+    'anything was left out, so this list can drop the line describing a finding ' +
+    'and can never drop the finding, which is in the counts either way. ' +
+    '`sections_unreadable` is how many of the `sections_total` sections of ' +
+    '`system_health_report` could not be read at all on this system. IT IS NOT A ' +
+    'COUNT OF FAULTS — it is how much of the report is missing, so a nonzero ' +
+    'value means the verdict rests on an incomplete read, and a value equal to ' +
+    '`sections_total` is what a system that answered nothing at all looks like. ' +
+    'IT IS NOT A ' +
+    'COMPLETE MEASURE OF WHAT IS MISSING: a section can be read and still fail to establish ' +
+    'what it was asked for, which is a finding at `unknown` rather than an ' +
+    'unreadable section, so `reason_counts.unknown` is the field to read for how ' +
+    'much of this verdict is holes. This ' +
+    'tool only reads. It does not scrub, replace a disk, dismiss an alert, free ' +
+    'space or install an update on any system. NO field beyond those named here ' +
+    'is returned, whatever a later TrueNAS release adds to the underlying ' +
+    'responses.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler(ctx) {
+    const report = (await systemHealthReport.handler(ctx, {})) as Record<string, unknown>;
+    const verdict = textOrNull(report['verdict']);
+    // Mapped rather than walked, so a `reasons` that is not a list throws and
+    // fails THIS SYSTEM'S slice of the fan-out — which is reported as a failed
+    // result carrying the error — instead of reading as a system with nothing to
+    // report, which is the one wrong answer a rollup like this can give.
+    const reasons: RollupReason[] = (report['reasons'] as Record<string, unknown>[]).map(
+      (reason) => ({
+        section: textOrNull(reason['section']),
+        severity: textOrNull(reason['severity']),
+        detail: textOrNull(reason['detail']),
+      }),
+    );
+
+    const critical = countAt(reasons, 'critical');
+    const warning = countAt(reasons, 'warning');
+    const unknown = countAt(reasons, 'unknown');
+    // Ordered here rather than in the map, because this ordering is what makes
+    // the cap honest: the reasons that survive it are the worst ones. `sort` is
+    // stable, so reasons at the same severity keep the order the report gave.
+    const ordered = [...reasons].sort((a, b) => severityRank(a.severity) - severityRank(b.severity));
+
+    return {
+      system: ctx.system.name,
+      verdict,
+      needs_attention: ATTENTION.get(verdict) ?? null,
+      reason_counts: {
+        critical,
+        warning,
+        unknown,
+        // By subtraction rather than by a fourth pass, so that this and
+        // `reasons_reported` cannot disagree: every reason is in exactly one of
+        // the four counts however that report spells its severities.
+        unranked: reasons.length - critical - warning - unknown,
+      },
+      reasons_reported: reasons.length,
+      reasons: ordered.slice(0, MAX_REASONS),
+      reasons_truncated: ordered.length > MAX_REASONS,
+      // The list comes from the report's own file rather than being restated
+      // here: a section added there has to be named in it to compile, so this
+      // count follows rather than drifting quietly one section behind.
+      sections_total: HEALTH_SECTIONS.length,
+      // Read off each section's own `unavailable` rather than off the reasons,
+      // which state the same gap in prose.
+      sections_unreadable: HEALTH_SECTIONS.filter(
+        (name) => textOrNull((report[name] as Record<string, unknown>)['unavailable']) !== null,
+      ).length,
     };
   },
 };

@@ -2219,8 +2219,20 @@ const DEVICE_FAILED = ['FAULTED', 'DEGRADED', 'OFFLINE', 'UNAVAIL', 'REMOVED'];
 /** How severe a finding is. `unknown` is "not established", never "fine". */
 type Severity = 'critical' | 'warning' | 'unknown';
 
-/** The four sections of the report, each backed by exactly one composed tool. */
-type SectionName = 'pools' | 'alerts' | 'disks' | 'updates';
+/**
+ * The sections of the report, each backed by exactly one composed tool and each
+ * carrying an `unavailable` of its own.
+ *
+ * Exported because `fleet_health_rollup` composes this report and counts how many
+ * of its sections could not be read: the list has to be declared once, or a
+ * section added here is one that rollup silently does not know about. {@link
+ * SectionName} is derived from it rather than written beside it, so a section
+ * that raises a reason without being named here does not compile.
+ */
+export const HEALTH_SECTIONS = ['pools', 'alerts', 'disks', 'updates'] as const;
+
+/** One section of the report. */
+type SectionName = (typeof HEALTH_SECTIONS)[number];
 
 /** One thing the report found, and which section found it. */
 interface Reason {

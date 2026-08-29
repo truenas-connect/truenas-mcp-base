@@ -158,6 +158,31 @@ section is a non-empty `scope`. **A field named for the API field it came from
 inherits that field's promise**, which here is a promise the payload does not
 keep.
 
+### A fleet-wide tool is still written single-system (#46)
+
+`fleet_health_rollup` answers "which of my systems needs attention" across the
+whole registry, and its handler takes one `SystemHandle` like every other. The
+fleet dimension is the executor's fan-out: it runs a handler once per target,
+labels each result with the system it came from, and reports a call it could not
+run at all as an `ERROR` entry rather than dropping it. **A tool whose name says
+"fleet" is not a reason to reach for the registry or to start its own
+concurrency** — that would duplicate `fanOut` and lose the partial-failure
+reporting that comes with it.
+
+What such a tool owes instead is a row that is worth collecting: small, fixed in
+size regardless of how big the system is, and carrying the system's own name so
+rows stay attributable once flattened. Measured on the bundle, over a registry of
+eight-pool systems: 573 bytes a row against 4,642 for the full
+`system_health_report`, and flat as the system grows.
+
+The second half is what it drops. `fleet_health_rollup` composes
+`system_health_report` — a composite over a composite — and keeps the verdict,
+the counts behind it and the worst three reasons, discarding every section. It
+re-judges nothing: no threshold, band or severity is read a second time, because
+a rollup that scored health its own way would be the drifting second opinion
+composites exist to prevent. **Summarise by dropping fields, never by
+recomputing them**, and point the caller at the composed tool for the detail.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
