@@ -272,8 +272,8 @@ function byNewestFirst(a: { created: number | null }, b: { created: number | nul
 export const snapshotsList: ReadOnlyTool = {
   name: 'snapshots_list',
   description:
-    'Lists the ZFS snapshots that exist, newest first, optionally for one ' +
-    'dataset. Each entry carries `name`, the full `dataset@snapshot` name; ' +
+    'Lists the ZFS snapshots that exist, optionally for one dataset, newest ' +
+    'first. Each entry carries `name`, the full `dataset@snapshot` name; ' +
     '`dataset`, the dataset the snapshot was taken of, which matches `id` in ' +
     '`storage_list_datasets`; `created`, when it was taken, as an ISO 8601 ' +
     'UTC timestamp; and `referenced_bytes`, the data that snapshot ' +
@@ -286,11 +286,14 @@ export const snapshotsList: ReadOnlyTool = {
     'than that it is not there. The result is bounded: `snapshots` holds at ' +
     'most `limit` entries — 100 by default and 1000 at most, and the `limit` ' +
     'returned is the bound actually applied — while `truncated` is true when ' +
-    'the system holds more snapshots than were returned. The system is asked ' +
-    'for the most recent ones first, so a truncated list holds the newest ' +
-    'snapshots rather than an arbitrary window; it is still not the whole set, ' +
-    'so narrow it with `dataset`, or raise `limit`, before concluding from a ' +
-    'truncated list that some snapshot does not exist.',
+    'the system holds more snapshots than were returned. The newest-first ' +
+    'order applies to the entries returned. Which snapshots those are, when ' +
+    '`truncated` is true, is the system\'s own choice and is not necessarily ' +
+    'the newest ones it holds — so a truncated list is evidence about the ' +
+    'snapshots it names and about nothing else: it cannot show that a ' +
+    'snapshot is absent. Narrow it with `dataset`, or raise `limit`, until ' +
+    '`truncated` is false, and only then read the list as everything that ' +
+    'exists.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -320,15 +323,20 @@ export const snapshotsList: ReadOnlyTool = {
         'pool.snapshot.query',
         dataset === null ? [] : [['dataset', '=', dataset]],
         {
-          // The bound is applied by the system, so what it is asked to order by
-          // decides WHICH snapshots a truncated list holds — sorting here after
-          // it has already cut the list only orders the window it chose, and
-          // that window would be the oldest snapshots on the system rather than
-          // the newest. `createtxg` is the ZFS transaction group the snapshot
-          // was created in and only ever increases, so descending it is
-          // newest-first without depending on a clock or a property lookup.
-          order_by: ['-createtxg'],
-          // One more than the bound. That extra row is what says the system
+          // No `order_by`, deliberately. The system applies the bound, so what
+          // it is asked to sort on would decide WHICH snapshots a truncated
+          // list holds — and no field of a snapshot row orders it in time
+          // soundly. `createtxg` is a string, so a pool whose transaction
+          // groups have crossed a digit boundary sorts 999999 after 1000000;
+          // it is also the transaction group on the system holding the
+          // snapshot, so on a replication target it orders by when each
+          // snapshot was RECEIVED rather than when it was taken. The creation
+          // time itself is nested inside `properties` behind a dotted path.
+          // Asking for an order that is wrong in those cases would be worse
+          // than asking for none: the description could then claim a truncated
+          // list holds the newest snapshots, and on those systems it would not.
+          //
+          // One more row than the bound. That extra row is what says the system
           // held more than fit; it is counted and then dropped.
           limit: limit + 1,
           // Only the two properties this tool reports. A snapshot row
@@ -358,11 +366,10 @@ export const snapshotsList: ReadOnlyTool = {
       };
     });
     return {
-      // The order the rows are returned in is this tool's own, taken on the
-      // creation time it reports rather than left to the field the system was
-      // asked to sort on: the two agree, and only one of them is a field the
-      // caller can see. It is also what puts a snapshot whose creation time
-      // could not be read last rather than wherever the system placed it.
+      // The order is this tool's own, taken on the creation time it reports,
+      // so that what a caller reads is ordered by a field it can see. It
+      // orders the window rather than choosing it — which is why the
+      // description scopes the ordering to the entries returned.
       snapshots: rows.sort(byNewestFirst).map((entry) => entry.row),
       truncated: snapshots.length > limit,
       limit,

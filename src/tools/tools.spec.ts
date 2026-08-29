@@ -1344,15 +1344,16 @@ describe('snapshots_list', () => {
     ]);
   });
 
-  it('asks the system for the newest rows, one more than the bound, and two properties', async () => {
+  it('asks for one more row than the bound, and for only the two properties it reports', async () => {
     const { ctx, query } = fakeSystem({ ['pool.snapshot.query']: [snapshot()] });
     await snapshotsList.handler(ctx, {});
-    // The ordering is what decides WHICH snapshots a truncated list holds —
-    // the system applies the bound, so sorting only after it has cut the list
-    // would order the oldest window rather than choose the newest one. The
-    // extra row is what tells a complete list from a truncated one.
+    // No `order_by`: the system applies the bound, so an order asked for here
+    // would choose which snapshots a truncated list holds, and no field of a
+    // snapshot row orders it in time soundly — `createtxg` is a string, and it
+    // counts transaction groups on the system holding the snapshot rather than
+    // the one that took it. The extra row is what tells a complete list from a
+    // truncated one.
     expect(query).toHaveBeenCalledWith('pool.snapshot.query', [], {
-      order_by: ['-createtxg'],
       limit: 101,
       extra: { properties: ['creation', 'referenced'] },
     });
@@ -1362,7 +1363,6 @@ describe('snapshots_list', () => {
     const { ctx, query } = fakeSystem({ ['pool.snapshot.query']: [snapshot()] });
     await snapshotsList.handler(ctx, { dataset: 'tank/media' });
     expect(query).toHaveBeenCalledWith('pool.snapshot.query', [['dataset', '=', 'tank/media']], {
-      order_by: ['-createtxg'],
       limit: 101,
       extra: { properties: ['creation', 'referenced'] },
     });
@@ -1406,6 +1406,9 @@ describe('snapshots_list', () => {
   });
 
   it('bounds the list and says so when the system holds more', async () => {
+    // Which two come back is the system's choice — the bound is applied there,
+    // and this tool orders that window rather than choosing it. `truncated` is
+    // what says the list is not the whole set.
     const result = await listing(
       [snapshot({ name: 'a' }), snapshot({ name: 'b' }), snapshot({ name: 'c' })],
       { limit: 2 },
@@ -1428,7 +1431,6 @@ describe('snapshots_list', () => {
       // The bound reported and the bound asked of the middleware are the same
       // number, so a caller reading `limit` is reading what actually applied.
       expect(query).toHaveBeenCalledWith('pool.snapshot.query', [], {
-        order_by: ['-createtxg'],
         limit: result.limit + 1,
         extra: { properties: ['creation', 'referenced'] },
       });
