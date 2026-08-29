@@ -121,8 +121,10 @@ async function nfsShares(system: SystemHandle): Promise<Share[]> {
 /**
  * One protocol's shares, with a failure caught and named rather than thrown.
  *
- * The read is passed as a thunk so that a synchronous throw out of the client
- * is caught here too, and not only a rejected promise.
+ * The read is passed as a thunk so that the call is made inside the `try`,
+ * which keeps this correct for a read that throws before it returns a promise
+ * at all. Neither caller can: both are `async`, so a throw anywhere inside them
+ * arrives as a rejection.
  */
 async function attempt(protocol: Protocol, read: () => Promise<Share[]>): Promise<Attempt> {
   try {
