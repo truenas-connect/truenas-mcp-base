@@ -76,9 +76,12 @@ const NO_DATA = 'the system collected no data for this metric in this range';
 const NO_INTERFACES = 'the system named no interface to graph';
 
 /**
- * What a metric whose graph came back without the dimension it is derived from
- * is marked with. Not the same as {@link NO_DATA}: the system answered with a
- * series, and it is not one this reduction can be computed from.
+ * What a metric whose graph's LEGEND did not name the dimension it is derived
+ * from is marked with. Not the same as {@link NO_DATA}: the system answered
+ * with a series, and it is not one this reduction can be computed from.
+ *
+ * Decided from the legend rather than from the samples, which is what keeps the
+ * two apart — see {@link graphMetric}.
  */
 const NO_DIMENSION = 'the system reported no series this metric can be derived from';
 
@@ -346,11 +349,27 @@ interface Point {
 }
 
 /**
- * How a metric is computed from one sample's dimensions. Null where this sample
- * does not yield one — a dimension the graph did not carry, or a total of zero
- * to divide by.
+ * How a metric is computed from a graph.
+ *
+ * The dimension names travel WITH the computation rather than being inferred
+ * from it, because they are what tells a graph that carries no such series
+ * apart from a graph that carries it and collected nothing — a distinction the
+ * samples alone cannot make, for the reason {@link graphMetric} gives.
  */
-type Derivation = (dimensions: Dimensions) => number | null;
+interface Derivation {
+  /**
+   * The legend names, lowercased, without which the metric cannot be derived
+   * from this graph at all. A name here missing from the legend is
+   * {@link NO_DIMENSION}; every other reason a sample yields nothing is a
+   * property of that sample rather than of the graph.
+   */
+  requires: string[];
+  /**
+   * The value at one sample, or null where this sample does not yield one — a
+   * dimension the row reported as null, or a total of zero to divide by.
+   */
+  from: (dimensions: Dimensions) => number | null;
+}
 
 /** What a graph yielded for one metric. */
 interface Samples {
@@ -367,16 +386,23 @@ interface Samples {
  * bucket: the system is asked for the range and is not obliged to answer with
  * exactly it, and a sample from before the start belongs in no bucket of it.
  *
- * The count of rows in the range is kept beside them because it is what
- * separates the two ways a metric ends up with nothing — a system that recorded
- * no sample, and a graph whose samples carry no dimension this metric is derived
- * from. Both are an empty list of points and they are different facts.
+ * The count of rows in the range is kept beside them because it is what says
+ * whether the system recorded anything here at all, which an empty list of
+ * points on its own does not.
+ *
+ * The column index is passed in rather than read from the legend here, because
+ * {@link graphMetric} needs the same index to decide which marker an empty
+ * result is.
  */
-function points(graph: GraphAttempt, range: Range, derive: Derivation): Samples {
-  const index = columns(graph.legend);
+function points(
+  rows: unknown[],
+  index: Map<string, number>,
+  range: Range,
+  derive: Derivation,
+): Samples {
   const found: Point[] = [];
   let inRange = 0;
-  for (const row of graph.rows) {
+  for (const row of rows) {
     if (!Array.isArray(row)) continue;
     const at = rowMillis(row[0]);
     if (at === null || at < range.start || at > range.end) continue;
@@ -389,7 +415,7 @@ function points(graph: GraphAttempt, range: Range, derive: Derivation): Samples 
       // what stops a gap in collection reading as an idle system.
       if (typeof value === 'number' && Number.isFinite(value)) dimensions.set(name, value);
     }
-    const value = derive(dimensions);
+    const value = derive.from(dimensions);
     if (value !== null) found.push({ at, value });
   }
   return { found, inRange };
@@ -521,10 +547,13 @@ const NETWORK_UNIT = 'kilobits_per_second';
  * anything outside that is a graph this reading does not hold of, and a
  * utilisation of -3% would be read as a real measurement.
  */
-const cpuPercent: Derivation = (dimensions) => {
-  const idle = dimensions.get('idle');
-  if (idle === undefined) return null;
-  return Math.min(100, Math.max(0, 100 - idle));
+const cpuPercent: Derivation = {
+  requires: ['idle'],
+  from: (dimensions) => {
+    const idle = dimensions.get('idle');
+    if (idle === undefined) return null;
+    return Math.min(100, Math.max(0, 100 - idle));
+  },
 };
 
 /**
@@ -556,13 +585,16 @@ const MEMORY_PARTS = ['free', 'used', 'cached', 'buffers'];
  * partitioning the same memory. Null where either is missing, and null where the
  * parts sum to nothing to take a share of.
  */
-const memoryUsedPercent: Derivation = (dimensions) => {
-  const used = dimensions.get('used');
-  if (used === undefined || dimensions.get('free') === undefined) return null;
-  let total = 0;
-  for (const part of MEMORY_PARTS) total += dimensions.get(part) ?? 0;
-  if (total <= 0) return null;
-  return Math.min(100, Math.max(0, (used / total) * 100));
+const memoryUsedPercent: Derivation = {
+  requires: ['used', 'free'],
+  from: (dimensions) => {
+    const used = dimensions.get('used');
+    if (used === undefined || dimensions.get('free') === undefined) return null;
+    let total = 0;
+    for (const part of MEMORY_PARTS) total += dimensions.get(part) ?? 0;
+    if (total <= 0) return null;
+    return Math.min(100, Math.max(0, (used / total) * 100));
+  },
 };
 
 /**
@@ -575,9 +607,12 @@ const memoryUsedPercent: Derivation = (dimensions) => {
  * carries nothing this result needs.
  */
 function throughput(dimension: string): Derivation {
-  return (dimensions) => {
-    const value = dimensions.get(dimension);
-    return value === undefined ? null : Math.abs(value);
+  return {
+    requires: [dimension],
+    from: (dimensions) => {
+      const value = dimensions.get(dimension);
+      return value === undefined ? null : Math.abs(value);
+    },
   };
 }
 
@@ -744,6 +779,19 @@ export const reportingUtilisation: ReadOnlyTool = {
  * different facts about the system: the read failed, the graph carried no
  * series this metric is derived from, and the graph was read and held no sample
  * in the range. Only the last is "the system was not recording".
+ *
+ * Which of the last two an empty result is is decided from the LEGEND, and it
+ * has to be: a row whose dimensions are all null — netdata's own marker for a
+ * second it collected nothing in — is indistinguishable from a row missing the
+ * dimension once {@link points} has dropped the non-numeric values. Counting
+ * rows would therefore report a collection GAP inside retention, which is
+ * exactly the "was it busy at 3am?" case this tool is built for, as a graph
+ * that carries no such series at all.
+ *
+ * A graph holding no row in the range at all is {@link NO_DATA} whatever its
+ * legend named, which is the weaker of the two claims and the only one the
+ * system's answer supports: nothing was collected here, and a legend alone says
+ * nothing about whether the series would have been derivable had it been.
  */
 function graphMetric(
   metric: MetricName,
@@ -754,10 +802,11 @@ function graphMetric(
   derive: Derivation,
 ): MetricReport {
   if (graph.error !== null) return unavailable(metric, iface, unit, graph.error);
-  const samples = points(graph, range, derive);
-  if (samples.inRange === 0) return unavailable(metric, iface, unit, NO_DATA);
-  // Rows inside the range that yielded no value are a dimension this metric is
-  // derived from that the graph did not carry — the samples were there.
-  if (samples.found.length === 0) return unavailable(metric, iface, unit, NO_DIMENSION);
-  return summarise(metric, iface, unit, samples.found, range);
+  const carried = columns(graph.legend);
+  const samples = points(graph.rows, carried, range, derive);
+  if (samples.found.length > 0) return summarise(metric, iface, unit, samples.found, range);
+  if (samples.inRange > 0 && derive.requires.some((name) => !carried.has(name))) {
+    return unavailable(metric, iface, unit, NO_DIMENSION);
+  }
+  return unavailable(metric, iface, unit, NO_DATA);
 }

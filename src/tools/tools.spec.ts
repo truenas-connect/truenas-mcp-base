@@ -8040,6 +8040,26 @@ describe('reporting_utilisation', () => {
     });
   });
 
+  it('marks a gap in collection as no data, not as a graph carrying no such series', async () => {
+    // Netdata stamps a second it collected nothing in with a row of nulls, so
+    // these rows are inside the range and the legend does name `idle`. Deciding
+    // this from the rows rather than from the legend would answer "this system
+    // reports no series CPU utilisation can be derived from" — that it does not
+    // record CPU at all — for what is a gap at 3am.
+    expect(
+      await cpuOnly(
+        ['time', 'user', 'system', 'idle'],
+        [
+          [at(60_000), null, null, null],
+          [at(360_000), null, null, null],
+        ],
+      ),
+    ).toMatchObject({
+      buckets: [],
+      unavailable: 'the system collected no data for this metric in this range',
+    });
+  });
+
   it('names a failed graph read on that metric alone', async () => {
     const fake = reportingSystem(
       { memory: memoryGraph, ['interface:eno1']: netGraph },
@@ -8191,20 +8211,22 @@ describe('reporting_utilisation', () => {
   });
 
   it('reports no memory percentage where nothing accounts for the total', async () => {
-    const cases: [unknown[], unknown[]][] = [
-      // No `used` to report.
-      [['time', 'free', 'cached'], [[at(60_000), 100, 20]]],
+    const noSeries = 'the system reported no series this metric can be derived from';
+    const noData = 'the system collected no data for this metric in this range';
+    const cases: [unknown[], unknown[], string][] = [
+      // No `used` to report: the graph carries no series this is derived from.
+      [['time', 'free', 'cached'], [[at(60_000), 100, 20]], noSeries],
       // `used` alone is its own total, and dividing it by itself would report
       // every system as fully out of memory.
-      [['time', 'used'], [[at(60_000), 500]]],
-      // Nothing to take a share of.
-      [['time', 'free', 'used'], [[at(60_000), 0, 0]]],
+      [['time', 'used'], [[at(60_000), 500]], noSeries],
+      // The graph carries both series and this sample has nothing to take a
+      // share of — a property of the sample rather than of the graph, so it
+      // reads as a range that yielded no measurement.
+      [['time', 'free', 'used'], [[at(60_000), 0, 0]], noData],
     ];
-    for (const [legend, data] of cases) {
+    for (const [legend, data, expected] of cases) {
       const fake = reportingSystem({ memory: graph(legend, data) });
-      expect(metric(await reported(fake), 'memory_used_percent').unavailable).toBe(
-        'the system reported no series this metric can be derived from',
-      );
+      expect(metric(await reported(fake), 'memory_used_percent').unavailable).toBe(expected);
     }
   });
 
@@ -8213,7 +8235,7 @@ describe('reporting_utilisation', () => {
     expect(metric(await reported(fake), 'memory_used_percent').mean).toBe(0);
   });
 
-  it('reads a graph the system answered in a shape this tool cannot use as no data', async () => {
+  it('reports nothing, with a stated reason, for a graph in a shape it cannot use', async () => {
     const shapes: unknown[] = [
       'not a list',
       [],
@@ -8223,7 +8245,12 @@ describe('reporting_utilisation', () => {
     ];
     for (const answer of shapes) {
       const fake = reportingSystem({ cpu: answer });
-      expect(metric(await reported(fake), 'cpu_percent').min).toBeNull();
+      const reading = metric(await reported(fake), 'cpu_percent');
+      expect(reading.min).toBeNull();
+      // Which marker it is depends on whether any row survived — the last shape
+      // holds one, under a legend naming nothing. What every shape must do is
+      // say why there is nothing, rather than report a measurement.
+      expect(reading.unavailable).not.toBeNull();
     }
   });
 
