@@ -21,13 +21,11 @@ import { errorText, numberOrNull, recordOrNull, textList, textOrNull } from '@/t
  * the two things the catalog wants here (interface state, and the VLANs and
  * bridges above it) are one tool rather than two reads of the same rows.
  *
- * The pinned client types the query response as `Record<string, unknown>`
- * (`InterfaceEntry` is a bare record), so every field is read rather than
- * trusted, the way `storage.ts` reads a ZFS property. The field NAMES below come
- * from the client's own `InterfaceEntryInput` and `InterfaceEntryState`
- * declarations, which describe this same record on the create and event sides;
- * they are strong evidence and not a guarantee about the query response, and a
- * name that turns out wrong costs a null rather than a wrong value.
+ * Every field is read rather than trusted, the way `storage.ts` reads a ZFS
+ * property. The client declares `InterfaceEntry` and the field NAMES below
+ * agree with it, but a declaration is a claim about what the middleware sends
+ * rather than about the value received — strong evidence and not a guarantee,
+ * and a name that turns out wrong costs a null rather than a wrong value.
  *
  * The mapping is an allowlist rather than a trim, as in `pools.ts`. A raw
  * interface row carries the whole `state` sub-object — supported media lists,
@@ -39,12 +37,12 @@ import { errorText, numberOrNull, recordOrNull, textList, textOrNull } from '@/t
  */
 
 /**
- * The pinned client answers `interface.query` as a bare record, so every field
- * and every sub-object of one arrives as `unknown` and is read through
- * `common.ts`'s guards. `recordOrNull` is what stops a reported-as-null `state`
- * being indexed, and what keeps a list from being read as a record: `state` and
- * a port entry are records, and reading a list as one would answer null for
- * every field rather than saying the shape was not what this tool reads.
+ * Every field of an `interface.query` row, and every sub-object of one, is read
+ * through `common.ts`'s guards rather than off the client's declaration.
+ * `recordOrNull` is what stops a reported-as-null `state` being indexed, and
+ * what keeps a list from being read as a record: `state` and a port entry are
+ * records, and reading a list as one would answer null for every field rather
+ * than saying the shape was not what this tool reads.
  */
 
 /** The entries of a list field, or an empty list where the field was not one. */
@@ -357,18 +355,16 @@ export const networkInterfaces: ReadOnlyTool = {
  * has the reverse.
  *
  * That comparison is what distinguishes an inherited value from a configured
- * one, rather than a field on the configuration saying so. The client types the
- * configuration response as a bare `Record<string, unknown>` — nothing about it
- * is guaranteed by the types — while `NetworkGeneralSummaryResult` IS typed,
- * with `default_routes` and `nameservers` on it. So the effective side is the
- * grounded half and the configured side is read defensively, field by field,
- * the way an interface row is read above. Most configured field NAMES come from
- * the client's own `NetWorkConfigurationUpdate`, which describes this same
- * record on the update side: strong evidence rather than a guarantee, and a
- * name that turns out wrong costs a null rather than a wrong value. The
- * exception is `hostname_local`, which the middleware adds when it READS the
- * record and so cannot appear on an update type — see `localHostname`, which
- * is why that one is read with a fallback rather than on its own.
+ * one, rather than a field on the configuration saying so. The client declares
+ * both sides — `NetworkConfiguration` here and `NetworkGeneralSummaryResult`
+ * for the summary — and neither declaration is what either side is read
+ * through: the configured side is read defensively, field by field, the way an
+ * interface row is read above, and a name that turns out wrong costs a null
+ * rather than a wrong value. `hostname_local` is the field that most needs
+ * that. The middleware adds it when it READS the record rather than storing it,
+ * so a release that does not add it still answers with the field that was
+ * correct before HA — see `localHostname`, which is why that one is read with a
+ * fallback rather than on its own, whatever the type says it is.
  *
  * Only the configuration read can fail the tool. A system whose configuration
  * read and whose routes did not still has most of an answer, and `failures` is

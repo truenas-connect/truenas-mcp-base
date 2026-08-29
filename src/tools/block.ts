@@ -349,12 +349,12 @@ export const iscsiList: ReadOnlyTool = {
 };
 
 /**
- * The NVMe-oF reads below need `numberOrNull` where the iSCSI ones do not: the
- * pinned client types a subsystem entry as `Record<string, unknown>`, so every
- * field of one — including the id the other two reads are joined on — arrives
- * as `unknown` and has to be read rather than trusted. Non-finite is excluded
- * there for a reason this family feels directly: an id that is `NaN` joins
- * nothing and a size that is `NaN` measures nothing.
+ * The NVMe-oF reads below need `numberOrNull` where the iSCSI ones do not: a
+ * subsystem's id is what the other two reads are joined on, and the client
+ * declaring it `number` is a claim about what the middleware sends rather than
+ * about the value received, so it is read rather than trusted. Non-finite is
+ * excluded there for a reason this family feels directly: an id that is `NaN`
+ * joins nothing and a size that is `NaN` measures nothing.
  */
 
 /** One namespace of a subsystem: a block device, as an initiator addresses it. */
