@@ -43,16 +43,9 @@ interface Failure {
   error: string;
 }
 
-/**
- * One protocol's rows, or the failure that stopped them being read.
- *
- * Generic in the row because `shares_list` and `share_access` read the same two
- * queries for different fields: the first wants the share as it is presented,
- * the second wants the NFS restrictions alongside it. The failure half is
- * identical for both and is what this exists to share.
- */
-interface Attempt<T> {
-  rows: T[];
+/** One protocol's shares, or the failure that stopped them being read. */
+interface Attempt {
+  rows: AccessTarget[];
   failure: Failure | null;
 }
 
@@ -164,8 +157,12 @@ async function smbTargets(system: SystemHandle): Promise<AccessTarget[]> {
       comment: textOrNull(share.comment),
     },
     readOnly: share.readonly ?? null,
-    // A fact about the protocol: SMB has no export restrictions and no id
-    // mapping, so there is nothing here rather than an empty set of them.
+    // Null rather than an empty set: nothing in this shape has an NFS
+    // counterpart. The share row the targeted surface returns
+    // (`SharingSMBEntry$2`) carries no host or network restriction and no id
+    // mapping at all — older TrueNAS releases had `hostsallow`/`hostsdeny` on
+    // the SMB share, and the client's directory for this version does not, so
+    // there is no field here to drop rather than a field being ignored.
     nfs: null,
   }));
 }
@@ -207,7 +204,10 @@ async function nfsTargets(system: SystemHandle): Promise<AccessTarget[]> {
  * at all. Neither caller can: both are `async`, so a throw anywhere inside them
  * arrives as a rejection.
  */
-async function attempt<T>(protocol: Protocol, read: () => Promise<T[]>): Promise<Attempt<T>> {
+async function attempt(
+  protocol: Protocol,
+  read: () => Promise<AccessTarget[]>,
+): Promise<Attempt> {
   try {
     return { rows: await read(), failure: null };
   } catch (reason) {
@@ -422,19 +422,34 @@ function accessEntry(ace: unknown): AccessEntry {
   };
 }
 
-/** The ACL response, mapped to the fields this tool names. */
-function mapAcl(row: Record<string, unknown>): Acl {
-  const entries = row['acl'];
+/**
+ * The ACL response, mapped to the fields this tool names.
+ *
+ * The parameter names the fields it reads rather than taking a record, so that
+ * a client-directory bump renaming one of them is a compile error here. The
+ * three ACL result shapes the call can answer with all carry these, and the
+ * runtime guards below stay because the response is still data: the type says
+ * the field is there, not that the system filled it sensibly.
+ */
+function mapAcl(row: {
+  acltype: string;
+  trivial: boolean;
+  user: string | null;
+  group: string | null;
+  uid: number | null;
+  gid: number | null;
+  acl: unknown;
+}): Acl {
   return {
-    type: textOrNull(row['acltype']),
-    trivial: typeof row['trivial'] === 'boolean' ? row['trivial'] : null,
-    owner_user: textOrNull(row['user']),
-    owner_uid: numberOrNull(row['uid']),
-    owner_group: textOrNull(row['group']),
-    owner_gid: numberOrNull(row['gid']),
+    type: textOrNull(row.acltype),
+    trivial: typeof row.trivial === 'boolean' ? row.trivial : null,
+    owner_user: textOrNull(row.user),
+    owner_uid: numberOrNull(row.uid),
+    owner_group: textOrNull(row.group),
+    owner_gid: numberOrNull(row.gid),
     // Null where the system reported no list at all, which is what a path with
     // ACLs switched off answers. An empty list is an ACL that holds no entry.
-    entries: Array.isArray(entries) ? entries.map(accessEntry) : null,
+    entries: Array.isArray(row.acl) ? (row.acl as unknown[]).map(accessEntry) : null,
   };
 }
 
@@ -471,7 +486,7 @@ async function readAcl(
     const acl = await firstValueFrom(
       system.client.api.call('filesystem.getacl', [share.path, true, true]),
     );
-    return { acl: mapAcl(acl as unknown as Record<string, unknown>), error: null };
+    return { acl: mapAcl(acl), error: null };
   } catch (reason) {
     return { acl: null, error: errorText(reason) };
   }
@@ -537,7 +552,9 @@ async function readShareAcl(
     const acl = await firstValueFrom(
       system.client.api.call('sharing.smb.getacl', [{ share_name: share.name }]),
     );
-    const entries = (acl as unknown as Record<string, unknown>)['share_acl'];
+    // Named rather than read out of a record, so that a client-directory bump
+    // renaming this field is a compile error rather than an answer of nulls.
+    const entries: unknown = acl.share_acl;
     if (!Array.isArray(entries)) {
       // Not reported as an empty ACL: at share level an empty list of entries
       // would read as a share nobody is allowed to reach, which is the opposite
@@ -660,7 +677,10 @@ export const shareAccess: ReadOnlyTool = {
     'id, and `sid` the Windows security identifier of a domain principal — and ' +
     'an entry that resolved to none of them is reported empty rather than ' +
     'dropped. `access` is `ALLOWED` or `DENIED`, and `permission` is `FULL`, ' +
-    '`CHANGE`, `READ` or `CUSTOM`. `acl` is the filesystem ACL on `path`, which ' +
+    '`CHANGE`, `READ` or `CUSTOM`. AN EMPTY `share_acl` IS A SHARE-LEVEL ACL ' +
+    'THAT ALLOWS NOBODY, not a share without one — a share that carries no ' +
+    'share-level ACL reports null with a reason in `share_acl_error`. `acl` is ' +
+    'the filesystem ACL on `path`, which ' +
     'is what decides what each principal may do once connected: over SMB it ' +
     'applies to whoever the share ACL above already let through, and over NFS ' +
     'to the ids arriving from a machine the restrictions already let in, after ' +

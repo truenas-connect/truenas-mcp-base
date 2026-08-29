@@ -3339,6 +3339,12 @@ describe('share_access', () => {
     );
   });
 
+  it('resolves a two-share match by the protocol the error advertises', async () => {
+    const rows = { ['sharing.nfs.query']: [nfsExport({ path: '/mnt/tank/media' })] };
+    expect((await answered({ share: '/mnt/tank/media', protocol: 'SMB' }, rows))['id']).toBe(3);
+    expect((await answered({ share: '/mnt/tank/media', protocol: 'NFS' }, rows))['id']).toBe(7);
+  });
+
   it('rejects a call that names no share', async () => {
     for (const missing of [undefined, null, '', 42]) {
       await expect(answered({ share: missing })).rejects.toThrow('share is required');
