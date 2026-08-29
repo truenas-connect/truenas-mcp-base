@@ -1198,9 +1198,30 @@ const TRUNCATED_READ =
   'the system holds more snapshots of this dataset than were read, and no two of ' +
   'the ones read fall at different times in this range';
 
-/** What a pool none of whose reported datasets yielded a change is marked with. */
-const NO_OBSERVED_DATASETS =
-  'no dataset reported for this pool had snapshots at two different times in this range';
+/**
+ * What a pool none of whose reported datasets yielded a change is marked with.
+ *
+ * A statement about what was OBTAINED rather than about the pool's snapshots,
+ * and that is the whole distinction: the datasets that yielded nothing may have
+ * yielded nothing because their reads failed or were cut short, and a pool-level
+ * "these datasets have no snapshots at two different times" would then be
+ * asserting the same thing {@link TRUNCATED_READ} exists to stop each dataset
+ * asserting. Each of them names its own reason, so this points there.
+ */
+const NO_CHANGE_MEASURED =
+  'no dataset reported for this pool yielded a change in this range; each of them names why';
+
+/**
+ * What a pool none of whose datasets are among the ones reported is marked with.
+ *
+ * Distinct from {@link NO_CHANGE_MEASURED}, which would be vacuously true here
+ * and would read as a finding about this pool. Nothing of it was looked at:
+ * `MAX_DATASETS` is a cap over the whole system rather than per pool, so a pool
+ * holding only small datasets can be crowded out of the reporting entirely by
+ * another pool's large ones.
+ */
+const NO_DATASETS_REPORTED =
+  'no dataset of this pool is among the ones reported, so nothing was measured for it';
 
 /** What a pool the system did not list is marked with, in place of its levels. */
 const NOT_LISTED = 'the system did not list this pool';
@@ -1521,6 +1542,12 @@ function trendOf(row: DatasetRow, history: History): { trend: Trend; measured: M
   };
 }
 
+/** Why a pool has no change to report, or null where it has one. */
+function poolReason(measured: number, reportedDatasets: number): string | null {
+  if (measured > 0) return null;
+  return reportedDatasets === 0 ? NO_DATASETS_REPORTED : NO_CHANGE_MEASURED;
+}
+
 /** Usage as a percentage of a pool's size, to one decimal place. */
 function percentOf(used: number | null, total: number | null): number | null {
   if (used === null || total === null || total <= 0) return null;
@@ -1546,7 +1573,9 @@ export const reportingSpaceTrends: ReadOnlyTool = {
     'dataset shrank; `change_bytes_per_day`, that change as a rate, so a ' +
     'projection needs no arithmetic over a series; `observed_start` and ' +
     '`observed_end`, the instants those two snapshots were actually taken; and ' +
-    '`snapshots_observed`, how many snapshots of it fell in the range. THE ' +
+    '`snapshots_observed`, how many snapshots of it were read that fell in the ' +
+    'range AND carried a readable time and size — one the system reported ' +
+    'neither of is not counted, because it places nothing. THE ' +
     'OBSERVED WINDOW IS NOT THE RANGE, and the rate is per day of that window ' +
     'rather than of the range: a month-long range over a dataset snapshotted ' +
     'twice on its first day describes that day. `referenced` is the data the ' +
@@ -1580,7 +1609,11 @@ export const reportingSpaceTrends: ReadOnlyTool = {
     '`used_percent` for how full the pool is now. `unavailable` is null on an ' +
     'entry with a change to report and otherwise names why there is none — the ' +
     'system holds no snapshot of that dataset in the range, or none at two ' +
-    'different times, or the read failed with the reason the system gave. ' +
+    'different times, or the read was cut short, or it failed with the reason ' +
+    'the system gave. On a POOL it says instead that none of the datasets ' +
+    'reported for it yielded a change — each of those names its own reason — ' +
+    'or that none of its datasets is among the ones reported at all, which the ' +
+    'ten-dataset cap can do to a pool holding only small ones. ' +
     'WHERE IT IS NON-NULL EVERY FIGURE DERIVED FROM THE HISTORY IS NULL, and ' +
     'that is never a dataset that did not change: nothing was measured. ' +
     '`used_bytes` and the pool levels are read separately and are reported ' +
@@ -1650,6 +1683,7 @@ export const reportingSpaceTrends: ReadOnlyTool = {
       pools: names.map((name) => {
         const levels = pools.levels.get(name);
         const mine = measured.filter((entry) => entry.pool === name);
+        const ours = reported.filter((row) => row.pool === name);
         return {
           pool: name,
           used_bytes: levels?.used ?? null,
@@ -1676,7 +1710,7 @@ export const reportingSpaceTrends: ReadOnlyTool = {
             datasets.error === null
               ? datasets.all.filter((row) => row.pool === name).length
               : null,
-          unavailable: datasets.error ?? (mine.length === 0 ? NO_OBSERVED_DATASETS : null),
+          unavailable: datasets.error ?? poolReason(mine.length, ours.length),
         };
       }),
       datasets: reported,

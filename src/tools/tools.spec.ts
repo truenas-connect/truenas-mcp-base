@@ -9075,7 +9075,36 @@ describe('reporting_space_trends', () => {
       observed_end: null,
       datasets_observed: 0,
       datasets_total: 2,
-      unavailable: 'no dataset reported for this pool had snapshots at two different times in this range',
+      unavailable:
+        'no dataset reported for this pool yielded a change in this range; each of them names why',
+    });
+  });
+
+  it('does not blame a pool whose datasets the cap left out entirely', async () => {
+    // The cap is over the whole system, so one pool's large datasets can crowd
+    // another's out. Nothing of `spare` was looked at, and saying its datasets
+    // yielded no change would read as a finding about it.
+    const report = await reported(
+      spaceSystem({
+        datasets: [
+          ...Array.from({ length: 10 }, (_, index) =>
+            dataset(`tank/d${index}`, 'tank', (index + 2) * 1e9),
+          ),
+          dataset('spare/small', 'spare', 1e9),
+        ],
+        pools: [
+          { name: 'tank', size: 10e9, allocated: 6e9, free: 4e9 },
+          { name: 'spare', size: 2e9, allocated: 1e9, free: 1e9 },
+        ],
+      }),
+    );
+    expect(report.datasets.map((row) => row.pool)).not.toContain('spare');
+    expect(report.pools.filter((row) => row.pool === 'spare')[0]).toMatchObject({
+      used_percent: 50,
+      datasets_observed: 0,
+      datasets_total: 1,
+      unavailable:
+        'no dataset of this pool is among the ones reported, so nothing was measured for it',
     });
   });
 
