@@ -165,8 +165,9 @@ export const haStatus: ReadOnlyTool = {
     'is the marker to read first: FALSE MEANS THIS IS A SINGLE-NODE SYSTEM, ' +
     'which is the ordinary case and IS NOT A FAULT OR A DEGRADED PAIR — it has ' +
     'no second node to fail over to and was never meant to have one. It is ' +
-    'true where the system reports any HA state at all, and null where the ' +
-    'system reported no state, which settles nothing either way. `status` is ' +
+    'true where the system reports any state other than `SINGLE`, and null ' +
+    'where the system reported no state at all, which settles nothing either ' +
+    'way. `status` is ' +
     "the system's own HA state verbatim — `SINGLE` on a system that is not " +
     'part of a pair, and `MASTER` (this node is the active one), `BACKUP` ' +
     '(this node is the standby), `ELECTING` or `IMPORTING` (a failover is in ' +

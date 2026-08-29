@@ -9739,13 +9739,13 @@ describe('ha_status', () => {
     });
   });
 
-  it('returns only the fields it names, and no field a later release adds', async () => {
-    const result = await reported({
-      ['failover.status']: 'MASTER',
-      ['failover.node']: 'A',
-      ['failover.disabled.reasons']: [],
-    });
-    expect(Object.keys(result)).toEqual([
+  it('returns only the fields it names', async () => {
+    // Not phrased as the "no field a later release adds" check the tools
+    // reading object payloads carry: none of the three reads here answers with
+    // an object, so there is nothing a middleware field could arrive on. What
+    // holds the guarantee is the flat literal the handler builds, and this is
+    // the assertion on it.
+    expect(Object.keys(await reported())).toEqual([
       'status',
       'ha_configured',
       'node',
