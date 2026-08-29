@@ -1,6 +1,7 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
-import { ApiSurface, ReadOnlyTool } from '@/catalog/tool';
+import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+import { FileContentError } from '@/content/file-content';
 
 /**
  * Virtual machines a system runs, with the state each is in and the CPU and
@@ -349,5 +350,332 @@ export const vmsList: ReadOnlyTool = {
       ],
       failures,
     };
+  },
+};
+
+/**
+ * The recent log output of one libvirt-backed virtual machine.
+ *
+ * "The VM will not boot" is unanswerable without its log, and the log is the
+ * one thing `vms_list` deliberately does not carry.
+ *
+ * ONE STACK, NOT TWO. `vms_list` reads both of the stacks TrueNAS runs VMs
+ * under; this reads only the older libvirt-backed one. `vm.log_file_path` is
+ * the only endpoint on the API surface that names a VM's log and there is no
+ * counterpart under `virt.*`, so an incus-backed instance has no retrievable
+ * log here at all. A name matching one of those is an error saying so rather
+ * than an empty log: only one of those two answers means the VM has written
+ * nothing.
+ *
+ * THE CONTENT COMES THROUGH THE FILE SEAM, NOT THE API. `vm.log_file_path`
+ * answers a path and nothing else, and every content-bearing endpoint on this
+ * surface is a job whose payload leaves out of band. `SystemHandle.files` is
+ * how a tool reads bytes (route (a) of #72; `CLAUDE.md` carries the decision).
+ * It is optional, and a deployment that wired none is told so rather than
+ * answered with an empty log.
+ *
+ * A LOG IS UNBOUNDED AND A CONTEXT WINDOW IS NOT, which is why the line count
+ * is a requirement of this tool rather than a refinement. The seam bounds the
+ * bytes it will read, this bounds the lines it will return, and `truncated`
+ * says when the pair of them left something out.
+ *
+ * The audit trail records a tool's arguments and, per system, `ok` or the
+ * error message — never the result (`AuditEvent`). So log content does not
+ * reach it, and nothing thrown here quotes a line of the file: a failure names
+ * the VM and the path, which the caller either supplied or can already see.
+ */
+
+/** Lines returned when the caller names no bound. */
+const DEFAULT_LOG_LINES = 100;
+
+/** The most lines a caller may ask for. */
+const MAX_LOG_LINES = 1000;
+
+/**
+ * How far the read got, for a result that carries no lines.
+ *
+ * Three states rather than one empty list, because "the log was read and holds
+ * nothing", "this VM has no log file" and "the file named does not exist yet"
+ * are different answers to the question the caller asked. A failure to read is
+ * none of them and is an error.
+ */
+type VmLogStatus = 'READ' | 'NO_LOG_PATH' | 'NO_LOG_FILE';
+
+/** One VM's log, in the shape this tool reports it. */
+interface VmLog {
+  source: 'vm';
+  id: number;
+  name: string | null;
+  log_path: string | null;
+  log_status: VmLogStatus;
+  requested_lines: number;
+  lines: string[];
+  truncated: boolean;
+}
+
+/**
+ * The line bound the caller asked for, or the default where they asked for
+ * none.
+ *
+ * Strict, as `audit_log_query` is about its own `since` and for the same
+ * reason: a bound that cannot be read is not a request for the default one. A
+ * caller who asks for 1000 lines and is quietly given 100 has no way to tell
+ * that from a log holding only 100, and a bound above the maximum is a request
+ * this tool cannot honour rather than one it can round down. Null and undefined
+ * are the argument being absent, which is what the default is for.
+ */
+function requestedLines(raw: unknown): number {
+  if (raw == null) return DEFAULT_LOG_LINES;
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1 || raw > MAX_LOG_LINES) {
+    throw new Error(`"lines" must be a whole number between 1 and ${MAX_LOG_LINES}`);
+  }
+  return raw;
+}
+
+/**
+ * The VM the caller named, as text to match on.
+ *
+ * A number is accepted as well as a string because the id of a VM on this stack
+ * IS a number and a caller reading one out of `vms_list` will send it as one;
+ * it is matched as text either way, against both the name and the id, since a
+ * caller has no way to say which of the two they meant.
+ */
+function requestedVm(raw: unknown): string {
+  if (typeof raw === 'number' && Number.isInteger(raw)) return String(raw);
+  if (typeof raw !== 'string' || raw.length === 0) {
+    throw new Error('"vm" must be the name of a virtual machine, or its numeric id');
+  }
+  return raw;
+}
+
+/** Whether a row is the one asked for, by name or by id. */
+function matchesVm(row: VmRow, selector: string): boolean {
+  return row.name === selector || (row.id !== null && String(row.id) === selector);
+}
+
+/** How a match is named in a message about several of them. */
+function describeMatch(row: VmRow): string {
+  return `${row.name ?? 'an unnamed VM'} (id ${row.id === null ? 'unknown' : String(row.id)})`;
+}
+
+/**
+ * Every libvirt-backed VM on the system.
+ *
+ * Unlike `vms_list`, a read that fails is fatal here rather than reported
+ * beside an answer: this tool has one question and a list it could not read is
+ * not evidence that the VM asked about does not exist. The message says which
+ * it was, because the two are indistinguishable to a caller who only sees a
+ * name they gave being rejected.
+ */
+async function libvirtVms(system: SystemHandle, selector: string): Promise<VmRow[]> {
+  try {
+    const rows = await firstValueFrom(system.client.api.query('vm.query'));
+    return rows.map(fromVmStack);
+  } catch (reason) {
+    throw new Error(
+      `The virtual machines on this system could not be listed, so "${selector}" could not be ` +
+        `found: ${errorText(reason)}`,
+      { cause: reason },
+    );
+  }
+}
+
+/**
+ * Whether the name belongs to an incus-backed instance instead.
+ *
+ * Read only once the libvirt stack has already answered without a match, so
+ * that the ordinary case costs one query rather than two. Its own failure is
+ * caught and reported in the not-found message rather than raised: not finding
+ * the VM is still the answer, and the failure is what stops that answer being
+ * "it does not exist anywhere".
+ */
+async function incusMatch(
+  system: SystemHandle,
+  selector: string,
+): Promise<Attempt<VmRow | undefined>> {
+  const read = await attempt('virt_instance', () =>
+    firstValueFrom(
+      // Inlined for the reason `vms_list` gives, and re-checked below for the
+      // reason it re-checks: a filter a release does not recognise is dropped
+      // rather than refused, and a container is not a virtual machine.
+      system.client.api.query('virt.instance.query', [['type', '=', 'VM']]),
+    ),
+  );
+  return {
+    value: (read.value ?? [])
+      .filter((instance) => instance.type === 'VM')
+      .map(fromVirtStack)
+      .find((row) => matchesVm(row, selector)),
+    failure: read.failure,
+  };
+}
+
+/** Where the system keeps this VM's log, or null where it names none. */
+async function logFilePath(
+  system: SystemHandle,
+  id: number,
+  selector: string,
+): Promise<string | null> {
+  try {
+    return textOrNull(await firstValueFrom(system.client.api.call('vm.log_file_path', [id])));
+  } catch (reason) {
+    throw new Error(
+      `The log file path for "${selector}" could not be read: ${errorText(reason)}`,
+      { cause: reason },
+    );
+  }
+}
+
+export const vmLogs: ReadOnlyTool = {
+  name: 'vm_logs',
+  description:
+    'The recent log output of one virtual machine — the last lines of the log ' +
+    'file TrueNAS keeps for it. `vm` names the machine: its name, or its ' +
+    'numeric id. ONLY THE OLDER LIBVIRT-BACKED VMs HAVE A LOG HERE, the ones ' +
+    '`vms_list` reports with `source` `vm`, and `source` is always `vm` in ' +
+    'this result for that reason. TrueNAS also runs newer incus-backed ' +
+    'instances — `source` `virt_instance` — and NOTHING ON THIS API CAN ' +
+    'RETRIEVE A LOG FOR ONE, so naming one is an error saying so rather than ' +
+    'an empty log. A name matching no virtual machine at all is an error ' +
+    'naming it, and one matching more than one machine is an error rather ' +
+    'than a guess at which was meant. `lines` is the most lines to return: 100 ' +
+    'by default, 1000 at most, and a value outside that range is an error ' +
+    'rather than a quietly smaller answer. `requested_lines` is the bound ' +
+    'actually applied. The `lines` list is OLDEST FIRST, so the newest line of ' +
+    'the log is the last element. THEY ARE THE LAST LINES OF THE FILE ON A ' +
+    'BEST EFFORT: reaching the end depends on the size the system reports for ' +
+    'the file, and a log being written to while it is read can yield lines ' +
+    'from further forward instead. `truncated` is true whenever what came back ' +
+    'is not the whole log — more lines than the bound, or content skipped to ' +
+    'reach the end — and it does not say WHICH end was missed, so a caller ' +
+    'watching a live problem should read again rather than treat one answer ' +
+    'as final. `log_status` says how far the read got. `READ` is the log file ' +
+    'read, with `lines` holding what it had. `NO_LOG_PATH` is a system that ' +
+    'names no log file for this VM at all, which is usually one that has never ' +
+    'been started. `NO_LOG_FILE` is a system that names a path where no file ' +
+    'exists yet. Under either of those `lines` is empty and `truncated` is ' +
+    'false, and NEITHER IS A FAILURE TO READ — a failure is an error, never an ' +
+    'empty result. Under `READ` an empty `lines` means the file held no whole ' +
+    'line, which is an empty log where `truncated` is false and a single line ' +
+    "longer than the reader's byte ceiling where it is true. `log_path` is " +
+    'where the log file lives on the system, and is null exactly when ' +
+    '`log_status` is `NO_LOG_PATH`. `id` and `name` are the machine this ' +
+    'matched, as `vms_list` reports them, so a name given here can be checked ' +
+    'against the machine it resolved to. This tool reads recorded log output ' +
+    'and nothing else. It is NOT console access — a console is a live socket ' +
+    'and is not in this catalog — it does not report application or container ' +
+    'logs, which belong to `apps_list`, and it does not start, stop or change ' +
+    'a VM. NO field beyond those named here is returned.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      vm: {
+        type: ['string', 'integer'],
+        description:
+          'The virtual machine to read, by name or by numeric id, as ' +
+          '`vms_list` reports them for `source` `vm`.',
+      },
+      lines: {
+        type: 'integer',
+        minimum: 1,
+        maximum: MAX_LOG_LINES,
+        description:
+          `The most log lines to return, newest last. Omitted, ${DEFAULT_LOG_LINES}.`,
+      },
+    },
+    required: ['vm'],
+  },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }, args) {
+    // Both arguments are read before anything is called, so an unreadable one
+    // is an error rather than a system asked a question this tool then throws
+    // the answer to.
+    const wanted = requestedLines(args['lines']);
+    const selector = requestedVm(args['vm']);
+    const files = system.files;
+    // Checked before the first call, because it is a fact about how this
+    // deployment was assembled rather than about the VM asked for — and a
+    // missing reader would otherwise be discovered only after the VM had been
+    // found, which is a slower way to say the same thing.
+    if (files === undefined) {
+      throw new Error(
+        'This deployment cannot read file content from a system, so no VM log can be ' +
+          'retrieved. `vm_logs` reads the log file through the content reader the adapter ' +
+          'supplies when it connects a system; without one there is no way to reach it.',
+      );
+    }
+
+    const matches = (await libvirtVms(system, selector)).filter((row) => matchesVm(row, selector));
+    if (matches.length === 0) {
+      const other = await incusMatch(system, selector);
+      if (other.value !== undefined) {
+        throw new Error(
+          `"${selector}" is an incus-backed instance, and TrueNAS keeps no log this API can ` +
+            'retrieve for that stack. Only the libvirt-backed virtual machines `vms_list` ' +
+            'reports with `source` `vm` have one.',
+        );
+      }
+      throw new Error(
+        `No libvirt-backed virtual machine matching "${selector}" exists on this system` +
+          // Said only where it is true: an incus stack that could not be read
+          // is why "it exists nowhere" is not what was established here.
+          (other.failure === null
+            ? ''
+            : `, and the incus stack could not be read to say whether it holds one: ${other.failure.error}`),
+      );
+    }
+    if (matches.length > 1) {
+      throw new Error(
+        `"${selector}" matches ${matches.length} virtual machines on this system — ` +
+          `${matches.map(describeMatch).join(', ')}. Name one of them exactly.`,
+      );
+    }
+    const target = matches[0];
+    // `VmRow.id` spans both stacks and is a string on the other one; on this
+    // one it is a number or nothing at all. Reaching here without one is a
+    // match made on the name alone, and the log can only be asked for by id.
+    const id = target.id;
+    if (typeof id !== 'number') {
+      throw new Error(
+        `The system reported no id for the virtual machine matching "${selector}", and its log ` +
+          'file can only be located by id.',
+      );
+    }
+    /** Every answer this tool gives, so that all three carry the same fields. */
+    const answer = (
+      log_path: string | null,
+      log_status: VmLogStatus,
+      lines: string[],
+      truncated: boolean,
+    ): VmLog => ({
+      source: 'vm',
+      id,
+      name: target.name,
+      log_path,
+      log_status,
+      requested_lines: wanted,
+      lines,
+      truncated,
+    });
+
+    const path = await logFilePath(system, id, selector);
+    if (path === null) return answer(null, 'NO_LOG_PATH', [], false);
+    try {
+      const tail = await files.readTail(path, wanted);
+      return answer(path, 'READ', tail.lines, tail.truncated);
+    } catch (reason) {
+      // A path the system named and no file at it is a VM that has not written
+      // a log yet — an answer about the VM, and the one case here that is not a
+      // failure. Every other reason the read can fail IS one, and is raised:
+      // reporting an unreadable log as an empty one would say the VM logged
+      // nothing on the strength of a read that never happened.
+      if (reason instanceof FileContentError && reason.reason === 'NOT_FOUND') {
+        return answer(path, 'NO_LOG_FILE', [], false);
+      }
+      throw new Error(`The log of "${selector}" could not be read: ${errorText(reason)}`, {
+        cause: reason,
+      });
+    }
   },
 };

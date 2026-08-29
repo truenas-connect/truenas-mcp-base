@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { of, throwError } from 'rxjs';
 import { SystemHandle, ToolContext } from '@/catalog/tool';
+import { FileContentError } from '@/content/file-content';
 import { Role } from '@/interfaces';
+import type { FileTail } from '@/interfaces';
 import {
   alertSettings,
   alertsList,
@@ -37,6 +39,7 @@ import {
   tasksRecentRuns,
   updateStatus,
   usersList,
+  vmLogs,
   vmsList,
 } from '@/tools/index';
 
@@ -82,7 +85,7 @@ function failingSystem(
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the thirty-five sketch tools', () => {
+  it('registers the thirty-six sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -95,6 +98,7 @@ describe('createDefaultCatalog', () => {
       'disks_list',
       'apps_list',
       'vms_list',
+      'vm_logs',
       'alerts_list',
       'snapshots_list',
       'replication_status',
@@ -196,6 +200,10 @@ describe('createDefaultCatalog', () => {
 
   it('advertises vms_list to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('vms_list');
+  });
+
+  it('advertises vm_logs to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('vm_logs');
   });
 
   it('advertises apps_list to a read-only credential', () => {
@@ -7831,6 +7839,311 @@ describe('vms_list', () => {
     await vmsList.handler(ctx, {});
     expect(query).toHaveBeenCalledWith('vm.query');
     expect(query).toHaveBeenCalledWith('virt.instance.query', [['type', '=', 'VM']]);
+  });
+});
+
+describe('vm_logs', () => {
+  const LOG_PATH = '/var/log/libvirt/qemu/1_buildbox.log';
+
+  /** A libvirt VM as `vm.query` reports one; only the id and name are read here. */
+  const vm = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    name: 'buildbox',
+    vcpus: 1,
+    cores: 1,
+    threads: 1,
+    memory: 4096,
+    min_memory: null,
+    autostart: true,
+    status: { state: 'RUNNING', domain_state: 'RUNNING' },
+    ...over,
+  });
+
+  /** An incus instance as `virt.instance.query` reports one. */
+  const instance = (over: Record<string, unknown> = {}) => ({
+    id: 'web',
+    name: 'web',
+    type: 'VM',
+    status: 'RUNNING',
+    cpu: '4',
+    memory: 8589934592,
+    autostart: false,
+    ...over,
+  });
+
+  /** What the content seam answers a bounded read with. */
+  const tail = (over: Partial<FileTail> = {}): FileTail => ({
+    path: LOG_PATH,
+    lines: ['starting up', 'ready'],
+    truncated: false,
+    ...over,
+  });
+
+  /**
+   * A system with a content reader on it, which `fakeSystem` does not build:
+   * the reader is the seam this tool reads through, and most of these cases
+   * turn on what it answers.
+   */
+  const wired = (
+    responses: Partial<Record<string, unknown>> = {
+      ['vm.query']: [vm()],
+      ['vm.log_file_path']: LOG_PATH,
+    },
+    readTail: (path: string, maxLines: number) => Promise<FileTail> = () => Promise.resolve(tail()),
+  ) => {
+    const { ctx, call, query } = fakeSystem(responses);
+    const reader = vi.fn(readTail);
+    ctx.system.files = { readTail: reader };
+    return { ctx, call, query, reader };
+  };
+
+  /** The same, with one method rejecting instead. */
+  const wiredFailing = (
+    rows: Partial<Record<string, unknown>>,
+    failures: Partial<Record<string, unknown>>,
+  ) => {
+    const { ctx, call, query } = failingSystem(rows, failures);
+    ctx.system.files = { readTail: () => Promise.resolve(tail()) };
+    return { ctx, call, query };
+  };
+
+  const read = async (
+    args: Record<string, unknown> = { vm: 'buildbox' },
+  ): Promise<Record<string, unknown>> =>
+    (await vmLogs.handler(wired().ctx, args)) as Record<string, unknown>;
+
+  it('reports the tail of the log of the VM it was asked for', async () => {
+    expect(await read()).toEqual({
+      source: 'vm',
+      id: 1,
+      name: 'buildbox',
+      log_path: LOG_PATH,
+      log_status: 'READ',
+      requested_lines: 100,
+      lines: ['starting up', 'ready'],
+      truncated: false,
+    });
+  });
+
+  it('matches a VM by its id, written as a number or as text', async () => {
+    const { ctx, call } = wired({ ['vm.query']: [vm({ id: 7 })], ['vm.log_file_path']: LOG_PATH });
+    expect(await vmLogs.handler(ctx, { vm: 7 })).toMatchObject({ id: 7, log_status: 'READ' });
+    expect(await vmLogs.handler(ctx, { vm: '7' })).toMatchObject({ id: 7, log_status: 'READ' });
+    // The path is asked for by id, whichever way the caller named the machine.
+    expect(call).toHaveBeenCalledWith('vm.log_file_path', [7]);
+  });
+
+  it('bounds the lines it asks the reader for, and says which bound it applied', async () => {
+    const { ctx, reader } = wired();
+    expect(await vmLogs.handler(ctx, { vm: 'buildbox' })).toMatchObject({ requested_lines: 100 });
+    expect(reader).toHaveBeenCalledWith(LOG_PATH, 100);
+    expect(await vmLogs.handler(ctx, { vm: 'buildbox', lines: 5 })).toMatchObject({
+      requested_lines: 5,
+    });
+    expect(reader).toHaveBeenCalledWith(LOG_PATH, 5);
+  });
+
+  it('refuses a line bound it cannot honour rather than quietly applying another', async () => {
+    // A caller given 100 lines after asking for 1001 cannot tell that from a
+    // log holding 100.
+    for (const lines of [0, -1, 1001, 1.5, '10', true]) {
+      await expect(read({ vm: 'buildbox', lines })).rejects.toThrow(
+        /"lines" must be a whole number between 1 and 1000/,
+      );
+    }
+    // Null and undefined are the argument not being given, which is what the
+    // default is for — as `audit_log_query` reads its own `since`.
+    for (const lines of [null, undefined]) {
+      expect(await read({ vm: 'buildbox', lines })).toMatchObject({ requested_lines: 100 });
+    }
+  });
+
+  it('refuses a vm argument that names no machine', async () => {
+    // `vm` is required, so null is a caller naming nothing rather than a
+    // default to fall back to — there is none.
+    for (const named of ['', 1.5, true, {}, undefined, null]) {
+      await expect(read({ vm: named })).rejects.toThrow(
+        /"vm" must be the name of a virtual machine, or its numeric id/,
+      );
+    }
+  });
+
+  it('reports a VM that does not exist as an error naming it', async () => {
+    const { ctx } = wired({ ['vm.query']: [], ['virt.instance.query']: [] });
+    await expect(vmLogs.handler(ctx, { vm: 'ghost' })).rejects.toThrow(
+      /No libvirt-backed virtual machine matching "ghost" exists on this system$/,
+    );
+  });
+
+  it('says an incus instance has no retrievable log, rather than reporting an empty one', async () => {
+    // The two answers mean different things: only one of them says the machine
+    // has written nothing.
+    const { ctx } = wired({ ['vm.query']: [], ['virt.instance.query']: [instance()] });
+    await expect(vmLogs.handler(ctx, { vm: 'web' })).rejects.toThrow(/is an incus-backed instance/);
+  });
+
+  it('does not read a container as the instance asked about', async () => {
+    // The `type` filter is asked of the middleware and re-checked here: an
+    // unrecognised filter is dropped rather than refused.
+    const { ctx } = wired({
+      ['vm.query']: [],
+      ['virt.instance.query']: [instance({ id: 'plex', name: 'plex', type: 'CONTAINER' })],
+    });
+    await expect(vmLogs.handler(ctx, { vm: 'plex' })).rejects.toThrow(
+      /No libvirt-backed virtual machine matching "plex"/,
+    );
+  });
+
+  it('says the incus stack could not be read rather than that the VM exists nowhere', async () => {
+    const { ctx } = wiredFailing(
+      { ['vm.query']: [] },
+      { ['virt.instance.query']: new Error('virt is not installed') },
+    );
+    await expect(vmLogs.handler(ctx, { vm: 'web' })).rejects.toThrow(
+      /the incus stack could not be read to say whether it holds one: virt is not installed/,
+    );
+  });
+
+  it('reports a stack that could not be listed as that, not as a VM that does not exist', async () => {
+    const { ctx } = wiredFailing({}, { ['vm.query']: new Error('connection reset') });
+    await expect(vmLogs.handler(ctx, { vm: 'buildbox' })).rejects.toThrow(
+      /could not be listed, so "buildbox" could not be found: connection reset/,
+    );
+  });
+
+  it('refuses to guess between machines the name matches', async () => {
+    const { ctx } = wired({
+      ['vm.query']: [vm({ id: null }), vm({ id: 2 })],
+      ['vm.log_file_path']: LOG_PATH,
+    });
+    await expect(vmLogs.handler(ctx, { vm: 'buildbox' })).rejects.toThrow(
+      /matches 2 virtual machines on this system — buildbox \(id unknown\), buildbox \(id 2\)/,
+    );
+  });
+
+  it('names an unreadable name in the machines a selector matched', async () => {
+    // One matched by its id and one by a name that is another machine's id, so
+    // asking again by id would not separate them either.
+    const { ctx } = wired({
+      ['vm.query']: [vm({ id: 1, name: null }), vm({ id: 2, name: '1' })],
+      ['vm.log_file_path']: LOG_PATH,
+    });
+    await expect(vmLogs.handler(ctx, { vm: 1 })).rejects.toThrow(
+      /an unnamed VM \(id 1\), 1 \(id 2\)/,
+    );
+  });
+
+  it('refuses a VM whose id the system did not report', async () => {
+    const { ctx } = wired({ ['vm.query']: [vm({ id: null })], ['vm.log_file_path']: LOG_PATH });
+    await expect(vmLogs.handler(ctx, { vm: 'buildbox' })).rejects.toThrow(
+      /reported no id for the virtual machine matching "buildbox"/,
+    );
+  });
+
+  it('reports a system naming no log file as no log yet, not as an empty one', async () => {
+    for (const path of [null, '']) {
+      const { ctx, reader } = wired({ ['vm.query']: [vm()], ['vm.log_file_path']: path });
+      expect(await vmLogs.handler(ctx, { vm: 'buildbox' })).toMatchObject({
+        log_path: null,
+        log_status: 'NO_LOG_PATH',
+        lines: [],
+        truncated: false,
+      });
+      // Nothing to read, so nothing is read.
+      expect(reader).not.toHaveBeenCalled();
+    }
+  });
+
+  it('reports a named path with no file behind it as no log yet', async () => {
+    const { ctx } = wired(undefined, () =>
+      Promise.reject(new FileContentError('NOT_FOUND', LOG_PATH, `Could not read "${LOG_PATH}"`)),
+    );
+    expect(await vmLogs.handler(ctx, { vm: 'buildbox' })).toMatchObject({
+      log_path: LOG_PATH,
+      log_status: 'NO_LOG_FILE',
+      lines: [],
+      truncated: false,
+    });
+  });
+
+  it('raises a log it could not read rather than reporting an empty one', async () => {
+    // Every failure but NOT_FOUND: reporting these as an empty log would say
+    // the VM logged nothing on the strength of a read that never happened.
+    const failures = [
+      new FileContentError('TRANSPORT', LOG_PATH, 'Downloading it failed'),
+      new FileContentError('UNREADABLE', LOG_PATH, 'Permission denied'),
+      new FileContentError('NOT_A_FILE', LOG_PATH, 'It is a directory'),
+      new Error('the reader broke'),
+    ];
+    for (const failure of failures) {
+      const { ctx } = wired(undefined, () => Promise.reject(failure));
+      await expect(vmLogs.handler(ctx, { vm: 'buildbox' })).rejects.toThrow(
+        new RegExp(`The log of "buildbox" could not be read: ${failure.message}`),
+      );
+    }
+  });
+
+  it('reports a log file path that could not be read', async () => {
+    const { ctx } = wiredFailing(
+      { ['vm.query']: [vm()] },
+      { ['vm.log_file_path']: new Error('no such VM') },
+    );
+    await expect(vmLogs.handler(ctx, { vm: 'buildbox' })).rejects.toThrow(
+      /The log file path for "buildbox" could not be read: no such VM/,
+    );
+  });
+
+  it('reports a deployment with no content reader rather than an empty log', async () => {
+    const { ctx, query } = fakeSystem({ ['vm.query']: [vm()] });
+    await expect(vmLogs.handler(ctx, { vm: 'buildbox' })).rejects.toThrow(
+      /cannot read file content from a system/,
+    );
+    // Said before anything is asked of the system: it is a fact about how the
+    // deployment was assembled rather than about the VM.
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('carries the truncation the reader reported', async () => {
+    const { ctx } = wired(undefined, () =>
+      Promise.resolve(tail({ lines: ['ready'], truncated: true })),
+    );
+    expect(await vmLogs.handler(ctx, { vm: 'buildbox' })).toMatchObject({
+      lines: ['ready'],
+      truncated: true,
+    });
+  });
+
+  it('reads the log of a VM it has already found without reading the other stack', async () => {
+    const { ctx, query } = wired();
+    await vmLogs.handler(ctx, { vm: 'buildbox' });
+    expect(query).toHaveBeenCalledWith('vm.query');
+    expect(query).not.toHaveBeenCalledWith('virt.instance.query', [['type', '=', 'VM']]);
+  });
+
+  it('carries no field the tool does not name', async () => {
+    const { ctx } = wired({
+      ['vm.query']: [vm({ vnc_password: 'SECRET-VNC-PASSWORD' })],
+      ['vm.log_file_path']: LOG_PATH,
+    });
+    const answer = (await vmLogs.handler(ctx, { vm: 'buildbox' })) as Record<string, unknown>;
+    expect(Object.keys(answer)).toEqual([
+      'source',
+      'id',
+      'name',
+      'log_path',
+      'log_status',
+      'requested_lines',
+      'lines',
+      'truncated',
+    ]);
+    expect(JSON.stringify(answer)).not.toContain('SECRET');
+  });
+
+  it('advertises the same bound its description states', () => {
+    expect(vmLogs.inputSchema).toMatchObject({
+      required: ['vm'],
+      properties: { lines: { minimum: 1, maximum: 1000 } },
+    });
   });
 });
 

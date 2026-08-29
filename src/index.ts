@@ -88,6 +88,7 @@ export {
   disksList,
   appsList,
   vmsList,
+  vmLogs,
   alertsList,
   alertSettings,
   snapshotsList,
