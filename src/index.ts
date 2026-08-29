@@ -83,5 +83,6 @@ export {
   networkInterfaces,
   networkConfig,
   certificatesList,
+  cloudCredentialsList,
   createSnapshot,
 } from '@/tools/index';
