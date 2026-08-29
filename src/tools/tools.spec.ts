@@ -1961,6 +1961,23 @@ describe('snapshot_tasks_list', () => {
     // A step of one is every hour; "every 1 hours" is not English.
     expect(await described({ minute: '0', hour: '*/1' })).toBe('every hour at :00, every day');
     expect(await described({ minute: '*/15', hour: '*' })).toBe('every 15 minutes, every day');
+    // A step that fills its unit exactly: once a day, and once an hour.
+    expect(await described({ minute: '0', hour: '*/24' })).toBe('every 24 hours at :00, every day');
+    expect(await described({ minute: '*/60', hour: '*' })).toBe('every 60 minutes, every day');
+  });
+
+  it('states no interval for a step that does not divide its unit', async () => {
+    // A step counts from the start of its unit and stops rather than wrapping.
+    // Hours stepping by 5 run at 00, 05, 10, 15 and 20 and then wait four hours
+    // for midnight, so "every 5 hours" would name an interval the task breaks
+    // once a day.
+    expect(await described({ minute: '0', hour: '*/5' })).toBeNull();
+    expect(await described({ minute: '0', hour: '*/7' })).toBeNull();
+    expect(await described({ minute: '*/7', hour: '*' })).toBeNull();
+    expect(await described({ minute: '*/45', hour: '*' })).toBeNull();
+    // The ones that do divide are unaffected.
+    expect(await described({ minute: '0', hour: '*/8' })).toBe('every 8 hours at :00, every day');
+    expect(await described({ minute: '*/20', hour: '*' })).toBe('every 20 minutes, every day');
   });
 
   it('states which days it runs on in words', async () => {

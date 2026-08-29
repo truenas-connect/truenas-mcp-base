@@ -111,13 +111,19 @@ function numberList(field: string, min: number, max: number): number[] | null {
 
 /**
  * The step of a stepped field — the N of `every N` — or null where the field is
- * not a stepped one, or names a step outside what the unit holds.
+ * not a stepped one, or names a step this tool will not state as an interval.
+ *
+ * A step counts from the start of its unit and then stops rather than wrapping,
+ * so it is a true interval only where it divides the unit exactly. An hour
+ * field stepping by 5 runs at 00, 05, 10, 15 and 20 and then waits four hours
+ * for midnight — "every 5 hours" would name an interval the task does not keep,
+ * once a day, which is worse than naming none.
  */
-function everyStep(field: string, max: number): number | null {
+function everyStep(field: string, period: number): number | null {
   const match = /^\*\/(\d{1,2})$/.exec(field);
   if (match === null) return null;
   const step = Number(match[1]);
-  return step >= 1 && step <= max ? step : null;
+  return step >= 1 && step <= period && period % step === 0 ? step : null;
 }
 
 /** `every 4 hours`, and `every hour` rather than `every 1 hours`. */
@@ -140,7 +146,8 @@ function dayName(token: string): string | null {
  *
  * Four shapes, which are the ones the TrueNAS scheduler produces: a fixed
  * minute of every hour, a fixed minute every N hours, a fixed minute of listed
- * hours, and every N minutes. Anything else is not guessed at — a wrong
+ * hours, and every N minutes — the two intervals only for an N that divides its
+ * unit, per {@link everyStep}. Anything else is not guessed at: a wrong
  * rendering would be restated by a model as fact, where a null sends it to
  * `schedule`, which is always there and always exact.
  */
@@ -149,12 +156,12 @@ function timePhrase(minute: string, hour: string): string | null {
   if (minutes !== null && minutes.length === 1) {
     const past = pad(minutes[0]);
     if (hour === '*') return `every hour at :${past}`;
-    const step = everyStep(hour, 23);
+    const step = everyStep(hour, 24);
     if (step !== null) return `${everyPhrase(step, 'hour')} at :${past}`;
     const hours = numberList(hour, 0, 23);
     return hours === null ? null : `at ${joinWords(hours.map((value) => `${pad(value)}:${past}`))}`;
   }
-  const step = everyStep(minute, 59);
+  const step = everyStep(minute, 60);
   return step !== null && hour === '*' ? everyPhrase(step, 'minute') : null;
 }
 
