@@ -100,13 +100,13 @@ export const cloudCredentialsList: ReadOnlyTool = {
     'looking at directly. THIS TOOL RETURNS NO SECRET MATERIAL AND NO ' +
     'CREDENTIAL CONFIGURATION OF ANY KIND. The stored record holds the access ' +
     'key, secret key, account key, OAuth token, password or private key the ' +
-    'credential authenticates with, and also its endpoint, region, bucket, ' +
-    'host and account name; NONE of that appears here, and no field a later ' +
+    'credential authenticates with, and also its endpoint, region, host and ' +
+    'account name; NONE of that appears here, and no field a later ' +
     'TrueNAS release adds to a credential — including a whole new provider ' +
     'with secrets spelled some new way — can appear without a code change, ' +
     'because the three fields above are named explicitly rather than copied ' +
     'with the known secrets removed. It follows that this tool cannot answer ' +
-    'which account, bucket or host a credential points at: the NAME is the ' +
+    'which account or host a credential authenticates to: the NAME is the ' +
     'only account of that, and a name is whatever a person typed. This tool ' +
     'also does not say whether a credential still works — nothing here ' +
     'contacts the provider — and does not create, update, delete or verify ' +
