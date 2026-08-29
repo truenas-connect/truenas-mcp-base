@@ -5,6 +5,14 @@ import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
 // the API, so that what it reports is by construction what those tools report.
 // None of the four imports this file, so there is no cycle.
 import { alertsList } from '@/tools/alerts';
+import {
+  NO_REASON,
+  booleanOrNull,
+  errorText,
+  numberOrNull,
+  plural,
+  textOrNull,
+} from '@/tools/common';
 import { poolTopology } from '@/tools/pools';
 import { poolStatus } from '@/tools/storage';
 import { updateStatus } from '@/tools/system';
@@ -94,9 +102,6 @@ const MAX_INTERFACES = 6;
  */
 const MAX_DISKS = 6;
 
-/** What a failure carrying no text of its own is reported as. */
-const NO_REASON = 'the system reported no reason';
-
 /** What a metric the system collected nothing for in the range is marked with. */
 const NO_DATA = 'the system collected no data for this metric in this range';
 
@@ -123,37 +128,11 @@ const NO_DISKS = 'the system named no disk to graph';
 const NO_DIMENSION = 'the system reported no series this metric can be derived from';
 
 /**
- * A string a row reported, or null where it reported anything else.
- *
- * An empty string is read as no value rather than as text of no characters: an
- * interface of no characters names nothing that could be graphed. `network.ts`,
- * `system.ts` and `shares.ts` each hold this same reading under their own names,
- * and it is restated here for the reason those files give: a tool file is read
- * on its own.
+ * `textOrNull` from `common.ts` reads the graph names, where an empty string
+ * names nothing that could be graphed; {@link NO_REASON} is imported alongside
+ * `errorText` because the update section reports it directly for a check that
+ * failed with no text of its own.
  */
-function textOrNull(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
-}
-
-/**
- * Why a read failed, in words.
- *
- * A rejection is not necessarily an `Error` — the client rejects with whatever
- * the transport gave it — so a bare string is read too, and so are the two
- * shapes the client documents as its own: a JSON-RPC error object carrying
- * `message`, and a middleware error object carrying `reason`. Restated from
- * `network.ts` and `system.ts` for the reason they restate it from each other.
- * The result is never empty, because a failure with no text still has to read
- * as a failure.
- */
-function errorText(reason: unknown): string {
-  if (reason instanceof Error) return textOrNull(reason.message) ?? NO_REASON;
-  if (typeof reason === 'object' && reason !== null) {
-    const carrier = reason as Record<string, unknown>;
-    return textOrNull(carrier['reason']) ?? textOrNull(carrier['message']) ?? NO_REASON;
-  }
-  return textOrNull(reason) ?? NO_REASON;
-}
 
 /**
  * A date, or a date and a time, in the forms this tool reads: `2026-08-29`,
@@ -1255,11 +1234,6 @@ function propertyBytes(property: unknown): number | null {
   return typeof parsed === 'number' && Number.isFinite(parsed) ? parsed : null;
 }
 
-/** A finite number, or null where the system reported anything else. */
-function numberOrNull(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
 /**
  * One entry of a row's `properties` map, or undefined where the row carries no
  * map to read it from. Guarded rather than asserted, because a row that sends
@@ -2244,15 +2218,11 @@ interface Reason {
 /** The verdict, worst first. `OK` is last because it is the narrowest claim. */
 type Verdict = 'CRITICAL' | 'WARNING' | 'UNKNOWN' | 'OK';
 
-/** A boolean the system reported, or null where it reported anything else. */
-function booleanOrNull(value: unknown): boolean | null {
-  return typeof value === 'boolean' ? value : null;
-}
-
-/** `1 alert` / `2 alerts`, so that a reason reads as English at either count. */
-function plural(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? '' : 's'}`;
-}
+/**
+ * `booleanOrNull` re-reads the composed handlers' results, which arrive as
+ * `Promise<unknown>`; `plural` is what makes a reason read as English at either
+ * count (`1 alert` / `2 alerts`). Both are `common.ts`'s.
+ */
 
 /** A section that was read, or the reason it could not be. */
 interface SectionRead<T> {

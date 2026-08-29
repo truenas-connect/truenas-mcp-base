@@ -1,6 +1,7 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool } from '@/catalog/tool';
+import { MAX_TIME_MS, MiddlewareDate } from '@/tools/common';
 
 /**
  * Replication family: the replication tasks that exist and how their last run
@@ -27,12 +28,10 @@ import { ReadOnlyTool } from '@/catalog/tool';
 const ENDED_STATES = new Set(['FINISHED', 'ERROR']);
 
 /**
- * The largest instant a `Date` can hold. `toISOString` throws beyond it rather
- * than answering, so one absurd recorded time would otherwise take the whole
- * listing down with it — the same guard `snapshots.ts` applies to a creation
- * time.
+ * {@link MAX_TIME_MS} from `common.ts` is what keeps one absurd recorded time
+ * from taking the whole listing down with it, applied here to the instant a
+ * task's state was recorded.
  */
-const MAX_TIME_MS = 8.64e15;
 
 /**
  * The state record a replication task carries, restated with every field
@@ -47,16 +46,6 @@ interface RunState {
   state?: unknown;
   datetime?: unknown;
   error?: unknown;
-}
-
-/**
- * A time as the middleware sends one: `{ "$date": <epoch milliseconds> }`,
- * which is the only date representation the client's own types declare
- * (`TrueNasDate`). Restated with `$date` untyped because it arrives inside an
- * open record.
- */
-interface MiddlewareDate {
-  $date?: unknown;
 }
 
 /**

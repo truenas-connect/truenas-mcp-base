@@ -1,6 +1,13 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+import {
+  booleanOrNull,
+  errorText,
+  numberOrNull,
+  recordOrNull,
+  textOrNull,
+} from '@/tools/common';
 
 /**
  * Virtual machines a system runs, with the state each is in and the CPU and
@@ -36,62 +43,13 @@ import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
 /** Which of the two stacks a row was read from. */
 type VmSource = 'vm' | 'virt_instance';
 
-/** One string field of a row, or null where the system reported no value.
- *
- * An empty string is read as no value rather than as text of no characters, the
- * same reading `alerts.ts`, `credentials.ts`, `network.ts`, `block.ts` and
- * `shares.ts` each hold under their own names — and restated here for the
- * reason those files give for restating it: a tool file is read on its own. */
-function textOrNull(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
-}
-
-/** A finite number the system reported, or null where it reported anything
- * else. Infinite and NaN are not counts or byte totals, whatever else they
- * are. */
-function numberOrNull(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-/** A boolean the system reported, or null where it reported anything else. */
-function booleanOrNull(value: unknown): boolean | null {
-  return typeof value === 'boolean' ? value : null;
-}
-
-/** A nested object of a row, or null where the row held anything else.
- *
- * `typeof null` is `'object'`, so the null check is what stops a reported-as-null
- * `status` being indexed. An array is an object too and is excluded: the one
- * thing read through this is a VM's status record, and reading a list as one
- * would answer null for every field rather than saying the shape was not what
- * this tool reads. */
-function recordOrNull(value: unknown): Record<string, unknown> | null {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
-  return value as Record<string, unknown>;
-}
-
-/** What a failure carrying no text of its own is reported as. */
-const NO_REASON = 'the system reported no reason';
-
 /**
- * Why a read failed, in words.
- *
- * A rejection is not necessarily an `Error` — the client rejects with whatever
- * the transport gave it — so a bare string is read too, and so are the two
- * shapes the client documents as its own: a JSON-RPC error object carrying
- * `message`, and a middleware error object carrying `reason`. `alerts.ts`,
- * `block.ts`, `network.ts` and `shares.ts` each hold this same reading under
- * their own names. The result is never empty, because a failure with no text
- * still has to read as a failure.
+ * `recordOrNull` from `common.ts` is what stops a reported-as-null `status`
+ * being indexed, and its exclusion of arrays matters here: the one thing read
+ * through it is a VM's status record, and reading a list as one would answer
+ * null for every field rather than saying the shape was not what this tool
+ * reads.
  */
-function errorText(reason: unknown): string {
-  if (reason instanceof Error) return textOrNull(reason.message) ?? NO_REASON;
-  if (typeof reason === 'object' && reason !== null) {
-    const carrier = reason as Record<string, unknown>;
-    return textOrNull(carrier['reason']) ?? textOrNull(carrier['message']) ?? NO_REASON;
-  }
-  return textOrNull(reason) ?? NO_REASON;
-}
 
 /** A read that did not complete, named by the stack it was against. */
 interface VmFailure {
@@ -388,8 +346,10 @@ export const vmsList: ReadOnlyTool = {
  * reason. `FileContentError` never quotes the download URL, which carries a
  * single-use token, and puts the adapter's own message — which can name that
  * URL — on `cause` instead. `errorText` reads `message` and never `cause`, so
- * the token cannot arrive in a result through here. A reader of `cause` added
- * to this file would break that, not merely a test.
+ * the token cannot arrive in a result through here. That guard now lives in
+ * `common.ts` rather than in this file, so it is a reader of `cause` added
+ * THERE that would break this, not merely a test — and it would break it for
+ * every tool at once.
  */
 
 /** Lines returned when the caller names no bound. */

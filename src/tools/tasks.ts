@@ -1,6 +1,7 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool } from '@/catalog/tool';
+import { MAX_TIME_MS, MiddlewareDate } from '@/tools/common';
 
 /**
  * Tasks family: the work a system does to itself on a schedule, with nobody
@@ -347,13 +348,10 @@ export const snapshotTasksList: ReadOnlyTool = {
 const ENDED_JOB_STATES = new Set(['SUCCESS', 'FAILED', 'ABORTED', 'ERROR', 'FINISHED']);
 
 /**
- * The largest instant a `Date` can hold. `toISOString` throws beyond it rather
- * than answering, so one absurd recorded time would otherwise take the whole
- * listing down with it — the same guard `replication.ts` and `snapshots.ts`
- * each apply to a time of their own, restated here for the same reason they
- * restate it rather than share it: a tool file is read on its own.
+ * {@link MAX_TIME_MS} from `common.ts` is what keeps one absurd recorded time
+ * from taking the whole listing down with it, applied here to a job's
+ * `time_finished`.
  */
-const MAX_TIME_MS = 8.64e15;
 
 /**
  * The job record a cloud sync task carries for its last run, restated with
@@ -375,16 +373,6 @@ interface LastRun {
   state?: unknown;
   time_finished?: unknown;
   error?: unknown;
-}
-
-/**
- * A time as the middleware sends one: `{ "$date": <epoch milliseconds> }`,
- * which is the only date representation the client's own types declare
- * (`TrueNasDate`). Restated with `$date` untyped because it arrives inside an
- * open record.
- */
-interface MiddlewareDate {
-  $date?: unknown;
 }
 
 /**

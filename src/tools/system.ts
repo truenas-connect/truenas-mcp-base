@@ -1,6 +1,15 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+import {
+  MAX_TIME_MS,
+  MiddlewareDate,
+  NO_REASON,
+  errorText,
+  numberOrNull,
+  recordOrNull,
+  textOrNull,
+} from '@/tools/common';
 
 /**
  * Grounds the LLM on what it is talking to — version, hostname, hardware —
@@ -30,46 +39,14 @@ export const systemInfo: ReadOnlyTool = {
 };
 
 /**
- * A string the system reported, or null where it reported anything else.
- *
- * An empty string is read as no value rather than as text of no characters: a
- * version of no characters names nothing a caller could act on, and passing it
- * through would put a field in the result that says nothing.
- *
- * `accounts.ts`, `shares.ts` and `block.ts` each hold the same reading under
- * their own names, and this restates rather than shares it for the reason
- * `shares.ts` gives for restating its own guards: a tool file is read on its
- * own.
+ * `textOrNull` from `common.ts` reads the version, where a string of no
+ * characters names nothing a caller could act on. {@link NO_REASON} is imported
+ * beside `errorText` because `checkFailure` below reports it directly, for an
+ * update check that failed carrying no text of its own.
  */
-function textOrNull(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
-}
-
-/** What a failure carrying no text of its own is reported as. */
-const NO_REASON = 'the system reported no reason';
 
 /** What a system answering the check with no status at all is reported as. */
 const NO_STATUS = 'the system reported no update status';
-
-/**
- * Why the version read failed, in words.
- *
- * A rejection is not necessarily an `Error` — the client rejects with whatever
- * the transport gave it — so a bare string is read too, and so are the two
- * shapes the client documents as its own: a JSON-RPC error object carrying
- * `message`, and a middleware error object carrying `reason`. Anything else
- * still becomes a stated absence rather than `"[object Object]"`, and the
- * result is never empty: a failure with no text still has to read as a failure.
- * The same reading as `accounts.ts` holds of a failed configuration read.
- */
-function errorText(reason: unknown): string {
-  if (reason instanceof Error) return textOrNull(reason.message) ?? NO_REASON;
-  if (typeof reason === 'object' && reason !== null) {
-    const carrier = reason as Record<string, unknown>;
-    return textOrNull(carrier['reason']) ?? textOrNull(carrier['message']) ?? NO_REASON;
-  }
-  return textOrNull(reason) ?? NO_REASON;
-}
 
 /** The running version, or the failure that stopped it being read. */
 interface VersionAttempt {
@@ -193,21 +170,11 @@ export const updateStatus: ReadOnlyTool = {
   },
 };
 
-/** A number the system reported, or null where it reported anything else. */
-function numberOrNull(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
 /**
- * A record the system sent, or null where it sent anything else — an array
- * included, which is an object and is never one of the keyed payloads this is
- * used to read.
+ * An audit row arrives as an open record, so the fields below are read through
+ * `common.ts`'s guards. `recordOrNull` excludes an array, which is an object
+ * and is never one of the keyed payloads it is used to read here.
  */
-function recordOrNull(value: unknown): Record<string, unknown> | null {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
 
 /**
  * How far back `audit_log_query` reaches when the caller bounds nothing.
@@ -233,23 +200,11 @@ const AUDIT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const AUDIT_LIMIT = 100;
 
 /**
- * The largest instant a `Date` can hold. `toISOString` throws beyond it rather
- * than answering, so one absurd recorded time would otherwise take the whole
- * listing down with it — the same guard `tasks.ts`, `replication.ts` and
- * `snapshots.ts` each apply to a time of their own, restated here for the same
- * reason they restate it: a tool file is read on its own.
+ * {@link MAX_TIME_MS} is the guard that keeps one absurd recorded time from
+ * taking the whole listing down with it, and {@link MiddlewareDate} is the
+ * shape an audit row's timestamp arrives in. Both are `common.ts`'s, applied
+ * here to an entry's `message_timestamp`.
  */
-const MAX_TIME_MS = 8.64e15;
-
-/**
- * A time as the middleware sends one: `{ "$date": <epoch milliseconds> }`,
- * which is the date representation the client's own types declare
- * (`TrueNasDate`). Restated with `$date` untyped because an audit row arrives
- * as an open record.
- */
-interface MiddlewareDate {
-  $date?: unknown;
-}
 
 /**
  * A date, or a date and a time, in the forms this tool reads: `2026-08-29`,

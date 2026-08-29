@@ -3752,9 +3752,14 @@ describe('shares_list', () => {
     expect(nfsOnly.failures).toEqual([{ protocol: 'SMB', error: 'smb service is not running' }]);
   });
 
-  it('names a failure that arrived as neither an Error nor any text', async () => {
+  it('names a failure however the rejection arrived', async () => {
     for (const [reason, text] of [
       ['nfs is down', 'nfs is down'],
+      // The two carrier shapes the client documents. This file used to read
+      // neither, so a real middleware rejection reported as having said
+      // nothing; it now reads them the way every other tool family does.
+      [{ reason: 'nfs service is not running' }, 'nfs service is not running'],
+      [{ message: 'connection reset' }, 'connection reset'],
       [new Error(''), 'the system reported no reason'],
       [{ code: 500 }, 'the system reported no reason'],
       [undefined, 'the system reported no reason'],

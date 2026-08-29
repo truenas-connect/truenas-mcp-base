@@ -1,6 +1,7 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+import { errorText, numberOrNull, textOrNull } from '@/tools/common';
 
 /**
  * Shares family: what the system offers to the network, and where from.
@@ -50,32 +51,18 @@ interface Attempt {
 }
 
 /**
- * One string field of a share row, or null where the system reported no value.
+ * `textOrNull` from `common.ts` reads a share's comment, which the middleware
+ * sends as `""` when it is unset.
  *
- * An empty string is read as no value rather than as text of no characters: a
- * share with no comment is what the middleware sends `""` for, and passing that
- * through would put a field in the result that says nothing.
- *
- * `tasks.ts` has the same reading of a string field under another name, and
- * this restates rather than shares it for the reason that file gives for
- * restating its own guards: a tool file is read on its own.
+ * `errorText` is `common.ts`'s too, and taking it changed what this file
+ * reports. The copy that lived here read an `Error` and a bare string and
+ * nothing else, so a rejection that arrived as a middleware error object — the
+ * `{ reason }` and `{ message }` carriers the client documents, and what a
+ * failed `sharing.smb.query` actually rejects with — reported as having said
+ * nothing. Every sibling file read those two carriers; this one had lost the
+ * branch. A `failures` entry here now names the reason where the system gave
+ * one, which is what it always claimed to do.
  */
-function textOrNull(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
-}
-
-/**
- * Why a protocol's query failed, in words, for the caller to act on.
- *
- * A rejection is not necessarily an `Error` — the client rejects with whatever
- * the transport gave it — so a bare string is read too, and anything else
- * becomes a stated absence rather than `"[object Object]"`. Never empty: a
- * failure with no text still has to read as a failure.
- */
-function errorText(reason: unknown): string {
-  if (reason instanceof Error) return textOrNull(reason.message) ?? 'the system reported no reason';
-  return textOrNull(reason) ?? 'the system reported no reason';
-}
 
 /**
  * What an NFS export says about who may reach it, beyond the ACL on its path.
@@ -369,11 +356,6 @@ interface Acl {
   owner_group: string | null;
   owner_gid: number | null;
   entries: AccessEntry[] | null;
-}
-
-/** A finite number as the middleware reported it, or null where it reported none. */
-function numberOrNull(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 /**

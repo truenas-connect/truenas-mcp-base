@@ -2,6 +2,7 @@ import type { CallParams } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ApiSurface, MutatingTool, ReadOnlyTool, ToolContext } from '@/catalog/tool';
+import { MAX_TIME_MS, effectiveLimit } from '@/tools/common';
 
 /** Snapshots family: the snapshots that exist, and taking a new one. */
 
@@ -131,11 +132,9 @@ const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 1000;
 
 /**
- * The largest instant a `Date` can hold. `toISOString` throws beyond it rather
- * than answering, so one absurd creation time would otherwise take the whole
- * listing down with it.
+ * {@link MAX_TIME_MS} from `common.ts` is what keeps one absurd creation time
+ * from taking the whole listing down with it.
  */
-const MAX_TIME_MS = 8.64e15;
 
 /**
  * A ZFS property as a snapshot row carries it. `pool.snapshot.query` answers
@@ -237,20 +236,17 @@ function requestedDataset(raw: unknown): string | null {
 }
 
 /**
- * The bound actually applied, from whatever the caller asked for.
+ * The bound this family applies, from whatever the caller asked for.
  *
  * Lenient where {@link requestedDataset} is strict, and what the argument
  * decides is the difference: a misread `dataset` would quietly answer about the
  * wrong snapshots, while a misread `limit` only changes how many of the right
  * ones come back — and the number applied is returned beside them, so a caller
- * can see that its argument was not taken.
+ * can see that its argument was not taken. The bounding is `common.ts`'s; the
+ * two numbers are this family's.
  */
-function effectiveLimit(raw: unknown): number {
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) return DEFAULT_LIMIT;
-  // Rounded down because a fractional limit reaches the middleware as one, and
-  // floored at 1 because a limit of zero or less would return nothing while
-  // reporting the system as holding more — true, and not an answer.
-  return Math.min(MAX_LIMIT, Math.max(1, Math.floor(raw)));
+function snapshotLimit(raw: unknown): number {
+  return effectiveLimit(raw, DEFAULT_LIMIT, MAX_LIMIT);
 }
 
 /** Newest first; a snapshot whose creation time could not be read goes last. */
@@ -315,7 +311,7 @@ export const snapshotsList: ReadOnlyTool = {
   mutating: false,
   async handler(ctx, args) {
     const dataset = requestedDataset(args['dataset']);
-    const limit = effectiveLimit(args['limit']);
+    const limit = snapshotLimit(args['limit']);
     const snapshots = await firstValueFrom(
       // Filters and options are inlined so the call's own parameter types
       // apply, as in `storage.ts`.
