@@ -21,7 +21,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `tasks_recent_runs`, `shares_list`, `share_access`, `iscsi_list`,
   `nvmeof_list`, `users_list`, `directory_services_status`,
   `network_interfaces`, `network_config`, `certificates_list`,
-  `cloud_credentials_list`.
+  `cloud_credentials_list`, `alert_settings`.
 - **System registry** — 1..N named systems, each owning its own
   `@truenas/api-client` instance and credentials; `systems` selector
   (name / list / `all`, defaulting when one system is registered).

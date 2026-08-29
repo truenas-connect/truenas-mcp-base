@@ -69,6 +69,7 @@ export {
   disksList,
   appsList,
   alertsList,
+  alertSettings,
   snapshotsList,
   replicationStatus,
   snapshotTasksList,
