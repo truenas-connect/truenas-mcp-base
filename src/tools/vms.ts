@@ -1,7 +1,6 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
-import { FileContentError } from '@/content/file-content';
 
 /**
  * Virtual machines a system runs, with the state each is in and the CPU and
@@ -383,6 +382,13 @@ export const vmsList: ReadOnlyTool = {
  * error message — never the result (`AuditEvent`). So log content does not
  * reach it, and nothing thrown here quotes a line of the file: a failure names
  * the VM and the path, which the caller either supplied or can already see.
+ *
+ * `log_error` is the seam's own message and is safe to return for the same
+ * reason. `FileContentError` never quotes the download URL, which carries a
+ * single-use token, and puts the adapter's own message — which can name that
+ * URL — on `cause` instead. `errorText` reads `message` and never `cause`, so
+ * the token cannot arrive in a result through here. A reader of `cause` added
+ * to this file would break that, not merely a test.
  */
 
 /** Lines returned when the caller names no bound. */
@@ -392,14 +398,21 @@ const DEFAULT_LOG_LINES = 100;
 const MAX_LOG_LINES = 1000;
 
 /**
- * How far the read got, for a result that carries no lines.
+ * How far the read got, so that an empty `lines` cannot be read as a VM that
+ * logged nothing when it is a log this tool never saw.
  *
- * Three states rather than one empty list, because "the log was read and holds
- * nothing", "this VM has no log file" and "the file named does not exist yet"
- * are different answers to the question the caller asked. A failure to read is
- * none of them and is an error.
+ * THERE IS NO STATE HERE FOR "THE FILE IS NOT THERE YET", and that is a
+ * property of what reaches this tool rather than a distinction not worth
+ * drawing. `FileContentError` separates an absent path from an unreadable one
+ * on `errname`, and `SystemError.errname` is null for every API failure today —
+ * the client flattens a JSON-RPC error to a plain message before it reaches the
+ * core, and restoring it is an upstream change. So a log file that does not
+ * exist arrives here as indistinguishable from one that could not be opened,
+ * and both are `UNREADABLE` carrying what the system said. Splitting them on
+ * the text of that message would be a guess, and the wrong half of it would
+ * report a permission failure as a machine that has never logged anything.
  */
-type VmLogStatus = 'READ' | 'NO_LOG_PATH' | 'NO_LOG_FILE';
+type VmLogStatus = 'READ' | 'NO_LOG_PATH' | 'UNREADABLE';
 
 /** One VM's log, in the shape this tool reports it. */
 interface VmLog {
@@ -408,6 +421,8 @@ interface VmLog {
   name: string | null;
   log_path: string | null;
   log_status: VmLogStatus;
+  /** What the system said about a log it would not give up, or null. */
+  log_error: string | null;
   requested_lines: number;
   lines: string[];
   truncated: boolean;
@@ -549,19 +564,30 @@ export const vmLogs: ReadOnlyTool = {
     'is not the whole log — more lines than the bound, or content skipped to ' +
     'reach the end — and it does not say WHICH end was missed, so a caller ' +
     'watching a live problem should read again rather than treat one answer ' +
-    'as final. `log_status` says how far the read got. `READ` is the log file ' +
-    'read, with `lines` holding what it had. `NO_LOG_PATH` is a system that ' +
-    'names no log file for this VM at all, which is usually one that has never ' +
-    'been started. `NO_LOG_FILE` is a system that names a path where no file ' +
-    'exists yet. Under either of those `lines` is empty and `truncated` is ' +
-    'false, and NEITHER IS A FAILURE TO READ — a failure is an error, never an ' +
-    'empty result. Under `READ` an empty `lines` means the file held no whole ' +
-    'line, which is an empty log where `truncated` is false and a single line ' +
-    "longer than the reader's byte ceiling where it is true. `log_path` is " +
+    'as final. `log_status` says how far the read got, and ONLY `READ` MEANS ' +
+    'AN EMPTY `lines` IS SOMETHING THE VM DID. `READ` is the log file read, ' +
+    'with `lines` holding what it had; an empty `lines` there means the file ' +
+    'held no whole line, which is an empty log where `truncated` is false and ' +
+    "a single line longer than the reader's byte ceiling where it is true. " +
+    '`NO_LOG_PATH` is a system that names no log file for this VM at all, ' +
+    'which is usually a machine that has never been started. `UNREADABLE` is a ' +
+    'log file this tool was told about and could not read, with `log_error` ' +
+    'carrying what the system said about it. THAT COVERS A FILE THAT IS NOT ' +
+    'THERE YET AS WELL AS ONE THAT COULD NOT BE OPENED, and this API does not ' +
+    'separate the two: the error name that would is not carried through to ' +
+    'this tool, so reading `log_error` is the only way to tell, and a VM that ' +
+    'has simply never logged anything cannot be asserted from this state ' +
+    'alone. `lines` is empty and `truncated` false under both of those states. ' +
+    '`log_error` is null under every state but `UNREADABLE`. `log_path` is ' +
     'where the log file lives on the system, and is null exactly when ' +
-    '`log_status` is `NO_LOG_PATH`. `id` and `name` are the machine this ' +
-    'matched, as `vms_list` reports them, so a name given here can be checked ' +
-    'against the machine it resolved to. This tool reads recorded log output ' +
+    '`log_status` is `NO_LOG_PATH`. `id` is the machine\'s numeric id on this ' +
+    'stack and `name` is the name it is configured under, or null where the ' +
+    'system reported none — both are the machine this matched, as `vms_list` ' +
+    'reports them, so a name given here can be checked against what it ' +
+    'resolved to. A machine that could not be identified at all IS an error ' +
+    'rather than any of these states: no match, several matches, a stack that ' +
+    'could not be listed, or a system that could not be asked where the log ' +
+    'lives. This tool reads recorded log output ' +
     'and nothing else. It is NOT console access — a console is a live socket ' +
     'and is not in this catalog — it does not report application or container ' +
     'logs, which belong to `apps_list`, and it does not start, stop or change ' +
@@ -648,12 +674,14 @@ export const vmLogs: ReadOnlyTool = {
       log_status: VmLogStatus,
       lines: string[],
       truncated: boolean,
+      log_error: string | null = null,
     ): VmLog => ({
       source: 'vm',
       id,
       name: target.name,
       log_path,
       log_status,
+      log_error,
       requested_lines: wanted,
       lines,
       truncated,
@@ -665,17 +693,15 @@ export const vmLogs: ReadOnlyTool = {
       const tail = await files.readTail(path, wanted);
       return answer(path, 'READ', tail.lines, tail.truncated);
     } catch (reason) {
-      // A path the system named and no file at it is a VM that has not written
-      // a log yet — an answer about the VM, and the one case here that is not a
-      // failure. Every other reason the read can fail IS one, and is raised:
-      // reporting an unreadable log as an empty one would say the VM logged
-      // nothing on the strength of a read that never happened.
-      if (reason instanceof FileContentError && reason.reason === 'NOT_FOUND') {
-        return answer(path, 'NO_LOG_FILE', [], false);
-      }
-      throw new Error(`The log of "${selector}" could not be read: ${errorText(reason)}`, {
-        cause: reason,
-      });
+      // Reported rather than raised, because the commonest reason a named log
+      // file will not open is that the VM has not written one yet — which is an
+      // answer about the machine and not a fault. It is not raised as an empty
+      // log either: `log_status` is what stops an empty `lines` here being read
+      // as a VM that logged nothing, since this cannot tell an absent file from
+      // an unreadable one (see `VmLogStatus`). Identifying the machine is the
+      // part that still throws: a system that could not be asked its VMs, or
+      // where its log lives, was never in a position to answer at all.
+      return answer(path, 'UNREADABLE', [], false, errorText(reason));
     }
   },
 };

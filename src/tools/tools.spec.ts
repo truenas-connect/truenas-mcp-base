@@ -7919,6 +7919,7 @@ describe('vm_logs', () => {
       name: 'buildbox',
       log_path: LOG_PATH,
       log_status: 'READ',
+      log_error: null,
       requested_lines: 100,
       lines: ['starting up', 'ready'],
       truncated: false,
@@ -8046,6 +8047,7 @@ describe('vm_logs', () => {
       expect(await vmLogs.handler(ctx, { vm: 'buildbox' })).toMatchObject({
         log_path: null,
         log_status: 'NO_LOG_PATH',
+        log_error: null,
         lines: [],
         truncated: false,
       });
@@ -8054,22 +8056,14 @@ describe('vm_logs', () => {
     }
   });
 
-  it('reports a named path with no file behind it as no log yet', async () => {
-    const { ctx } = wired(undefined, () =>
-      Promise.reject(new FileContentError('NOT_FOUND', LOG_PATH, `Could not read "${LOG_PATH}"`)),
-    );
-    expect(await vmLogs.handler(ctx, { vm: 'buildbox' })).toMatchObject({
-      log_path: LOG_PATH,
-      log_status: 'NO_LOG_FILE',
-      lines: [],
-      truncated: false,
-    });
-  });
-
-  it('raises a log it could not read rather than reporting an empty one', async () => {
-    // Every failure but NOT_FOUND: reporting these as an empty log would say
-    // the VM logged nothing on the strength of a read that never happened.
+  it('reports a log it could not read as unreadable, never as an empty one', async () => {
+    // Including the absent file this cannot tell from an unreadable one: the
+    // error name that separates them is not carried through to the tool, so
+    // both arrive here and `log_error` is what tells them apart. Reporting
+    // either as `lines: []` under `READ` would say the VM logged nothing on
+    // the strength of a read that never happened.
     const failures = [
+      new FileContentError('NOT_FOUND', LOG_PATH, `Could not read "${LOG_PATH}": ENOENT`),
       new FileContentError('TRANSPORT', LOG_PATH, 'Downloading it failed'),
       new FileContentError('UNREADABLE', LOG_PATH, 'Permission denied'),
       new FileContentError('NOT_A_FILE', LOG_PATH, 'It is a directory'),
@@ -8077,10 +8071,25 @@ describe('vm_logs', () => {
     ];
     for (const failure of failures) {
       const { ctx } = wired(undefined, () => Promise.reject(failure));
-      await expect(vmLogs.handler(ctx, { vm: 'buildbox' })).rejects.toThrow(
-        new RegExp(`The log of "buildbox" could not be read: ${failure.message}`),
-      );
+      expect(await vmLogs.handler(ctx, { vm: 'buildbox' })).toMatchObject({
+        log_path: LOG_PATH,
+        log_status: 'UNREADABLE',
+        log_error: failure.message,
+        lines: [],
+        truncated: false,
+      });
     }
+  });
+
+  it('does not carry the seam\'s cause into a result, where a download URL can be', async () => {
+    // `FileContentError` keeps the adapter's own message — which names the URL
+    // it fetched, token and all — on `cause` rather than in `message`.
+    const failure = new FileContentError('TRANSPORT', LOG_PATH, `Downloading "${LOG_PATH}" failed`, {
+      cause: new Error('request to https://nas.local/_download?auth_token=SECRET-TOKEN failed'),
+    });
+    const { ctx } = wired(undefined, () => Promise.reject(failure));
+    const answer = await vmLogs.handler(ctx, { vm: 'buildbox' });
+    expect(JSON.stringify(answer)).not.toContain('SECRET-TOKEN');
   });
 
   it('reports a log file path that could not be read', async () => {
@@ -8132,6 +8141,7 @@ describe('vm_logs', () => {
       'name',
       'log_path',
       'log_status',
+      'log_error',
       'requested_lines',
       'lines',
       'truncated',
