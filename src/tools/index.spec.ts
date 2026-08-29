@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the thirty-nine sketch tools', () => {
+  it('registers the forty sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -39,6 +39,7 @@ describe('createDefaultCatalog', () => {
       'reporting_disk_io',
       'reporting_space_trends',
       'reporting_app_vm_usage',
+      'services_status',
       'ha_status',
       'system_health_report',
       'fleet_compliance_report',
@@ -230,6 +231,12 @@ describe('createDefaultCatalog', () => {
   it('advertises network_config to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
       'network_config',
+    );
+  });
+
+  it('advertises services_status to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'services_status',
     );
   });
 });
