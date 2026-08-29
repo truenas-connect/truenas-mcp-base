@@ -268,6 +268,11 @@ async function readWindow(
         skipped += dropping;
         chunk = chunk.subarray(dropping);
       }
+      // A subarray of no bytes still holds its whole backing buffer alive, and
+      // every chunk of the discarded front of the file produces one. Keeping
+      // them would grow the read with the size of the FILE rather than with
+      // the bound — which is the one thing this loop exists to prevent.
+      if (chunk.length === 0) continue;
       if (kept + chunk.length > maxBytes) {
         chunks.push(chunk.subarray(0, maxBytes - kept));
         kept = maxBytes;
@@ -285,8 +290,14 @@ async function readWindow(
   } finally {
     // Always, not only on the bounded exit: a body left unread holds the
     // connection open, and the ceiling is precisely the case that leaves one.
-    // A cancel that itself fails must not replace the reason we stopped.
-    await body.cancel().catch(() => undefined);
+    try {
+      // Caught rather than `.catch`ed, so that a cancel throwing where it
+      // should have rejected is swallowed too. Either way a failure to let go
+      // of the body must not replace the reason we stopped reading it.
+      await body.cancel();
+    } catch {
+      // Nothing to do with it, and nothing it can tell the caller.
+    }
   }
 
   const bytes = new Uint8Array(kept);

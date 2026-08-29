@@ -213,6 +213,19 @@ describe('createDownloadContentReader', () => {
       });
     });
 
+    it('discards whole chunks that fall entirely before the window', async () => {
+      // Ten 4-byte lines, a 10-byte ceiling: seven chunks are discarded whole
+      // and an eighth in part. Nothing from them may be retained — a discarded
+      // chunk held even as an empty view keeps its whole buffer alive, which
+      // would make a large file cost memory in proportion to its size.
+      const lines = ['l01', 'l02', 'l03', 'l04', 'l05', 'l06', 'l07', 'l08', 'l09', 'l10'];
+      const { files } = readerFor(lines.join('\n') + '\n', { maxBytes: 10, chunkSize: 4 });
+      await expect(files.readTail('/var/log/app.log', 10)).resolves.toMatchObject({
+        lines: ['l09', 'l10'],
+        truncated: true,
+      });
+    });
+
     it('does not return the half line the ceiling stopped on', async () => {
       // stat said 10 bytes and the body is 20 — the file grew, or the system
       // contradicted itself — so the read fills and stops inside "ccc". Two
@@ -282,12 +295,17 @@ describe('createDownloadContentReader', () => {
       expect(body.cancels()).toBe(1);
     });
 
-    it('does not let a failing cancel replace the answer', async () => {
+    it.each([
+      ['rejects', () => Promise.reject(new Error('socket already gone'))],
+      [
+        'throws where it should have rejected',
+        () => {
+          throw new Error('socket already gone');
+        },
+      ],
+    ])('does not let a cancel that %s replace the answer', async (_name, cancel) => {
       const bytes = encoder.encode('a\nb\n');
-      const body: ContentByteReader = {
-        ...readerOf(bytes),
-        cancel: () => Promise.reject(new Error('socket already gone')),
-      };
+      const body: ContentByteReader = { ...readerOf(bytes), cancel };
       const { client } = fakeClient({
         'filesystem.stat': statOf(bytes.length),
         'core.download': downloadOf(),

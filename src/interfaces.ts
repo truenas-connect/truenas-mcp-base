@@ -119,10 +119,11 @@ export interface FileTail {
    * The lines, oldest first, at most the `maxLines` asked for. Never an error
    * and never a failure to read — those throw.
    *
-   * Empty means no whole line was found: a file of no content, or, where
-   * `truncated` is also true, a file whose last line is longer than the byte
-   * ceiling the reader was built with. The two are distinguishable by that
-   * flag; neither is a failure.
+   * Empty means no whole line was found in what was read, which is not the
+   * same as a failure to read. With `truncated` false it is a file of no
+   * content. With `truncated` true the window held no complete line — a line
+   * longer than the reader's byte ceiling, or a file that shrank between being
+   * measured and being fetched, among others.
    */
   lines: string[];
   /**
