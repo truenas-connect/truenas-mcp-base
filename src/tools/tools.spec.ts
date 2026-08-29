@@ -4867,13 +4867,17 @@ describe('users_list', () => {
 
   type Listing = {
     users: Record<string, unknown>[];
+    users_truncated: boolean;
     groups: Record<string, unknown>[] | null;
+    groups_truncated: boolean;
     groups_error: string | null;
+    limit: number;
   };
 
   const listed = async (
     rows: Partial<Record<string, unknown>> = {},
     failures: Partial<Record<string, unknown>> = {},
+    args: Record<string, unknown> = {},
   ): Promise<Listing> => {
     const { ctx } = failingSystem(
       {
@@ -4883,7 +4887,7 @@ describe('users_list', () => {
       },
       failures,
     );
-    return (await usersList.handler(ctx, {})) as Listing;
+    return (await usersList.handler(ctx, args)) as Listing;
   };
 
   /** The single account of a listing, for the cases about one's fields. */
@@ -4907,11 +4911,14 @@ describe('users_list', () => {
           auxiliary_groups: [{ id: 102, gid: 4001, name: 'engineering' }],
         },
       ],
+      users_truncated: false,
       groups: [
         { id: 101, gid: 3001, name: 'jbarnes', local: true },
         { id: 102, gid: 4001, name: 'engineering', local: true },
       ],
+      groups_truncated: false,
       groups_error: null,
+      limit: 100,
     });
   });
 
@@ -4920,7 +4927,14 @@ describe('users_list', () => {
       ['user.query']: [user({ future_field: 'added by a later release' })],
       ['group.query']: [group({ future_field: 'added by a later release' })],
     });
-    expect(Object.keys(listing)).toEqual(['users', 'groups', 'groups_error']);
+    expect(Object.keys(listing)).toEqual([
+      'users',
+      'users_truncated',
+      'groups',
+      'groups_truncated',
+      'groups_error',
+      'limit',
+    ]);
     expect(Object.keys(listing.users[0])).toEqual([
       'id',
       'username',
@@ -5065,9 +5079,66 @@ describe('users_list', () => {
   it('reports a system with no accounts and no groups as empty lists', async () => {
     expect(await listed({ ['user.query']: [], ['group.query']: [] })).toEqual({
       users: [],
+      users_truncated: false,
       groups: [],
+      groups_truncated: false,
       groups_error: null,
+      limit: 100,
     });
+  });
+
+  it('bounds both lists, and says which of them the system held more of', async () => {
+    const listing = await listed(
+      {
+        // Three of each against a bound of two: the third row is what says the
+        // system held more than fit, and it is dropped rather than reported.
+        ['user.query']: [user(), user({ id: 42, username: 'b' }), user({ id: 43, username: 'c' })],
+        ['group.query']: [group(), group({ id: 102, name: 'b' }), group({ id: 103, name: 'c' })],
+      },
+      {},
+      { limit: 2 },
+    );
+    expect(listing.users.map((one) => one['username'])).toEqual(['jbarnes', 'b']);
+    expect((listing.groups ?? []).map((one) => one['name'])).toEqual(['jbarnes', 'b']);
+    expect(listing).toMatchObject({ users_truncated: true, groups_truncated: true, limit: 2 });
+  });
+
+  it('reports one list as truncated without the other', async () => {
+    const listing = await listed(
+      { ['user.query']: [user(), user({ id: 42, username: 'b' })], ['group.query']: [group()] },
+      {},
+      { limit: 1 },
+    );
+    expect(listing).toMatchObject({ users_truncated: true, groups_truncated: false });
+  });
+
+  it('asks the system for one row past the bound, on both reads', async () => {
+    const { ctx, query } = failingSystem({ ['user.query']: [user()], ['group.query']: [group()] });
+    await usersList.handler(ctx, { limit: 5 });
+    expect(query.mock.calls).toEqual([
+      ['user.query', [], { limit: 6 }],
+      ['group.query', [], { limit: 6 }],
+    ]);
+  });
+
+  it('applies a usable bound whatever the caller asked for', async () => {
+    const applied = async (limit: unknown): Promise<number> =>
+      (await listed({}, {}, { limit })).limit;
+    expect(await applied(undefined)).toBe(100);
+    expect(await applied('lots')).toBe(100);
+    expect(await applied(Number.NaN)).toBe(100);
+    // Rounded down: a fractional limit reaches the middleware as one.
+    expect(await applied(2.7)).toBe(2);
+    // Floored at 1 rather than returning nothing while reporting more.
+    expect(await applied(0)).toBe(1);
+    expect(await applied(-5)).toBe(1);
+    expect(await applied(9000)).toBe(1000);
+  });
+
+  it('reports the groups as not truncated when they could not be read at all', async () => {
+    // Nothing was read, so nothing was left out of a list either.
+    const listing = await listed({}, { ['group.query']: new Error('denied') });
+    expect(listing).toMatchObject({ groups: null, groups_truncated: false });
   });
 
   it('raises when the accounts themselves cannot be read', async () => {
@@ -5082,6 +5153,8 @@ describe('users_list', () => {
       ['group.query']: [group()],
     });
     const listing = usersList.handler(ctx, {});
+    // Asserted before the handler is awaited at all, which is what makes this
+    // about concurrency rather than order.
     expect(query.mock.calls.map((one) => one[0])).toEqual(['user.query', 'group.query']);
     await listing;
   });
