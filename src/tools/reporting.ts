@@ -2560,12 +2560,22 @@ function deviceReasons(tally: DeviceTally): Reason[] {
   return reasons;
 }
 
-/** Whether the system is behind, as this report states it. */
+/**
+ * Whether the system is behind, as this report states it.
+ *
+ * `system_update_status` has TWO failure channels and both are carried here.
+ * `check_error` is the update check that did not complete, and `version_error`
+ * the SEPARATE read of the version the system is running now — which is why a
+ * `current_version` of null needs one of them beside it to be readable at all.
+ * Dropping the second would leave a system whose version read failed reporting a
+ * null version, no reason, and a verdict that never noticed.
+ */
 interface UpdateReport {
   update_available: boolean | null;
   current_version: string | null;
   new_version: string | null;
   check_error: string | null;
+  version_error: string | null;
 }
 
 /** What `system_update_status` reported, read back through this report's guards. */
@@ -2576,6 +2586,7 @@ function updateReport(answer: unknown): UpdateReport {
     current_version: textOrNull(row['current_version']),
     new_version: textOrNull(row['new_version']),
     check_error: textOrNull(row['check_error']),
+    version_error: textOrNull(row['version_error']),
   };
 }
 
@@ -2590,18 +2601,32 @@ function updateReport(answer: unknown): UpdateReport {
  * is `unknown` — that system may have been unchecked for months, which is the
  * distinction `system_update_status` exists to keep and the one worth
  * surfacing.
+ *
+ * The version read is the section's OTHER failure channel, and it is reported
+ * the same way and independently: it is a SEPARATE read, so a system can answer
+ * the update check and still fail to say what it is running now. Without this,
+ * that second case is a null `current_version` with nothing beside it saying
+ * why — a hole in the report the verdict never sees.
  */
 function updateReasons(report: UpdateReport): Reason[] {
-  if (report.update_available !== null) return [];
-  return [
-    {
+  const reasons: Reason[] = [];
+  if (report.update_available === null) {
+    reasons.push({
       section: 'updates',
       severity: 'unknown',
       detail: `the update check did not complete, so whether this system is up to date is not established: ${
         report.check_error ?? NO_REASON
       }`,
-    },
-  ];
+    });
+  }
+  if (report.version_error !== null) {
+    reasons.push({
+      section: 'updates',
+      severity: 'unknown',
+      detail: `the running version could not be read, so what this system is on is not established: ${report.version_error}`,
+    });
+  }
+  return reasons;
 }
 
 /**
@@ -2689,11 +2714,17 @@ export const systemHealthReport: ReadOnlyTool = {
     'says about devices that are in a pool, so a disk attached to the system ' +
     'and belonging to no pool does not appear here at all, and a disk failing ' +
     'in a way ZFS has not yet noticed reads as `ONLINE`. `updates` carries ' +
-    '`update_available`, `current_version`, `new_version` and `check_error` ' +
-    'exactly as `system_update_status` reports them; AN AVAILABLE UPDATE IS ' +
-    'DELIBERATELY NOT A FINDING and does not move the verdict, because being a ' +
-    'release behind is not a fault, while a check that did not complete IS a ' +
-    'finding at `unknown` — that system may have gone unchecked for months. ' +
+    '`update_available`, `current_version`, `new_version`, `check_error` and ' +
+    '`version_error` exactly as `system_update_status` reports them. AN ' +
+    'AVAILABLE UPDATE IS DELIBERATELY NOT A FINDING and does not move the ' +
+    'verdict, because being a release behind is not a fault. THE SECTION HAS ' +
+    'TWO FAILURE CHANNELS AND EACH IS ITS OWN FINDING AT `unknown`: a check ' +
+    'that did not complete, named by `check_error`, which leaves ' +
+    '`update_available` null — that system may have gone unchecked for months ' +
+    '— and the SEPARATE read of the version it is running now, named by ' +
+    '`version_error`, which leaves `current_version` null. The two are ' +
+    'independent: a system can answer the update check and still fail to say ' +
+    'what it is running. ' +
     'EVERY COUNT AND EVERY REASON IS COMPUTED OVER EVERYTHING THE SECTION READ, ' +
     `and only the three lists are capped, at ${MAX_LISTED} entries each with a ` +
     '`truncated` flag saying whether anything was left out. So truncation can ' +
@@ -2770,6 +2801,7 @@ export const systemHealthReport: ReadOnlyTool = {
         current_version: updates.value?.current_version ?? null,
         new_version: updates.value?.new_version ?? null,
         check_error: updates.value?.check_error ?? null,
+        version_error: updates.value?.version_error ?? null,
       },
     };
   },

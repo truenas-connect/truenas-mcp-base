@@ -9897,6 +9897,7 @@ describe('system_health_report', () => {
       current_version: 'TrueNAS-25.04.0',
       new_version: null,
       check_error: null,
+      version_error: null,
     });
   });
 
@@ -10253,7 +10254,50 @@ describe('system_health_report', () => {
       current_version: 'TrueNAS-25.04.0',
       new_version: '25.04.1',
       check_error: null,
+      version_error: null,
     });
+  });
+
+  it('is UNKNOWN when the running version could not be read, though the check worked', async () => {
+    // `system_update_status` reads the version separately from the check, so
+    // this system answers one and not the other. Without a reason of its own
+    // the null `current_version` would sit in an OK report saying nothing.
+    const { ctx } = failingSystem(healthy(), {
+      ['system.version']: new Error('the system did not answer'),
+    });
+    const result = (await systemHealthReport.handler(ctx, {})) as Report;
+    expect(result.verdict).toBe('UNKNOWN');
+    expect(result['updates']).toEqual({
+      unavailable: null,
+      update_available: false,
+      current_version: null,
+      new_version: null,
+      check_error: null,
+      version_error: 'the system did not answer',
+    });
+    expect(result.reasons).toEqual([
+      {
+        section: 'updates',
+        severity: 'unknown',
+        detail:
+          'the running version could not be read, so what this system is on is not established: the system did not answer',
+      },
+    ]);
+  });
+
+  it('names both update failures when neither read answered', async () => {
+    const { ctx } = failingSystem(
+      {
+        ...healthy(),
+        ['update.status']: { code: 'ERROR', error: { reason: 'no route to host' }, status: null },
+      },
+      { ['system.version']: new Error('the system did not answer') },
+    );
+    const result = (await systemHealthReport.handler(ctx, {})) as Report;
+    expect(result.reasons.map((reason) => reason.detail)).toEqual([
+      'the update check did not complete, so whether this system is up to date is not established: no route to host',
+      'the running version could not be read, so what this system is on is not established: the system did not answer',
+    ]);
   });
 
   it('is UNKNOWN when the update check did not complete, naming what the system said', async () => {
