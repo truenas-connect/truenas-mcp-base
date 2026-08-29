@@ -16,6 +16,7 @@ import {
   createSnapshot,
   directoryServicesStatus,
   disksList,
+  fleetComplianceReport,
   haStatus,
   iscsiList,
   listDatasets,
@@ -85,7 +86,7 @@ function failingSystem(
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the thirty-six sketch tools', () => {
+  it('registers the thirty-seven sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -122,8 +123,15 @@ describe('createDefaultCatalog', () => {
       'reporting_app_vm_usage',
       'ha_status',
       'system_health_report',
+      'fleet_compliance_report',
       'snapshots_create',
     ]);
+  });
+
+  it('advertises fleet_compliance_report to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'fleet_compliance_report',
+    );
   });
 
   it('advertises system_health_report to a read-only credential', () => {
@@ -10762,5 +10770,561 @@ describe('system_health_report', () => {
     expect(systemHealthReport.mutating).toBe(false);
     expect(systemHealthReport.requiredRole).toBe(Role.ReadOnly);
     expect(systemHealthReport.inputSchema).toEqual({ type: 'object', properties: {} });
+  });
+});
+
+describe('fleet_compliance_report', () => {
+  /**
+   * A fixed present, so a certificate's day count and the audit window are fixed
+   * intervals rather than ones that move with the clock. Only `Date` is faked,
+   * as in `certificates_list` and `audit_log_query`, both of which this report
+   * reads through: they read the clock and nothing here schedules anything.
+   */
+  const NOW = 1_700_000_000_000; // 2023-11-14T22:13:20.000Z
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A validity date exactly this many whole days from {@link NOW}. */
+  const inDays = (days: number): string => new Date(NOW + days * DAY_MS).toISOString();
+
+  /** One audit entry as `audit.query` reports one, recorded a minute ago. */
+  const entry = (over: Record<string, unknown> = {}) => ({
+    audit_id: '5b4b1c9e-1f1e-4a3b-9f6a-2f0f0f0f0f0f',
+    message_timestamp: 1_699_999_940,
+    timestamp: { $date: NOW - 60_000 },
+    username: 'alice',
+    service: 'MIDDLEWARE',
+    event: 'METHOD_CALL',
+    event_data: { method: 'user.update', params: [1, { password: 'SECRET-PARAMETER-MATERIAL' }] },
+    success: true,
+    ...over,
+  });
+
+  /**
+   * One certificate as `certificate.query` reports one, comfortably valid.
+   * `privatekey` is here to be dropped: the test that no key material reaches
+   * this report is only worth anything if some was there to reach it.
+   */
+  const cert = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    name: 'truenas_default',
+    certificate: '-----BEGIN CERTIFICATE-----\nSECRET-CERTIFICATE-MATERIAL\n-----END-----',
+    privatekey: '-----BEGIN PRIVATE KEY-----\nSECRET-PRIVATE-KEY-MATERIAL\n-----END-----',
+    common: 'truenas.local',
+    san: ['DNS:truenas.local'],
+    from: inDays(-165),
+    until: inDays(200),
+    expired: false,
+    issuer: 'Lets Encrypt',
+    ...over,
+  });
+
+  /** The live join state, as `directoryservices.status` reports it. */
+  const status = (over: Record<string, unknown> = {}) => ({
+    type: 'ACTIVEDIRECTORY',
+    status: 'HEALTHY',
+    status_msg: null,
+    ...over,
+  });
+
+  /** The join's configuration; `credential` carries a password to be dropped. */
+  const config = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    service_type: 'ACTIVEDIRECTORY',
+    credential: {
+      credential_type: 'KERBEROS_USER',
+      username: 'administrator',
+      password: 'notarealbindsecret',
+    },
+    enable: true,
+    kerberos_realm: 'EXAMPLE.COM',
+    configuration: { hostname: 'nas', domain: 'example.com' },
+    ...over,
+  });
+
+  /** An SMB share as `sharing.smb.query` reports one. */
+  const smb = (over: Record<string, unknown> = {}) => ({
+    id: 3,
+    name: 'media',
+    path: '/mnt/tank/media',
+    enabled: true,
+    comment: 'Films and music',
+    options: { aapl_name_mangling: false },
+    ...over,
+  });
+
+  /** An NFS export as `sharing.nfs.query` reports one. */
+  const nfs = (over: Record<string, unknown> = {}) => ({
+    id: 3,
+    path: '/mnt/tank/backups',
+    enabled: true,
+    comment: 'Nightly backups',
+    hosts: ['10.0.0.5'],
+    networks: ['10.0.0.0/24'],
+    ...over,
+  });
+
+  /** An `update.status` payload for a system that is already up to date. */
+  const upToDate = () => ({
+    code: 'NORMAL',
+    error: null,
+    status: { new_version: null, current_version: { train: 'TN-25.04' } },
+  });
+
+  /** Every method the five composed tools read, answering a system with nothing missing. */
+  const readable = (
+    over: Partial<Record<string, unknown>> = {},
+  ): Partial<Record<string, unknown>> => ({
+    ['audit.query']: [entry()],
+    ['certificate.query']: [cert()],
+    ['directoryservices.status']: status(),
+    ['directoryservices.config']: config(),
+    ['sharing.smb.query']: [smb()],
+    ['sharing.nfs.query']: [nfs()],
+    ['update.status']: upToDate(),
+    ['system.version']: 'TrueNAS-25.04.0',
+    ...over,
+  });
+
+  /** One section of the report; every one of them carries `unavailable`. */
+  type Section = Record<string, unknown> & { unavailable: string | null };
+
+  /** The report, typed loosely: the tool's own contract is an opaque object. */
+  interface Report {
+    system: string;
+    unreadable: { system: string; section: string; detail: string }[];
+    auditing: Section;
+    certificates: Section;
+    directory_service: Section;
+    shares: Section;
+    updates: Section;
+  }
+
+  const report = async (
+    rows: Partial<Record<string, unknown>> = {},
+    failures: Partial<Record<string, unknown>> = {},
+  ): Promise<Report> => {
+    const { ctx } = failingSystem(readable(rows), failures);
+    return (await fleetComplianceReport.handler(ctx, {})) as unknown as Report;
+  };
+
+  it('reports the five sections and states no verdict of any kind', async () => {
+    const result = await report();
+    // The whole key set, asserted rather than sampled: the acceptance criterion
+    // is that this report states no compliance VERDICT, and the way that fails
+    // is a field appearing here that scores one.
+    expect(Object.keys(result)).toEqual([
+      'system',
+      'unreadable',
+      'auditing',
+      'certificates',
+      'directory_service',
+      'shares',
+      'updates',
+    ]);
+    expect(result.system).toBe('nas');
+    expect(result.unreadable).toEqual([]);
+  });
+
+  it('reports the audit trail as evidence of recording rather than as the setting', async () => {
+    const result = await report();
+    expect(result.auditing).toEqual({
+      unavailable: null,
+      recording: true,
+      entries_seen: 1,
+      by_service: [{ service: 'MIDDLEWARE', count: 1 }],
+      window_start: new Date(NOW - DAY_MS).toISOString(),
+      truncated: false,
+    });
+  });
+
+  it('counts audit entries per trail, busiest first and by name where level', async () => {
+    const result = await report({
+      ['audit.query']: [
+        entry({ service: 'SMB' }),
+        entry({ service: 'SUDO' }),
+        entry({ service: 'MIDDLEWARE' }),
+        entry({ service: 'MIDDLEWARE' }),
+        entry({ service: null }),
+      ],
+    });
+    expect(result.auditing['by_service']).toEqual([
+      { service: 'MIDDLEWARE', count: 2 },
+      { service: null, count: 1 },
+      { service: 'SMB', count: 1 },
+      { service: 'SUDO', count: 1 },
+    ]);
+    expect(result.auditing['entries_seen']).toBe(5);
+  });
+
+  it('does not establish recording from an empty trail, and says so', async () => {
+    const result = await report({ ['audit.query']: [] });
+    expect(result.auditing['recording']).toBeNull();
+    expect(result.auditing['entries_seen']).toBe(0);
+    expect(result.unreadable).toContainEqual({
+      system: 'nas',
+      section: 'auditing',
+      detail:
+        'the audit trail was read and held no entry inside the window, so whether this system ' +
+        'records one is not established: a system nobody touched looks the same here as one ' +
+        'that is not auditing at all',
+    });
+  });
+
+  it('returns no audit entry itself, so no parameter material reaches the report', async () => {
+    const result = await report();
+    expect(JSON.stringify(result)).not.toContain('SECRET-PARAMETER-MATERIAL');
+    expect(JSON.stringify(result)).not.toContain('alice');
+  });
+
+  it('counts certificates by expiry and lists only the ones that are not comfortably valid', async () => {
+    const result = await report({
+      ['certificate.query']: [
+        cert({ name: 'valid', until: inDays(200) }),
+        cert({ name: 'boundary', until: inDays(30) }),
+        cert({ name: 'soon', until: inDays(5) }),
+        cert({ name: 'gone', until: inDays(-3), expired: true }),
+        cert({ name: 'unreadable', until: 'the ides of March' }),
+        cert({ name: 'just-outside', until: inDays(31) }),
+      ],
+    });
+    expect(result.certificates).toEqual({
+      unavailable: null,
+      reported: 6,
+      expired: 1,
+      expiring_soon: 2,
+      expiry_unknown: 1,
+      expiring_within_days: 30,
+      entries: [
+        {
+          name: 'boundary',
+          common_name: 'truenas.local',
+          not_after: inDays(30),
+          days_until_expiry: 30,
+          expired: false,
+        },
+        {
+          name: 'soon',
+          common_name: 'truenas.local',
+          not_after: inDays(5),
+          days_until_expiry: 5,
+          expired: false,
+        },
+        {
+          name: 'gone',
+          common_name: 'truenas.local',
+          not_after: inDays(-3),
+          days_until_expiry: -3,
+          expired: true,
+        },
+        {
+          name: 'unreadable',
+          common_name: 'truenas.local',
+          not_after: 'the ides of March',
+          days_until_expiry: null,
+          expired: false,
+        },
+      ],
+      truncated: false,
+    });
+  });
+
+  it('returns no certificate or private key material', async () => {
+    const result = await report();
+    expect(JSON.stringify(result)).not.toContain('SECRET-PRIVATE-KEY-MATERIAL');
+    expect(JSON.stringify(result)).not.toContain('SECRET-CERTIFICATE-MATERIAL');
+  });
+
+  it('names a certificate whose expiry it could not read, in English at either count', async () => {
+    const one = await report({ ['certificate.query']: [cert({ until: null })] });
+    expect(one.unreadable).toContainEqual({
+      system: 'nas',
+      section: 'certificates',
+      detail:
+        '1 certificate reported no expiry date this report could read, so whether they are ' +
+        'still valid is not established',
+    });
+
+    const two = await report({
+      ['certificate.query']: [cert({ until: null }), cert({ until: 'soon-ish' })],
+    });
+    expect(two.unreadable).toContainEqual({
+      system: 'nas',
+      section: 'certificates',
+      detail:
+        '2 certificates reported no expiry date this report could read, so whether they are ' +
+        'still valid is not established',
+    });
+  });
+
+  it('caps the certificate list and says it did, without capping the counts', async () => {
+    const result = await report({
+      ['certificate.query']: Array.from({ length: 12 }, (_, index) =>
+        cert({ name: `expiring-${index}`, until: inDays(1) }),
+      ),
+    });
+    expect(result.certificates['reported']).toBe(12);
+    expect(result.certificates['expiring_soon']).toBe(12);
+    expect(result.certificates['entries']).toHaveLength(10);
+    expect(result.certificates['truncated']).toBe(true);
+  });
+
+  it('reports where identities come from, with no bind credential', async () => {
+    const result = await report();
+    expect(result.directory_service).toEqual({
+      unavailable: null,
+      service_type: 'ACTIVEDIRECTORY',
+      status: 'HEALTHY',
+      status_message: null,
+      enabled: true,
+      domain: 'example.com',
+      server_urls: null,
+      kerberos_realm: 'EXAMPLE.COM',
+      credential_type: 'KERBEROS_USER',
+      config_error: null,
+    });
+    expect(JSON.stringify(result)).not.toContain('notarealbindsecret');
+  });
+
+  it('identifies an LDAP directory by its server URLs, which have no domain', async () => {
+    const result = await report({
+      ['directoryservices.status']: status({ type: 'LDAP' }),
+      ['directoryservices.config']: config({
+        service_type: 'LDAP',
+        configuration: { server_urls: ['ldaps://dc.example.com'] },
+      }),
+    });
+    expect(result.directory_service['domain']).toBeNull();
+    expect(result.directory_service['server_urls']).toEqual(['ldaps://dc.example.com']);
+  });
+
+  it('reports no server list at all rather than a partial one', async () => {
+    const result = await report({
+      ['directoryservices.status']: status({ type: 'LDAP' }),
+      ['directoryservices.config']: config({
+        service_type: 'LDAP',
+        configuration: { server_urls: ['ldaps://dc.example.com', 42] },
+      }),
+    });
+    // Not the one readable URL: an auditor asking where identities come from
+    // would be told a narrower answer than the truth.
+    expect(result.directory_service['server_urls']).toBeNull();
+  });
+
+  it('does not establish what a system is joined to when the configuration read failed', async () => {
+    const result = await report({}, { ['directoryservices.config']: new Error('permission denied') });
+    expect(result.directory_service['config_error']).toBe('permission denied');
+    expect(result.directory_service['enabled']).toBeNull();
+    expect(result.unreadable).toContainEqual({
+      system: 'nas',
+      section: 'directory_service',
+      detail:
+        'the directory service configuration could not be read, so what this system is joined ' +
+        'to is not established: permission denied',
+    });
+  });
+
+  it('reports what is exposed and over which protocol, switched-on shares first', async () => {
+    const result = await report({
+      ['sharing.smb.query']: [
+        smb({ id: 1, name: 'archive', enabled: false }),
+        smb({ id: 2, name: 'scratch', enabled: 'yes' }),
+        smb({ id: 3, name: 'media', enabled: true }),
+      ],
+      ['sharing.nfs.query']: [nfs({ id: 4, enabled: true })],
+    });
+    expect(result.shares).toEqual({
+      unavailable: null,
+      reported: 4,
+      enabled: 2,
+      disabled: 1,
+      enablement_unknown: 1,
+      by_protocol: [
+        { protocol: 'NFS', count: 1 },
+        { protocol: 'SMB', count: 3 },
+      ],
+      entries: [
+        { protocol: 'SMB', id: 3, name: 'media', path: '/mnt/tank/media', enabled: true },
+        { protocol: 'NFS', id: 4, name: null, path: '/mnt/tank/backups', enabled: true },
+        { protocol: 'SMB', id: 2, name: 'scratch', path: '/mnt/tank/media', enabled: null },
+        { protocol: 'SMB', id: 1, name: 'archive', path: '/mnt/tank/media', enabled: false },
+      ],
+      truncated: false,
+    });
+  });
+
+  it('reports no id for a share whose own id the system did not report as a number', async () => {
+    const result = await report({
+      ['sharing.smb.query']: [smb({ id: 'three' })],
+      ['sharing.nfs.query']: [nfs({ id: Number.POSITIVE_INFINITY })],
+    });
+    expect(result.shares['entries']).toEqual([
+      expect.objectContaining({ protocol: 'SMB', id: null }),
+      expect.objectContaining({ protocol: 'NFS', id: null }),
+    ]);
+  });
+
+  it('caps the share list and says it did, without capping the counts', async () => {
+    const result = await report({
+      ['sharing.smb.query']: Array.from({ length: 11 }, (_, index) =>
+        smb({ id: index, name: `share-${index}` }),
+      ),
+    });
+    expect(result.shares['reported']).toBe(12);
+    expect(result.shares['entries']).toHaveLength(10);
+    expect(result.shares['truncated']).toBe(true);
+  });
+
+  it('does not establish what one protocol exposes when its listing failed', async () => {
+    const result = await report({}, { ['sharing.nfs.query']: new Error('NFS service is not running') });
+    expect(result.shares['reported']).toBe(1);
+    expect(result.unreadable).toContainEqual({
+      system: 'nas',
+      section: 'shares',
+      detail:
+        'no NFS share could be listed, so what this system exposes over it is not established: ' +
+        'NFS service is not running',
+    });
+  });
+
+  it('reports whether the system is patched, from two independent reads', async () => {
+    const result = await report();
+    expect(result.updates).toEqual({
+      unavailable: null,
+      update_available: false,
+      current_version: 'TrueNAS-25.04.0',
+      new_version: null,
+      train: 'TN-25.04',
+      check_error: null,
+      version_error: null,
+    });
+  });
+
+  it('does not establish update currency from a check that did not complete', async () => {
+    const result = await report({
+      ['update.status']: { code: 'ERROR', error: { reason: 'cannot reach the update server' }, status: null },
+    });
+    expect(result.updates['update_available']).toBeNull();
+    expect(result.updates['current_version']).toBe('TrueNAS-25.04.0');
+    expect(result.unreadable).toContainEqual({
+      system: 'nas',
+      section: 'updates',
+      detail:
+        'the update check did not complete, so whether this system is up to date is not ' +
+        'established: cannot reach the update server',
+    });
+  });
+
+  it('names a failed version read separately from a failed check', async () => {
+    const result = await report({}, { ['system.version']: new Error('no version') });
+    expect(result.updates['update_available']).toBe(false);
+    expect(result.updates['current_version']).toBeNull();
+    expect(result.unreadable).toEqual([
+      {
+        system: 'nas',
+        section: 'updates',
+        detail:
+          'the running version could not be read, so what this system is on is not established: ' +
+          'no version',
+      },
+    ]);
+  });
+
+  it('states an unreadable section as unread rather than as nothing to report', async () => {
+    const result = await report(
+      {},
+      {
+        ['audit.query']: new Error('the audit dataset is not mounted'),
+        ['certificate.query']: new Error('certificate query failed'),
+        ['directoryservices.status']: new Error('directory service is down'),
+        ['sharing.smb.query']: new Error('SMB is off'),
+        ['sharing.nfs.query']: new Error('NFS is off'),
+        ['update.status']: new Error('update check exploded'),
+      },
+    );
+    expect(result.auditing).toEqual({
+      unavailable: 'the audit dataset is not mounted',
+      recording: null,
+      entries_seen: null,
+      by_service: null,
+      window_start: null,
+      truncated: null,
+    });
+    expect(result.certificates).toEqual({
+      unavailable: 'certificate query failed',
+      reported: null,
+      expired: null,
+      expiring_soon: null,
+      expiry_unknown: null,
+      expiring_within_days: null,
+      entries: null,
+      truncated: null,
+    });
+    expect(result.directory_service).toEqual({
+      unavailable: 'directory service is down',
+      service_type: null,
+      status: null,
+      status_message: null,
+      enabled: null,
+      domain: null,
+      server_urls: null,
+      kerberos_realm: null,
+      credential_type: null,
+      config_error: null,
+    });
+    expect(result.shares).toEqual({
+      unavailable: 'no share could be listed: SMB: SMB is off; NFS: NFS is off',
+      reported: null,
+      enabled: null,
+      disabled: null,
+      enablement_unknown: null,
+      by_protocol: null,
+      entries: null,
+      truncated: null,
+    });
+    expect(result.updates).toEqual({
+      unavailable: 'update check exploded',
+      update_available: null,
+      current_version: null,
+      new_version: null,
+      train: null,
+      check_error: null,
+      version_error: null,
+    });
+    expect(result.unreadable.map((fact) => fact.section)).toEqual([
+      'auditing',
+      'certificates',
+      'directory_service',
+      'shares',
+      'updates',
+    ]);
+    // Every one of them carries the system, so the lines stay attributable when
+    // they are collected from several systems into one list.
+    expect(result.unreadable.every((fact) => fact.system === 'nas')).toBe(true);
+    expect(result.unreadable[0].detail).toBe(
+      'the auditing section could not be read, so nothing in it is established: the audit ' +
+        'dataset is not mounted',
+    );
+  });
+
+  it('does not fail because one subsystem did', async () => {
+    const result = await report({}, { ['certificate.query']: 'no certificate store' });
+    expect(result.certificates['unavailable']).toBe('no certificate store');
+    expect(result.updates['update_available']).toBe(false);
+    expect(result.shares['reported']).toBe(2);
+  });
+
+  it('is read-only and takes no arguments', () => {
+    expect(fleetComplianceReport.mutating).toBe(false);
+    expect(fleetComplianceReport.requiredRole).toBe(Role.ReadOnly);
+    expect(fleetComplianceReport.inputSchema).toEqual({ type: 'object', properties: {} });
   });
 });
