@@ -3433,12 +3433,22 @@ describe('share_access', () => {
     }
   });
 
-  it('reports a path with ACLs switched off as holding no entry list', async () => {
-    // Access there is governed by the Unix mode bits, which this tool does not
-    // read — an empty list would claim nobody has access.
+  it.each([
+    ['no list at all', null],
+    // The shape every other empty ACL arrives in. Reporting it as an empty
+    // entry list would say this ACL grants nobody anything, when in fact no
+    // ACL is in force and the mode bits this tool does not read decide.
+    ['an empty list', []],
+    // Nothing here is in force, so reporting it would name principals as
+    // having access the path does not give them.
+    ['a list of entries', [ace()]],
+  ])('reports a path with ACLs switched off as holding no entry list, given %s', async (
+    _shape,
+    acl,
+  ) => {
     const result = await answered(
       { share: 'media' },
-      { ['filesystem.getacl']: aclOf({ acltype: 'DISABLED', acl: null, trivial: true }) },
+      { ['filesystem.getacl']: aclOf({ acltype: 'DISABLED', acl, trivial: true }) },
     );
     expect(result['acl']).toEqual({
       type: 'DISABLED',
@@ -3449,6 +3459,16 @@ describe('share_access', () => {
       owner_gid: 0,
       entries: null,
     });
+  });
+
+  it('reports an entry list it could not read as null on a live ACL type', async () => {
+    // The other direction of the same tie: `entries` null is not the exclusive
+    // property of a DISABLED path, so an NFS4 ACL whose list did not arrive as
+    // one reports null rather than an empty list that would read as granting
+    // nobody anything.
+    expect(
+      (await answered({ share: 'media' }, { ['filesystem.getacl']: aclOf({ acl: null }) }))['acl'],
+    ).toEqual({ ...acl, entries: null });
   });
 
   it('reports an ACL field it could not read as null', async () => {

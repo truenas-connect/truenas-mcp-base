@@ -459,9 +459,17 @@ function mapAcl(row: {
     owner_uid: numberOrNull(row.uid),
     owner_group: textOrNull(row.group),
     owner_gid: numberOrNull(row.gid),
-    // Null where the system reported no list at all, which is what a path with
-    // ACLs switched off answers. An empty list is an ACL that holds no entry.
-    entries: Array.isArray(row.acl) ? (row.acl as unknown[]).map(accessEntry) : null,
+    // Keyed on the type, not on the shape of `acl`, because the two say
+    // different things and only the type is authoritative about which. A
+    // `DISABLED` path has no ACL in force whatever list arrives beside it, so
+    // reporting the `[]` the middleware answers empty lists with would read as
+    // an ACL that grants nobody anything when access is really governed by the
+    // mode bits this tool does not read. Otherwise null is a list that could
+    // not be read, and an empty list is an ACL that holds no entry.
+    entries:
+      row.acltype === 'DISABLED' || !Array.isArray(row.acl)
+        ? null
+        : (row.acl as unknown[]).map(accessEntry),
   };
 }
 
@@ -700,7 +708,8 @@ export const shareAccess: ReadOnlyTool = {
     'non-null: `acl_error` says in words why the ACL could not be read, and an ' +
     'unread ACL is never presented as an empty one. Within `acl`, `type` is ' +
     '`NFS4`, `POSIX1E`, or `DISABLED` for a path whose ACLs are switched off — ' +
-    'there `entries` is null and access is governed by the Unix mode bits, ' +
+    'there `entries` is ALWAYS null, whatever list the system reports beside ' +
+    'it, because no ACL is in force: access is governed by the Unix mode bits, ' +
     'which this tool does not read, so it can say nothing about who has access ' +
     '— or null where the system named no type, which leaves the entries below ' +
     'readable but says nothing about which vocabulary they are in. ' +
@@ -708,7 +717,10 @@ export const shareAccess: ReadOnlyTool = {
     'group and everyone else. `owner_user` and `owner_group` are the names of ' +
     'the path\'s owner, with `owner_uid` and `owner_gid` the raw ids, and they ' +
     'are who the `owner@`, `group@`, `USER_OBJ` and `GROUP_OBJ` entries refer ' +
-    'to. Each of `entries` is one entry of that ACL. `tag` says what kind, and ' +
+    'to. Each of `entries` is one entry of that ACL: an empty list is an ACL ' +
+    'that holds no entry, and null is either the `DISABLED` path above or a ' +
+    'list the system did not report in a form this tool could read — never ' +
+    'evidence that the ACL grants nothing. `tag` says what kind, and ' +
     'the two ACL types use different words for it. On an NFS4 ACL it is `USER` ' +
     'or `GROUP`, which name a principal, or `owner@`, `group@` or `everyone@`, ' +
     'where the tag IS the principal. On a POSIX ACL it is `USER` or `GROUP`, ' +
