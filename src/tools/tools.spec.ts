@@ -12,6 +12,7 @@ import {
   disksList,
   iscsiList,
   listDatasets,
+  networkInterfaces,
   nvmeofList,
   poolStatus,
   poolTopology,
@@ -68,7 +69,7 @@ function failingSystem(
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the twenty-one sketch tools', () => {
+  it('registers the twenty-two sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'storage_pool_status',
@@ -90,6 +91,7 @@ describe('createDefaultCatalog', () => {
       'nvmeof_list',
       'users_list',
       'directory_services_status',
+      'network_interfaces',
       'snapshots_create',
     ]);
   });
@@ -177,6 +179,12 @@ describe('createDefaultCatalog', () => {
   it('advertises directory_services_status to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
       'directory_services_status',
+    );
+  });
+
+  it('advertises network_interfaces to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'network_interfaces',
     );
   });
 });
@@ -5418,5 +5426,407 @@ describe('directory_services_status', () => {
       'directoryservices.config',
     ]);
     await pending;
+  });
+});
+
+describe('network_interfaces', () => {
+  /**
+   * One row of `interface.query`. The nested `state` is spread over the default
+   * rather than replaced, so a test naming one state field keeps the rest —
+   * every field of the response is read out of that sub-object, and a fixture
+   * that dropped it wholesale would test the absent-state path by accident.
+   */
+  const iface = (
+    over: Record<string, unknown> = {},
+    state: Record<string, unknown> | null = {},
+  ) => ({
+    id: 'eno1',
+    name: 'eno1',
+    fake: false,
+    type: 'PHYSICAL',
+    aliases: [],
+    ipv4_dhcp: false,
+    ipv6_auto: false,
+    // The configured MTU, null on an interface left at the default. The
+    // operational one lives in the state, and telling them apart is what the
+    // fixture's two different numbers are for.
+    mtu: null,
+    state:
+      state === null
+        ? null
+        : {
+            name: 'eno1',
+            orig_name: 'eno1',
+            mtu: 1500,
+            cloned: false,
+            flags: ['UP', 'BROADCAST', 'RUNNING'],
+            link_state: 'LINK_STATE_UP',
+            media_type: 'Ethernet',
+            media_subtype: 'autoselect',
+            active_media_type: 'Ethernet',
+            active_media_subtype: '1000baseT <full-duplex>',
+            link_address: '00:11:22:33:44:55',
+            permanent_link_address: '00:11:22:33:44:55',
+            hardware_link_address: '00:11:22:33:44:55',
+            aliases: [{ type: 'INET', address: '192.168.1.10', netmask: 24 }],
+            ...state,
+          },
+    ...over,
+  });
+
+  const reported = async (rows: unknown[]): Promise<Record<string, unknown>[]> => {
+    const { ctx } = fakeSystem({ ['interface.query']: rows });
+    return (await networkInterfaces.handler(ctx, {})) as Record<string, unknown>[];
+  };
+
+  const one = async (over: Record<string, unknown> = {}, state: Record<string, unknown> | null = {}) =>
+    (await reported([iface(over, state)]))[0] as Record<string, unknown>;
+
+  it('reports the name, type, link, speed, MTU and addresses of an interface', async () => {
+    expect(await one()).toEqual({
+      name: 'eno1',
+      type: 'PHYSICAL',
+      link_state: 'LINK_STATE_UP',
+      link_media: '1000baseT <full-duplex>',
+      link_speed_mbps: 1000,
+      mtu: 1500,
+      addresses: [{ type: 'INET', address: '192.168.1.10', netmask: 24 }],
+      vlan_parent: null,
+      vlan_tag: null,
+      members: null,
+    });
+  });
+
+  it('returns no field the tool does not name, on the row or in the state', async () => {
+    const result = await one(
+      { future_field: 'added by a later release' },
+      {
+        future_state_field: 'added by a later release',
+        // The state's three own link-address fields, all given one value that
+        // nothing else in this fixture carries. A LINK-type alias holds a
+        // hardware address too and IS returned, as the description says, so it
+        // is given a different one: what must not appear below is the address
+        // only the dropped fields carry, which a shared value could not show.
+        link_address: 'aa:bb:cc:dd:ee:ff',
+        permanent_link_address: 'aa:bb:cc:dd:ee:ff',
+        hardware_link_address: 'aa:bb:cc:dd:ee:ff',
+        aliases: [{ type: 'LINK', address: '00:11:22:33:44:55', netmask: null }],
+      },
+    );
+    expect(Object.keys(result)).toEqual([
+      'name',
+      'type',
+      'link_state',
+      'link_media',
+      'link_speed_mbps',
+      'mtu',
+      'addresses',
+      'vlan_parent',
+      'vlan_tag',
+      'members',
+    ]);
+    // Against the whole serialized row rather than its top-level keys: a field
+    // that reached a nested address or member entry would pass a key check and
+    // still be in front of the caller. The hardware address is in the fixture's
+    // state and is not a field this tool names.
+    const serialized = JSON.stringify(result);
+    for (const dropped of ['added by a later release', 'aa:bb:cc:dd:ee:ff', 'BROADCAST']) {
+      expect(serialized).not.toContain(dropped);
+    }
+    // And the alias that legitimately carries a hardware address survives, so
+    // the assertion above is about the fields this tool drops rather than about
+    // the fixture happening to hold no LINK alias.
+    expect(serialized).toContain('00:11:22:33:44:55');
+  });
+
+  it('reads the negotiated speed out of every media spelling it can', async () => {
+    const speeds = await Promise.all(
+      [
+        '1000baseT <full-duplex>',
+        '100baseTX',
+        '10Gbase-SR4',
+        '2.5GbaseT',
+        '1000Mb/s',
+        '10Gb/s',
+        '40GBASE-LR4',
+      ].map(async (active_media_subtype) =>
+        (await one({}, { active_media_subtype }))['link_speed_mbps'],
+      ),
+    );
+    expect(speeds).toEqual([1000, 100, 10000, 2500, 1000, 10000, 40000]);
+  });
+
+  it('reports no speed, and keeps the media text, where no speed can be read', async () => {
+    // Each of these is a media name the system genuinely sends and this tool
+    // cannot read a magnitude from. The text survives so that a caller can see
+    // what the null was read from.
+    for (const active_media_subtype of ['autoselect', 'Unknown', 'baseT', '0baseT']) {
+      expect(await one({}, { active_media_subtype })).toMatchObject({
+        link_media: active_media_subtype,
+        link_speed_mbps: null,
+      });
+    }
+  });
+
+  it('reports no speed where the magnitude is too large to be a number', async () => {
+    // The regex bounds the shape of the leading token and not its length, so a
+    // long enough run of digits overflows to Infinity — which is not a speed,
+    // and must not be reported as one.
+    expect(await one({}, { active_media_subtype: `${'9'.repeat(400)}baseT` })).toMatchObject({
+      link_media: expect.stringContaining('9'),
+      link_speed_mbps: null,
+    });
+  });
+
+  it('reports a null link state and no media where the system named neither', async () => {
+    // Null rather than down: an interface whose link the system did not report
+    // must not read as one that is definitely without a link.
+    expect(await one({}, { link_state: null, active_media_subtype: '' })).toMatchObject({
+      link_state: null,
+      link_media: null,
+      link_speed_mbps: null,
+    });
+  });
+
+  it('reports the operational MTU rather than the configured one', async () => {
+    // The row's own `mtu` is null — the fixture's default, an interface left at
+    // the system default — and the state's is 9000. An interface running at a
+    // jumbo MTU must not report as one with no MTU.
+    expect(await one({ mtu: null }, { mtu: 9000 })).toMatchObject({ mtu: 9000 });
+  });
+
+  it('reports the VLAN parent and tag, and null for both on anything else', async () => {
+    expect(
+      await one({ name: 'vlan10', type: 'VLAN', vlan_parent_interface: 'eno1', vlan_tag: 10 }),
+    ).toMatchObject({ type: 'VLAN', vlan_parent: 'eno1', vlan_tag: 10 });
+    expect(await one()).toMatchObject({ vlan_parent: null, vlan_tag: null });
+  });
+
+  it('reports every address the interface carries, whatever the netmask is', async () => {
+    expect(
+      await one(
+        {},
+        {
+          aliases: [
+            { type: 'INET', address: '192.168.1.10', netmask: 24 },
+            { type: 'INET', address: '10.0.0.5', netmask: '255.255.255.0' },
+            { type: 'INET6', address: 'fe80::1', netmask: 64 },
+          ],
+        },
+      ),
+    ).toMatchObject({
+      addresses: [
+        { type: 'INET', address: '192.168.1.10', netmask: 24 },
+        { type: 'INET', address: '10.0.0.5', netmask: '255.255.255.0' },
+        { type: 'INET6', address: 'fe80::1', netmask: 64 },
+      ],
+    });
+  });
+
+  it('reports an address field the system sent nothing readable for as null', async () => {
+    expect(
+      await one(
+        {},
+        {
+          aliases: [
+            { type: '', address: null, netmask: { nested: true } },
+            // An empty netmask is no value, exactly as it is in the two fields
+            // beside it, rather than a mask of no characters.
+            { type: 'INET', address: '10.0.0.5', netmask: '' },
+            'not one',
+          ],
+        },
+      ),
+    ).toMatchObject({
+      addresses: [
+        { type: null, address: null, netmask: null },
+        { type: 'INET', address: '10.0.0.5', netmask: null },
+        { type: null, address: null, netmask: null },
+      ],
+    });
+  });
+
+  it('tells an interface carrying no address apart from one whose addresses could not be read', async () => {
+    // The empty list is a state that was read and holds no address; null is a
+    // state that named no address list at all. Reporting the second as the
+    // first would claim an interface has no address on no evidence.
+    expect(await one({}, { aliases: [] })).toMatchObject({ addresses: [] });
+    expect(await one({ state: { link_state: 'LINK_STATE_UP' } })).toMatchObject({
+      addresses: null,
+    });
+  });
+
+  it('reports a member that is down inside an otherwise-up aggregation', async () => {
+    // The acceptance criterion this tool exists for. The bond has a link, so
+    // nothing at its own level says anything is wrong; the failed port is
+    // visible only in `members`.
+    const rows = await reported([
+      iface({ name: 'eno1' }, { link_state: 'LINK_STATE_UP' }),
+      iface({ name: 'eno2' }, { link_state: 'LINK_STATE_DOWN' }),
+      iface(
+        { name: 'bond0', type: 'LINK_AGGREGATION', lag_ports: ['eno1', 'eno2'] },
+        {
+          link_state: 'LINK_STATE_UP',
+          ports: [
+            { name: 'eno1', flags: ['ACTIVE'] },
+            { name: 'eno2', flags: [] },
+          ],
+        },
+      ),
+    ]);
+    expect(rows[2]).toMatchObject({
+      name: 'bond0',
+      link_state: 'LINK_STATE_UP',
+      members: [
+        { name: 'eno1', link_state: 'LINK_STATE_UP', flags: ['ACTIVE'] },
+        { name: 'eno2', link_state: 'LINK_STATE_DOWN', flags: [] },
+      ],
+    });
+  });
+
+  it('reports the members of a bridge, resolved the same way', async () => {
+    const rows = await reported([
+      iface({ name: 'br0', type: 'BRIDGE', bridge_members: ['eno1'] }, { ports: [] }),
+      iface({ name: 'eno1' }, { link_state: 'LINK_STATE_DOWN' }),
+    ]);
+    // Named before its member's own row appears, which is why the link states
+    // are collected across the whole response before any row is mapped.
+    expect(rows[0]).toMatchObject({
+      members: [{ name: 'eno1', link_state: 'LINK_STATE_DOWN', flags: null }],
+    });
+  });
+
+  it('reports a member the response holds no entry for as unresolved, not down', async () => {
+    const rows = await reported([
+      iface({ name: 'bond0', type: 'LINK_AGGREGATION', lag_ports: ['eno1', 'missing'] }, { ports: [] }),
+    ]);
+    expect(rows[0]).toMatchObject({
+      members: [
+        { name: 'eno1', link_state: null, flags: null },
+        { name: 'missing', link_state: null, flags: null },
+      ],
+    });
+  });
+
+  it('reports the members of a LAGG that also carries an empty bridge member list', async () => {
+    // The middleware sends an interface record whole, so an aggregation can
+    // carry both fields with only one of them populated. Preferring whichever
+    // is present first would report this live bond as having no members.
+    const rows = await reported([
+      iface({ name: 'eno1' }, { link_state: 'LINK_STATE_UP' }),
+      iface(
+        {
+          name: 'bond0',
+          type: 'LINK_AGGREGATION',
+          bridge_members: [],
+          lag_ports: ['eno1'],
+        },
+        { ports: [{ name: 'eno1', flags: ['ACTIVE'] }] },
+      ),
+    ]);
+    expect(rows[1]).toMatchObject({
+      members: [{ name: 'eno1', link_state: 'LINK_STATE_UP', flags: ['ACTIVE'] }],
+    });
+  });
+
+  it('reports an aggregate carrying two empty member lists as having no members', async () => {
+    // Both fields are lists, so a member list WAS named — twice, and empty
+    // both times. That is an aggregate with nothing under it, not one whose
+    // members could not be read.
+    expect(
+      await one({ type: 'BRIDGE', bridge_members: [], lag_ports: [] }),
+    ).toMatchObject({ members: [] });
+  });
+
+  it('reports a member whose own entry named no link state as unstatable, not down', async () => {
+    const rows = await reported([
+      iface({ name: 'eno1' }, { link_state: null }),
+      iface({ name: 'bond0', type: 'LINK_AGGREGATION', lag_ports: ['eno1'] }, { ports: [] }),
+    ]);
+    // The same null an unresolved member gets: both are a link this tool
+    // cannot state, and neither is a link that is down.
+    expect(rows[1]).toMatchObject({ members: [{ name: 'eno1', link_state: null }] });
+  });
+
+  it('tells an aggregate with no members apart from one that named no list', async () => {
+    const [empty, none] = await reported([
+      iface({ name: 'br0', type: 'BRIDGE', bridge_members: [] }),
+      // A bridge whose member list the system did not report at all: an empty
+      // list would claim it is built from nothing, which is a different fact.
+      iface({ name: 'br1', type: 'BRIDGE' }),
+    ]);
+    expect(empty).toMatchObject({ type: 'BRIDGE', members: [] });
+    expect(none).toMatchObject({ type: 'BRIDGE', members: null });
+  });
+
+  it('drops a member entry and a flag the system did not name', async () => {
+    const rows = await reported([
+      iface(
+        { name: 'bond0', type: 'LINK_AGGREGATION', lag_ports: ['eno1', 7, null] },
+        { ports: [{ name: 'eno1', flags: ['ACTIVE', 4] }, { name: '' }, 'not a port'] },
+      ),
+    ]);
+    expect(rows[0]).toMatchObject({ members: [{ name: 'eno1', flags: ['ACTIVE'] }] });
+  });
+
+  it('reports a member list the system sent as something other than a list as absent', async () => {
+    expect(await one({ type: 'BRIDGE', bridge_members: 'eno1' })).toMatchObject({ members: null });
+  });
+
+  it('reports every state-derived field as absent where there is no state', async () => {
+    // Null rather than fatal: the row still names the interface, its type and
+    // its VLAN configuration, and losing all of that to answer none of the
+    // question is the trade this refuses.
+    expect(await one({ name: 'eno9', type: 'PHYSICAL' }, null)).toEqual({
+      name: 'eno9',
+      type: 'PHYSICAL',
+      link_state: null,
+      link_media: null,
+      link_speed_mbps: null,
+      mtu: null,
+      addresses: null,
+      vlan_parent: null,
+      vlan_tag: null,
+      members: null,
+    });
+  });
+
+  it('reads a state the system sent as a list as no state at all', async () => {
+    // An array is an object too, so this is the case the null check alone does
+    // not cover: read as a record it would answer null for every field without
+    // saying the shape was not the one this tool reads.
+    // Set through the row override rather than the state one, which is spread
+    // over the default state and so cannot carry a value that is not a record.
+    expect(await one({ state: [] })).toMatchObject({
+      link_state: null,
+      addresses: null,
+      mtu: null,
+    });
+  });
+
+  it('reports an interface the system did not name, and never resolves against it', async () => {
+    const rows = await reported([
+      iface({ name: null }, { link_state: 'LINK_STATE_DOWN' }),
+      iface({ name: 'bond0', type: 'LINK_AGGREGATION', lag_ports: ['eno1'] }, { ports: [] }),
+    ]);
+    // Still reported — a nameless interface is one the caller can see exists —
+    // and it contributes no entry to the map the members resolve against, so
+    // its link state cannot be attributed to a member.
+    expect(rows[0]).toMatchObject({ name: null, link_state: 'LINK_STATE_DOWN' });
+    expect(rows[1]).toMatchObject({ members: [{ name: 'eno1', link_state: null }] });
+  });
+
+  it('reports a type the system did not name as null', async () => {
+    expect(await one({ type: null })).toMatchObject({ type: null });
+  });
+
+  it('reports an empty listing as an empty result', async () => {
+    expect(await reported([])).toEqual([]);
+  });
+
+  it('asks for the interfaces with no filter, so that members resolve', async () => {
+    const { ctx, query } = fakeSystem({ ['interface.query']: [] });
+    await networkInterfaces.handler(ctx, {});
+    expect(query).toHaveBeenCalledWith('interface.query');
   });
 });
