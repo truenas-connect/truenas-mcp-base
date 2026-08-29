@@ -1344,11 +1344,15 @@ describe('snapshots_list', () => {
     ]);
   });
 
-  it('asks for one more row than the bound, and for only the two properties it reports', async () => {
+  it('asks the system for the newest rows, one more than the bound, and two properties', async () => {
     const { ctx, query } = fakeSystem({ ['pool.snapshot.query']: [snapshot()] });
     await snapshotsList.handler(ctx, {});
-    // The extra row is what tells a complete list from a truncated one.
+    // The ordering is what decides WHICH snapshots a truncated list holds —
+    // the system applies the bound, so sorting only after it has cut the list
+    // would order the oldest window rather than choose the newest one. The
+    // extra row is what tells a complete list from a truncated one.
     expect(query).toHaveBeenCalledWith('pool.snapshot.query', [], {
+      order_by: ['-createtxg'],
       limit: 101,
       extra: { properties: ['creation', 'referenced'] },
     });
@@ -1357,11 +1361,11 @@ describe('snapshots_list', () => {
   it('passes a dataset filter to the query', async () => {
     const { ctx, query } = fakeSystem({ ['pool.snapshot.query']: [snapshot()] });
     await snapshotsList.handler(ctx, { dataset: 'tank/media' });
-    expect(query).toHaveBeenCalledWith(
-      'pool.snapshot.query',
-      [['dataset', '=', 'tank/media']],
-      { limit: 101, extra: { properties: ['creation', 'referenced'] } },
-    );
+    expect(query).toHaveBeenCalledWith('pool.snapshot.query', [['dataset', '=', 'tank/media']], {
+      order_by: ['-createtxg'],
+      limit: 101,
+      extra: { properties: ['creation', 'referenced'] },
+    });
     // The dataset plainly exists — it has snapshots — so nothing else is asked.
     expect(query).toHaveBeenCalledTimes(1);
   });
@@ -1424,6 +1428,7 @@ describe('snapshots_list', () => {
       // The bound reported and the bound asked of the middleware are the same
       // number, so a caller reading `limit` is reading what actually applied.
       expect(query).toHaveBeenCalledWith('pool.snapshot.query', [], {
+        order_by: ['-createtxg'],
         limit: result.limit + 1,
         extra: { properties: ['creation', 'referenced'] },
       });

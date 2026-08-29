@@ -196,9 +196,28 @@ function propertyBytes(property: unknown): number | null {
  * A field the middleware sent as a string, or null where it sent something
  * else. Both fields read this way name the snapshot rather than measure it, so
  * there is nothing to coerce: a name that is not a string is not a name.
+ *
+ * Named for what it does rather than `orNull`, which `pools.ts` already uses
+ * for a different reading — that one takes an already-typed `string | null |
+ * undefined` and defaults it, where this one is the guard that decides whether
+ * an `unknown` is a string at all.
  */
-function orNull(value: unknown): string | null {
+function stringOrNull(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
+}
+
+/**
+ * One entry of a snapshot's `properties` map, or undefined where the row
+ * carries no map to read it from.
+ *
+ * Guarded rather than asserted: `properties` arrives as `unknown` and a row
+ * that sends something other than an object is exactly the case the assertion
+ * would have got wrong.
+ */
+function snapshotProperty(properties: unknown, name: string): unknown {
+  return typeof properties === 'object' && properties !== null
+    ? (properties as Record<string, unknown>)[name]
+    : undefined;
 }
 
 /**
@@ -267,20 +286,24 @@ export const snapshotsList: ReadOnlyTool = {
     'than that it is not there. The result is bounded: `snapshots` holds at ' +
     'most `limit` entries — 100 by default and 1000 at most, and the `limit` ' +
     'returned is the bound actually applied — while `truncated` is true when ' +
-    'the system held more snapshots than were returned. The bound is applied ' +
-    'by the system before the newest-first ordering, so the snapshots missing ' +
-    'from a truncated list are not necessarily the oldest: narrow it with ' +
-    '`dataset`, or raise `limit`, rather than reading a truncated list as ' +
-    'everything that exists.',
+    'the system holds more snapshots than were returned. The system is asked ' +
+    'for the most recent ones first, so a truncated list holds the newest ' +
+    'snapshots rather than an arbitrary window; it is still not the whole set, ' +
+    'so narrow it with `dataset`, or raise `limit`, before concluding from a ' +
+    'truncated list that some snapshot does not exist.',
   inputSchema: {
     type: 'object',
     properties: {
       dataset: {
         type: 'string',
+        minLength: 1,
         description: 'Only list snapshots of this dataset, e.g. "tank/media".',
       },
       limit: {
         type: 'number',
+        minimum: 1,
+        maximum: 1000,
+        default: 100,
         description: 'Return at most this many snapshots. Default 100, maximum 1000.',
       },
     },
@@ -297,6 +320,14 @@ export const snapshotsList: ReadOnlyTool = {
         'pool.snapshot.query',
         dataset === null ? [] : [['dataset', '=', dataset]],
         {
+          // The bound is applied by the system, so what it is asked to order by
+          // decides WHICH snapshots a truncated list holds — sorting here after
+          // it has already cut the list only orders the window it chose, and
+          // that window would be the oldest snapshots on the system rather than
+          // the newest. `createtxg` is the ZFS transaction group the snapshot
+          // was created in and only ever increases, so descending it is
+          // newest-first without depending on a clock or a property lookup.
+          order_by: ['-createtxg'],
           // One more than the bound. That extra row is what says the system
           // held more than fit; it is counted and then dropped.
           limit: limit + 1,
@@ -314,19 +345,24 @@ export const snapshotsList: ReadOnlyTool = {
       await assertDatasetExists(ctx, dataset);
     }
     const rows = snapshots.slice(0, limit).map((snapshot) => {
-      const properties = snapshot['properties'] as Record<string, unknown> | null | undefined;
-      const created = creationMillis(properties?.['creation']);
+      const properties = snapshot['properties'];
+      const created = creationMillis(snapshotProperty(properties, 'creation'));
       return {
         created,
         row: {
-          name: orNull(snapshot['name']),
-          dataset: orNull(snapshot['dataset']),
+          name: stringOrNull(snapshot['name']),
+          dataset: stringOrNull(snapshot['dataset']),
           created: created === null ? null : new Date(created).toISOString(),
-          referenced_bytes: propertyBytes(properties?.['referenced']),
+          referenced_bytes: propertyBytes(snapshotProperty(properties, 'referenced')),
         },
       };
     });
     return {
+      // The order the rows are returned in is this tool's own, taken on the
+      // creation time it reports rather than left to the field the system was
+      // asked to sort on: the two agree, and only one of them is a field the
+      // caller can see. It is also what puts a snapshot whose creation time
+      // could not be read last rather than wherever the system placed it.
       snapshots: rows.sort(byNewestFirst).map((entry) => entry.row),
       truncated: snapshots.length > limit,
       limit,
