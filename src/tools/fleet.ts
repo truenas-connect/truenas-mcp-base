@@ -263,13 +263,15 @@ export const haStatus: ReadOnlyTool = {
  * and a tool that answered `COMPLIANT` would be asserting one. So this reports
  * facts, names what it could not read, and stops there.
  *
- * The one place that is hard to hold to is auditing. The setting itself —
- * `audit.config`'s `enabled_services` — has no tool in this catalog, and a
- * composite adds no endpoint of its own, so what can be established from here is
- * narrower: the trail was read, and it either held entries or did not. That is
- * reported as what it is, under a field named for the evidence rather than for
- * the setting, because "the trail is empty" and "auditing is off" are the two
- * answers a compliance report must never merge.
+ * The one place that is hard to hold to is auditing. A composite adds no
+ * endpoint of its own, so what can be established from here is narrower than
+ * the question asked: the trail was read, and it either held entries or did
+ * not. That is reported as what it is, under a field named for the evidence
+ * rather than for the setting, because "the trail is empty" and "auditing is
+ * off" are the two answers a compliance report must never merge. `audit_config`
+ * reports the setting itself (#83) and this section is unchanged by it — the
+ * caller is pointed at that tool rather than having its answer folded in, which
+ * would make one field mean two things.
  */
 
 /**
@@ -410,8 +412,11 @@ function auditRead(answer: unknown): AuditRead {
  * report can actually support. Everything else is null, and null is emphatically
  * not "auditing is off" — a system nobody touched inside the window records
  * nothing and looks identical to one that is not auditing at all. The setting
- * that would tell them apart is `audit.config`, which no tool in this catalog
- * reports and which a composite may not reach for itself.
+ * that would tell them apart is `audit.config`. `audit_config` reports it (#83)
+ * and this section still does not read it: a composite adds no endpoint of its
+ * own, and folding a second tool's answer in here would make `recording` mean
+ * two things at once. The caller is pointed at that tool instead, which is what
+ * the description does.
  *
  * True is also WEAKER THAN IT LOOKS on the `MIDDLEWARE` trail, and that is a
  * property of the arrangement rather than of this code: every tool in this
@@ -920,9 +925,9 @@ export const fleetComplianceReport: ReadOnlyTool = {
     'NEVER "AUDITING IS OFF": a system nobody touched inside the window records ' +
     'nothing and is indistinguishable from a system that is not auditing at ' +
     'all. WHETHER AUDITING IS CONFIGURED ON CANNOT BE ANSWERED BY THIS TOOL — ' +
-    'that setting is `audit.config` on the middleware, no tool in this catalog ' +
-    'reports it, and a null `recording` is a question to put to the system ' +
-    'directly rather than an answer. TRUE IS ALSO WEAKER THAN IT LOOKS ON THE ' +
+    'that setting is `audit.config` on the middleware, and `audit_config` is ' +
+    'the tool that reads it. CALL IT ON A NULL `recording` rather than reading ' +
+    'the null as an answer. TRUE IS ALSO WEAKER THAN IT LOOKS ON THE ' +
     '`MIDDLEWARE` TRAIL: every tool in this catalog reaches the system through ' +
     'the middleware API, so a call this assistant makes lands in the trail this ' +
     'reads, and `MIDDLEWARE` recording is close to self-fulfilling once the ' +

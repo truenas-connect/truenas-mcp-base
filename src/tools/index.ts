@@ -20,16 +20,17 @@ import {
 import { shareAccess, sharesList } from '@/tools/shares';
 import { createSnapshot, snapshotsList } from '@/tools/snapshots';
 import { listDatasets, poolStatus, quotaReport } from '@/tools/storage';
-import { auditLogQuery, systemInfo, updateStatus } from '@/tools/system';
+import { auditConfig, auditLogQuery, systemInfo, updateStatus } from '@/tools/system';
 import { cloudsyncTasksList, snapshotTasksList, tasksRecentRuns } from '@/tools/tasks';
 import { vmLogs, vmsList } from '@/tools/vms';
 
-/** The sketch's catalog: thirty-six read-only tools plus one mutating tool. */
+/** The sketch's catalog: thirty-seven read-only tools plus one mutating tool. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
   catalog.register(updateStatus);
   catalog.register(auditLogQuery);
+  catalog.register(auditConfig);
   catalog.register(poolStatus);
   catalog.register(poolTopology);
   catalog.register(scrubHistory);
@@ -71,6 +72,7 @@ export {
   alertSettings,
   alertsList,
   appsList,
+  auditConfig,
   auditLogQuery,
   certificatesList,
   cloudCredentialsList,

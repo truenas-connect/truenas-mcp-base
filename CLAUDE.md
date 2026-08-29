@@ -135,14 +135,28 @@ report over a subject the code defines gets a verdict, `UNKNOWN` and all; a
 report over a subject someone else defines gets facts and an `unreadable` list,
 and adding a verdict to the second is asserting a standard nobody supplied.
 
-The other half of the same rule is where a fact's real source is a setting no
-tool in this catalog reports. `fleet_compliance_report` is asked for "whether
-auditing is enabled"; the setting is `audit.config`, no tool reports it, and a
-composite adds no endpoint. So it reports what reading the trail can actually
-establish, under `auditing.recording`, named for the evidence rather than for the
-setting, true only where entries were seen and null everywhere else. **Name the
-field after what was measured, not after the question it was asked** — a
-`recording` that is null is honest, an `enabled` that is null reads as "off".
+The other half of the same rule is where a fact's real source is a setting the
+composite may not read. `fleet_compliance_report` is asked for "whether auditing
+is enabled"; the setting is `audit.config`, and a composite adds no endpoint. So
+it reports what reading the trail can actually establish, under
+`auditing.recording`, named for the evidence rather than for the setting, true
+only where entries were seen and null everywhere else. **Name the field after
+what was measured, not after the question it was asked** — a `recording` that is
+null is honest, an `enabled` that is null reads as "off".
+
+`audit_config` reports that setting directly since #83, and the composite still
+does not read it: the caller is pointed at the tool rather than having its answer
+folded into `recording`, which would make one field mean two things. **A later
+tool answering the question a field was named around does not license renaming
+the field** — `recording` is still what this report measured.
+
+The same rule reaches the new tool, one level down. `audit.config`'s
+`enabled_services` names every service the middleware CAN audit whether or not
+any is switched on — the client declares all three members required — so
+`audit_config` reports it as `services`, and the one positive claim in that
+section is a non-empty `scope`. **A field named for the API field it came from
+inherits that field's promise**, which here is a promise the payload does not
+keep.
 
 ## Conventions
 

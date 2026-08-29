@@ -8,6 +8,7 @@ import {
   alertSettings,
   alertsList,
   appsList,
+  auditConfig,
   auditLogQuery,
   certificatesList,
   cloudCredentialsList,
@@ -86,11 +87,12 @@ function failingSystem(
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the thirty-seven sketch tools', () => {
+  it('registers the thirty-eight sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
       'audit_log_query',
+      'audit_config',
       'storage_pool_status',
       'storage_pool_topology',
       'storage_scrub_history',
@@ -126,6 +128,10 @@ describe('createDefaultCatalog', () => {
       'fleet_compliance_report',
       'snapshots_create',
     ]);
+  });
+
+  it('advertises audit_config to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('audit_config');
   });
 
   it('advertises fleet_compliance_report to a read-only credential', () => {
@@ -898,6 +904,155 @@ describe('audit_log_query', () => {
     const { ctx, call, query } = fakeSystem({ ['audit.query']: [entry()] });
     await auditLogQuery.handler(ctx, {});
     expect(call.mock.calls.map((args) => args[0])).toEqual(['audit.query']);
+    expect(query).not.toHaveBeenCalled();
+  });
+});
+
+describe('audit_config', () => {
+  /**
+   * The configuration as `audit.config` sends one, carrying the fields the
+   * pinned client's `AuditEntry` declares — including the several this tool
+   * deliberately does not report, so that the test that they do not survive the
+   * mapping is worth something.
+   */
+  const config = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    retention: 30,
+    reservation: 0,
+    quota: 0,
+    quota_fill_warning: 70,
+    quota_fill_critical: 95,
+    remote_logging_enabled: false,
+    space: {
+      used: 1_000,
+      used_by_dataset: 900,
+      used_by_reservation: 0,
+      used_by_snapshots: 100,
+      available: 4_000_000,
+    },
+    enabled_services: { MIDDLEWARE: [], SMB: ['audited-share'], SUDO: [] },
+    ...over,
+  });
+
+  const read = async (over: Record<string, unknown> = {}): Promise<Record<string, unknown>> => {
+    const { ctx } = fakeSystem({ ['audit.config']: config(over) });
+    return (await auditConfig.handler(ctx, {})) as Record<string, unknown>;
+  };
+
+  /** The services of a result, which is what most cases here are about. */
+  const services = async (enabled: unknown): Promise<unknown> =>
+    (await read({ enabled_services: enabled }))['services'];
+
+  it('reports the settings through named fields and drops the rest', async () => {
+    expect(await read()).toEqual({
+      services: [
+        { service: 'MIDDLEWARE', scope: [] },
+        { service: 'SMB', scope: ['audited-share'] },
+        { service: 'SUDO', scope: [] },
+      ],
+      remote_logging_enabled: false,
+      retention_days: 30,
+      space_available_bytes: 4_000_000,
+    });
+  });
+
+  it('sorts services by name, so an unchanged configuration reads the same twice', async () => {
+    // The middleware sends a keyed object, whose key order says nothing.
+    expect(await services({ SUDO: [], MIDDLEWARE: [], SMB: [] })).toEqual([
+      { service: 'MIDDLEWARE', scope: [] },
+      { service: 'SMB', scope: [] },
+      { service: 'SUDO', scope: [] },
+    ]);
+  });
+
+  it('passes through a service name the pinned client does not know', async () => {
+    // Service names are values rather than fields, so a service a later
+    // TrueNAS release begins auditing is answerable without a change here.
+    expect(await services({ NFS: ['export'] })).toEqual([{ service: 'NFS', scope: ['export'] }]);
+  });
+
+  it('distinguishes a configuration listing no services from one it could not read', async () => {
+    // The distinction the criterion is about: an empty list is an answer, and
+    // null is the absence of one.
+    expect(await services({})).toEqual([]);
+    for (const unreadable of [null, undefined, 'MIDDLEWARE', 42, ['MIDDLEWARE']]) {
+      expect(await services(unreadable)).toBeNull();
+    }
+  });
+
+  it('nulls a whole scope rather than dropping the entry it could not read', async () => {
+    // A list silently missing one share reads as a share that is not audited,
+    // which is the opposite of what is known about it.
+    expect(await services({ SMB: ['kept', 7] })).toEqual([{ service: 'SMB', scope: null }]);
+    expect(await services({ SMB: ['kept', ''] })).toEqual([{ service: 'SMB', scope: null }]);
+    expect(await services({ SMB: 'audited-share' })).toEqual([{ service: 'SMB', scope: null }]);
+  });
+
+  it('nulls the whole list rather than dropping a service it could not name', async () => {
+    // The same all-or-nothing reading a scope takes: a list quietly one service
+    // shorter reads as a service the system does not audit.
+    expect(await services({ '': [], SMB: [] })).toBeNull();
+  });
+
+  it('does not claim a listed service is audited', async () => {
+    // The middleware enumerates what it CAN audit — the pinned client declares
+    // all three members required — so presence is not enablement, and the
+    // description says so rather than the field name implying otherwise.
+    const listed = await services({ MIDDLEWARE: [], SMB: [], SUDO: [] });
+    expect(listed).toEqual([
+      { service: 'MIDDLEWARE', scope: [] },
+      { service: 'SMB', scope: [] },
+      { service: 'SUDO', scope: [] },
+    ]);
+    expect(auditConfig.description).toContain('BEING LISTED HERE IS NOT "THIS SERVICE IS AUDITED"');
+  });
+
+  it('reports remote logging three-valued, and never defaults it to false', async () => {
+    // A system that reported no value has not been shown to be keeping its
+    // audit records on the box.
+    expect((await read({ remote_logging_enabled: true }))['remote_logging_enabled']).toBe(true);
+    expect((await read({ remote_logging_enabled: false }))['remote_logging_enabled']).toBe(false);
+    for (const unreadable of [null, undefined, 'true', 1]) {
+      expect((await read({ remote_logging_enabled: unreadable }))['remote_logging_enabled']).toBe(
+        null,
+      );
+    }
+  });
+
+  it('nulls the retention the system reported no number for', async () => {
+    expect((await read({ retention: 0 }))['retention_days']).toBe(0);
+    for (const unreadable of [null, undefined, '30', Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect((await read({ retention: unreadable }))['retention_days']).toBeNull();
+    }
+  });
+
+  it('nulls the remaining space where the system reported none it could read', async () => {
+    expect((await read({ space: { available: 0 } }))['space_available_bytes']).toBe(0);
+    for (const unreadable of [null, undefined, {}, { available: '4000' }, []]) {
+      expect((await read({ space: unreadable }))['space_available_bytes']).toBeNull();
+    }
+  });
+
+  it('fails rather than answering nulls when the payload is not a configuration', async () => {
+    // Reached into rather than guarded, this would throw naming a property
+    // rather than the read that failed.
+    for (const answer of [null, undefined, 'audit', 7, []]) {
+      const { ctx } = fakeSystem({ ['audit.config']: answer });
+      await expect(auditConfig.handler(ctx, {})).rejects.toThrow(
+        'audit.config did not answer with an audit configuration',
+      );
+    }
+  });
+
+  it('fails rather than answering empty when the configuration could not be read', async () => {
+    const { ctx } = failingSystem({}, { ['audit.config']: new Error('audit dataset not mounted') });
+    await expect(auditConfig.handler(ctx, {})).rejects.toThrow('audit dataset not mounted');
+  });
+
+  it('never mutates: it reads the configuration and nothing else', async () => {
+    const { ctx, call, query } = fakeSystem({ ['audit.config']: config() });
+    await auditConfig.handler(ctx, {});
+    expect(call.mock.calls.map((args) => args[0])).toEqual(['audit.config']);
     expect(query).not.toHaveBeenCalled();
   });
 });

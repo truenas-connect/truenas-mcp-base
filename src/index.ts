@@ -80,6 +80,7 @@ export {
   systemInfo,
   updateStatus,
   auditLogQuery,
+  auditConfig,
   poolStatus,
   poolTopology,
   scrubHistory,

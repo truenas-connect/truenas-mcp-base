@@ -193,6 +193,22 @@ export const updateStatus: ReadOnlyTool = {
   },
 };
 
+/** A number the system reported, or null where it reported anything else. */
+function numberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * A record the system sent, or null where it sent anything else — an array
+ * included, which is an object and is never one of the keyed payloads this is
+ * used to read.
+ */
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 /**
  * How far back `audit_log_query` reaches when the caller bounds nothing.
  *
@@ -474,10 +490,11 @@ export const auditLogQuery: ReadOnlyTool = {
     'service the system is not auditing records nothing at all and so returns ' +
     'nothing here, which is indistinguishable from a quiet system: this tool ' +
     'reads the trail and cannot say whether a service is being written to it. ' +
-    'A trail that could not be read at all is an error naming what the system ' +
-    'said, not an empty list. This tool reads the audit trail. It does not ' +
-    'change what is audited, how long entries are kept, or anything else — ' +
-    'that is configuration, and it is not in this catalog.',
+    '`audit_config` reads the settings behind that question. A trail that ' +
+    'could not be read at all is an error naming what the system said, not an ' +
+    'empty list. This tool reads the audit trail. It does not change what is ' +
+    'audited, how long entries are kept, or anything else — that is ' +
+    'configuration, and `audit_config` reads it without changing it either.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -617,6 +634,154 @@ export const auditLogQuery: ReadOnlyTool = {
       // The bound actually applied, so that an empty result is readable against
       // the window it was taken from rather than against an assumed one.
       since: new Date(since).toISOString(),
+    };
+  },
+};
+
+/**
+ * The things the system listed beside one service, as names — or null where it
+ * listed something this tool cannot read as one.
+ *
+ * All-or-nothing rather than per-entry: an entry that could not be read is
+ * dropped from a list only by making the whole list null, because a list
+ * silently missing one share reads as a share that is not audited, which is the
+ * opposite of what is known about it. The same reading `audit_log_query` applies
+ * to a filter it could not check.
+ */
+function scopeNames(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const names: string[] = [];
+  for (const entry of value) {
+    const name = textOrNull(entry);
+    if (name === null) return null;
+    names.push(name);
+  }
+  return names;
+}
+
+/**
+ * The services the system keeps audit configuration for, with what it listed
+ * beside each — or null where it sent no service configuration this tool could
+ * read.
+ *
+ * This is deliberately NOT read as "the services being audited", and the field
+ * it becomes is not named that way. The pinned client declares `MIDDLEWARE`,
+ * `SMB` and `SUDO` as required members of `enabled_services`, so all three are
+ * present on a system auditing none of them: presence is the middleware
+ * enumerating what it can audit, and it does not establish that any of it is
+ * switched on. Naming the field for the setting would state exactly the
+ * guarantee the read cannot deliver, which is what `app/CLAUDE.md` records as
+ * this repository's most common defect — and what `fleet_compliance_report`
+ * avoided by naming its own field `recording` after the evidence.
+ *
+ * A service is reported under the name the system spelled it with, so a service
+ * a later TrueNAS release begins auditing is answerable here without a change —
+ * these are values rather than fields, and the allowlist this file keeps is over
+ * the fields of the result.
+ *
+ * A name the system sent that this tool cannot read nulls the whole list, on
+ * the same all-or-nothing reading {@link scopeNames} takes of a scope and for
+ * the same reason: a list quietly one service shorter reads as a service the
+ * system does not audit, which is more than the read established.
+ *
+ * Sorted by name, because the middleware sends a keyed object and the order of
+ * its keys means nothing; leaving it alone would make the result differ between
+ * two reads of the same unchanged configuration.
+ */
+function configuredServices(value: unknown): { service: string; scope: string[] | null }[] | null {
+  const services = recordOrNull(value);
+  if (services === null) return null;
+  const names = Object.keys(services);
+  if (names.some((name) => name.length === 0)) return null;
+  return names.sort().map((service) => ({ service, scope: scopeNames(services[service]) }));
+}
+
+/**
+ * What the system is auditing, rather than what it audited.
+ *
+ * The counterpart to `audit_log_query`, and the distinction between them is the
+ * whole point: the trail says what was recorded, and reading it can never
+ * establish that a service is NOT being audited — a service nobody is auditing
+ * and a service nobody has used both record nothing. `fleet_compliance_report`
+ * says exactly that about its own `auditing` section, which is why this tool
+ * exists. The setting is the only place the answer is stated rather than
+ * inferred.
+ *
+ * Reads the configuration and does not change it. `audit.update` is the
+ * mutating counterpart and is not in this catalog.
+ */
+export const auditConfig: ReadOnlyTool = {
+  name: 'audit_config',
+  description:
+    'The audit SETTINGS of a TrueNAS system — what it is configured to audit, ' +
+    'whether audit records are also shipped off the box, how long they are ' +
+    'kept, and how much room the audit dataset has left. This is the ' +
+    'configuration, NOT the trail: for what was actually recorded, and by ' +
+    'whom, that is `audit_log_query`. The two answer different questions and ' +
+    'reading one for the other is the mistake this tool exists to prevent — an ' +
+    'empty trail cannot establish that a service is unaudited, because a ' +
+    'service nobody audits and a service nobody has used both record nothing. ' +
+    '`services` is one entry per service the system keeps audit configuration ' +
+    'for, sorted by name. `service` is the name as the system spelled it — ' +
+    '`MIDDLEWARE` for the API the web UI, the CLI and this tool all call, ' +
+    '`SMB` for file share access, `SUDO` for commands run as another user, and ' +
+    'a name a later TrueNAS release adds is passed through as the system ' +
+    'spelled it. BEING LISTED HERE IS NOT "THIS SERVICE IS AUDITED": the ' +
+    'system enumerates every service it CAN audit, and reports all of them ' +
+    'whether or not any is switched on, so this tool cannot tell you from this ' +
+    'field alone that a service is being audited. `scope` is what the system ' +
+    'listed beside that service, such as the SMB shares being audited. A ' +
+    'NON-EMPTY `scope` IS THE ONE POSITIVE ANSWER HERE — it names things the ' +
+    'system says it audits for that service. An empty `scope` is the system ' +
+    'listing nothing beside it, and (unconfirmed) that establishes neither ' +
+    'that the service audits everything nor that it audits nothing. `scope` is ' +
+    'null where the system listed something this tool could not read as names, ' +
+    'which is not an empty scope. `services` ITSELF IS NULL WHERE THE SYSTEM ' +
+    'REPORTED NO SERVICE CONFIGURATION THIS TOOL COULD READ, and an empty list ' +
+    'means the system reported the configuration and named no services in it — ' +
+    'those are different answers and null is never to be read as the empty ' +
+    'one. ' +
+    '`remote_logging_enabled` is whether audit records are also sent to a ' +
+    'remote destination, and it is THREE-VALUED: true, false, or null where ' +
+    'the system reported no value this tool could read. Null is NOT false — ' +
+    'nothing has been established about off-box logging. Where the remote ' +
+    'destination is, and whether it is reachable, are not reported here. ' +
+    '`retention_days` is how many days audit entries are kept before the ' +
+    'system removes them, and is null where the system reported no number this ' +
+    'tool could read. `space_available_bytes` is how much room the audit ' +
+    'dataset has left, in bytes, and is null on the same terms. It does not ' +
+    'say how long that room lasts: that depends on how busy the system is, ' +
+    'which this tool does not read. This tool reads configuration. It does not ' +
+    'change what is audited, how long entries are kept, or anything else — ' +
+    'that is `audit.update`, and it is not in this catalog. A configuration ' +
+    'that could not be read at all is an error naming what the system said, ' +
+    'not a result of nulls.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }) {
+    const config = await firstValueFrom(system.client.api.call('audit.config'));
+    // The payload is read through this guard rather than reached into, because
+    // a system answering the call with something that is not a configuration
+    // would otherwise throw on the first property access — and the error a
+    // caller then sees names a property rather than the read that failed.
+    const settings = recordOrNull(config);
+    if (settings === null) {
+      throw new Error('audit.config did not answer with an audit configuration');
+    }
+    // Named one at a time, so a field a later TrueNAS release adds to the audit
+    // configuration does not appear in this result without a change here.
+    const space = recordOrNull(settings['space']);
+    return {
+      services: configuredServices(settings['enabled_services']),
+      // Not defaulted to false: a system that reported no value has not been
+      // shown to be keeping its audit records on the box.
+      remote_logging_enabled:
+        typeof settings['remote_logging_enabled'] === 'boolean'
+          ? settings['remote_logging_enabled']
+          : null,
+      retention_days: numberOrNull(settings['retention']),
+      space_available_bytes: space === null ? null : numberOrNull(space['available']),
     };
   },
 };
