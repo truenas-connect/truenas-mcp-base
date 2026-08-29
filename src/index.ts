@@ -81,5 +81,6 @@ export {
   usersList,
   directoryServicesStatus,
   networkInterfaces,
+  networkConfig,
   createSnapshot,
 } from '@/tools/index';
