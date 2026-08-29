@@ -385,10 +385,13 @@ export const networkInterfaces: ReadOnlyTool = {
  * is guaranteed by the types — while `NetworkGeneralSummaryResult` IS typed,
  * with `default_routes` and `nameservers` on it. So the effective side is the
  * grounded half and the configured side is read defensively, field by field,
- * the way an interface row is read above. The configured field NAMES come from
+ * the way an interface row is read above. Most configured field NAMES come from
  * the client's own `NetWorkConfigurationUpdate`, which describes this same
  * record on the update side: strong evidence rather than a guarantee, and a
- * name that turns out wrong costs a null rather than a wrong value.
+ * name that turns out wrong costs a null rather than a wrong value. The
+ * exception is `hostname_local`, which the middleware adds when it READS the
+ * record and so cannot appear on an update type — see `localHostname`, which
+ * is why that one is read with a fallback rather than on its own.
  *
  * Only the configuration read can fail the tool. A system whose configuration
  * read and whose routes did not still has most of an answer, and `failures` is
@@ -607,6 +610,26 @@ function staticRouteRows(routes: unknown): StaticRouteRow[] | null {
   });
 }
 
+/**
+ * The hostname of the node answering this call, which is not always `hostname`.
+ *
+ * The configuration carries a hostname per HA node — `hostname` and
+ * `hostname_b` — plus `hostname_virtual` for the address the pair answers on.
+ * `hostname` is node A's on BOTH nodes, so reading it on node B reports the
+ * peer's name under a field this tool defines as this system's. The middleware
+ * resolves that on the read side into `hostname_local`, which is `hostname` on
+ * node A and on every single-node system and `hostname_b` on node B, so
+ * preferring it is right everywhere rather than only on HA.
+ *
+ * It falls back to `hostname` because `hostname_local` is added by an extend
+ * rather than stored: a release that does not add it, or a response this tool
+ * could not read it from, still has the field that was correct before HA — and
+ * on a single-node system the two are the same value anyway.
+ */
+function localHostname(config: Record<string, unknown>): string | null {
+  return textOrNull(config['hostname_local']) ?? textOrNull(config['hostname']);
+}
+
 export const networkConfig: ReadOnlyTool = {
   name: 'network_config',
   description:
@@ -624,9 +647,17 @@ export const networkConfig: ReadOnlyTool = {
     'effect WITHOUT being configured here — DHCP on IPv4, and DHCPv6 or a ' +
     'router advertisement on IPv6, WHICH THIS TOOL CANNOT TELL APART and so ' +
     'does not name. `hostname` and `domain` are the configured hostname and ' +
-    'DNS domain of this system, each null where it reported none; the ' +
-    'hostnames of an HA peer and of an HA virtual address are not reported ' +
-    'here. `search_domains` are the additional domains appended when a bare ' +
+    'DNS domain of this system, each null where it reported none. WHERE THE ' +
+    'SYSTEM REPORTS A PER-NODE HOSTNAME, `hostname` is the node ANSWERING ' +
+    'THIS CALL, so on an HA pair the same tool run against each node reports a ' +
+    'different name. WHERE IT REPORTS NONE the pair-wide configured hostname ' +
+    'is reported instead, WHICH ON AN HA PAIR IS THE SAME NAME ON BOTH NODES ' +
+    'and so may not be the answering one; that is every single-node system, ' +
+    'where the two are the same value anyway, and any release that does not ' +
+    'resolve a per-node hostname. THIS TOOL DOES NOT SAY WHICH OF THE TWO IT ' +
+    'REPORTED. The hostname of the HA PEER and the hostname of the HA VIRTUAL ' +
+    'ADDRESS are not reported here at all. `search_domains` are the additional ' +
+    'domains appended when a bare ' +
     'name is resolved: an empty list is a system with none, and NULL IS A ' +
     'SYSTEM THAT REPORTED NO LIST AT ALL. `ipv4_gateway` and `ipv6_gateway` ' +
     'each carry `configured`, the gateway set on this system and null where ' +
@@ -682,7 +713,7 @@ export const networkConfig: ReadOnlyTool = {
     if (routes.failure !== null) failures.push(routes.failure);
 
     return {
-      hostname: textOrNull(config['hostname']),
+      hostname: localHostname(config),
       domain: textOrNull(config['domain']),
       search_domains: textList(config['domains']),
       ipv4_gateway: gatewayReport(textOrNull(config['ipv4gateway']), effective.default_routes, false),

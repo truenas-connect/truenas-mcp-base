@@ -5924,6 +5924,38 @@ describe('network_config', () => {
     });
   });
 
+  it('reports the answering node of an HA pair, not the pair-wide `hostname`', async () => {
+    // What node B of an HA pair sends: `hostname` stays node A's on both
+    // nodes, and `hostname_local` is what the middleware resolves per node.
+    // Reading `hostname` here would report the PEER under a field the
+    // description defines as this system's.
+    expect(
+      await read({ hostname: 'nas-a', hostname_b: 'nas-b', hostname_local: 'nas-b' }),
+    ).toMatchObject({ hostname: 'nas-b' });
+  });
+
+  it('falls back to `hostname` where the system reports no local one', async () => {
+    // `hostname_local` is added by a read-side extend rather than stored, so a
+    // response without it is not a system without a hostname. The empty string
+    // is how the middleware sends "no value" and must fall back the same way.
+    expect(await read({ hostname: 'nas', hostname_local: '' })).toMatchObject({ hostname: 'nas' });
+    expect(await read({ hostname: 'nas' })).toMatchObject({ hostname: 'nas' });
+  });
+
+  it('reports neither the HA peer nor the HA virtual hostname', async () => {
+    const result = await read({
+      hostname: 'nas-a',
+      hostname_b: 'nas-b',
+      hostname_virtual: 'nas-ha',
+      hostname_local: 'nas-a',
+    });
+    expect(result).toMatchObject({ hostname: 'nas-a' });
+    // Against the serialized result, not the keys: either could only reach a
+    // caller as a value under a field this tool does name.
+    expect(JSON.stringify(result)).not.toContain('nas-b');
+    expect(JSON.stringify(result)).not.toContain('nas-ha');
+  });
+
   it('returns no field the tool does not name, from either side', async () => {
     const result = await read(
       { future_field: 'added by a later release' },
