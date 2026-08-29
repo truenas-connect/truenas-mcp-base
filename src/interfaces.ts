@@ -147,6 +147,14 @@ export interface FileContentReader {
    *
    * Rejects with a `FileContentError` naming the path when the path cannot be
    * read at all; a file with no content resolves to an empty `lines` instead.
+   *
+   * "Last" is best effort, and `truncated` is what says so. Reaching the tail
+   * needs the system's own report of the file's size to be right, and it is
+   * not always: a file that grows between being measured and being fetched, or
+   * one whose size is reported as zero over real content — every path under
+   * `/proc` and `/sys` — yields lines from further forward in the file. They
+   * are whole lines, and there are at most `maxLines` of them, but they are
+   * not necessarily the newest.
    */
   readTail(path: string, maxLines: number): Promise<FileTail>;
 }

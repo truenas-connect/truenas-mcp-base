@@ -321,8 +321,8 @@ describe('createDownloadContentReader', () => {
     });
   });
 
-  describe('a file with no content', () => {
-    it('is an empty result rather than an error', async () => {
+  describe('what a reported size does and does not settle', () => {
+    it('is an empty result rather than an error, when the file really is empty', async () => {
       const { files } = readerFor('', { size: 0 });
       await expect(files.readTail('/var/log/app.log', 10)).resolves.toEqual({
         path: '/var/log/app.log',
@@ -331,11 +331,33 @@ describe('createDownloadContentReader', () => {
       });
     });
 
-    it('costs no download at all', async () => {
-      const { files, call } = readerFor('', { size: 0 });
-      await files.readTail('/var/log/app.log', 10);
-      expect(call).toHaveBeenCalledTimes(1);
-      expect(call).toHaveBeenCalledWith('filesystem.stat', ['/var/log/app.log']);
+    it('is still read rather than assumed from a size of zero', async () => {
+      // `/proc` and `/sys` report `st_size` 0 over real content, so a size of
+      // zero is not evidence of an empty file and must not answer without the
+      // download. Answering from `stat` alone would report this file — which
+      // has three lines — as holding nothing.
+      const { files, call } = readerFor('MemTotal: 1\nMemFree: 2\nBuffers: 3\n', { size: 0 });
+      await expect(files.readTail('/proc/meminfo', 10)).resolves.toEqual({
+        path: '/proc/meminfo',
+        lines: ['MemTotal: 1', 'MemFree: 2', 'Buffers: 3'],
+        truncated: false,
+      });
+      expect(call).toHaveBeenCalledWith('core.download', [
+        'filesystem.get',
+        ['/proc/meminfo'],
+        'meminfo',
+      ]);
+    });
+
+    it('bounds a size-zero path that turns out to be larger than the ceiling', async () => {
+      // Nothing said how big it was, so `skip` is 0 and what is kept is the
+      // front of the body. The bound still holds and the answer still says so.
+      const { files } = readerFor('aaa\nbbb\nccc\nddd\n', { size: 0, maxBytes: 8 });
+      await expect(files.readTail('/proc/big', 10)).resolves.toEqual({
+        path: '/proc/big',
+        lines: ['aaa', 'bbb'],
+        truncated: true,
+      });
     });
 
     it.each([null, Number.NaN, -1])(

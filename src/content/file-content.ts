@@ -125,12 +125,14 @@ export function createDownloadContentReader(
           `The system reported no usable size for "${path}"`,
         );
       }
-      // A file of no bytes is an empty answer, not a failure — and answering
-      // it from `stat` alone is also what keeps a zero-length file from
-      // costing a download.
-      if (stat.size === 0) {
-        return { path, lines: [], truncated: false };
-      }
+      // A size of zero is NOT answered from `stat` alone. On Linux it does not
+      // mean "no bytes": every file under `/proc` and `/sys` reports `st_size`
+      // 0 and still has content, as do some FUSE-backed paths. Short-circuiting
+      // would hand those back as `lines: []`, which {@link FileTail} defines as
+      // a file that held nothing — the one conflation the rest of this file is
+      // careful to avoid. A genuinely empty file costs one download, which is
+      // the cheapest download there is, and comes back through the ordinary
+      // path with exactly the same empty answer.
 
       const url = await mintDownloadUrl(client, base, path);
       // The whole file is on offer, so the tail is reached by discarding the
@@ -138,10 +140,14 @@ export function createDownloadContentReader(
       // moment earlier. A log file that has grown since is served from an
       // offset that is no longer its tail: the window fills before the body
       // ends, `stoppedAtBound` records that, and the lines returned are older
-      // than the newest ones. `truncated` says the answer is not the whole
-      // file; it does not say which end of it was missed, and a caller that
-      // needs the newest line of a file being written to fast should read it
-      // again rather than treat one answer as final.
+      // than the newest ones. A path whose size is understated — the `/proc`
+      // case above, where it is understated all the way to zero — is the same
+      // shape: `skip` comes out 0, so what is kept is the FRONT of the body
+      // rather than its tail, bounded and marked `truncated` the same way.
+      // `truncated` says the answer is not the whole file; it does not say
+      // which end of it was missed, and a caller that needs the newest line of
+      // a file being written to fast should read it again rather than treat
+      // one answer as final.
       // The window is the last `maxBytes` of the file: discard that many bytes
       // fewer than its size, then keep everything to the end. It has to reach
       // the end — a window stopping short would drop the newest line, which is
