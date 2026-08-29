@@ -82,5 +82,6 @@ export {
   directoryServicesStatus,
   networkInterfaces,
   networkConfig,
+  certificatesList,
   createSnapshot,
 } from '@/tools/index';
