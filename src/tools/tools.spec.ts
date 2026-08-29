@@ -8,6 +8,7 @@ import {
   cloudsyncTasksList,
   createDefaultCatalog,
   createSnapshot,
+  directoryServicesStatus,
   disksList,
   iscsiList,
   listDatasets,
@@ -44,24 +45,30 @@ function fakeSystem(responses: Partial<Record<string, unknown>>): {
 }
 
 /**
- * A SystemHandle whose queries answer independently, either with rows or by
+ * A SystemHandle whose methods answer independently, either with rows or by
  * failing — `fakeSystem` answers every method from one map and has no way to
  * make a call fail, which the tools that read several methods and return a
  * partial answer are largely about.
+ *
+ * Both seams are stubbed from the same two maps, as `fakeSystem` stubs both
+ * from its one: a tool picks `call` or `query` per verb, so a test asserts on
+ * whichever spy its tool used and names its failures under the same method
+ * either way.
  */
 function failingSystem(
   rows: Partial<Record<string, unknown>>,
   failures: Partial<Record<string, unknown>> = {},
-): { ctx: ToolContext; query: ReturnType<typeof vi.fn> } {
-  const query = vi.fn((method: string) =>
-    method in failures ? throwError(() => failures[method]) : of(rows[method]),
-  );
-  const system = { name: 'nas', client: { api: { query } } } as unknown as SystemHandle;
-  return { ctx: { system }, query };
+): { ctx: ToolContext; query: ReturnType<typeof vi.fn>; call: ReturnType<typeof vi.fn> } {
+  const answer = (method: string) =>
+    method in failures ? throwError(() => failures[method]) : of(rows[method]);
+  const query = vi.fn(answer);
+  const call = vi.fn(answer);
+  const system = { name: 'nas', client: { api: { query, call } } } as unknown as SystemHandle;
+  return { ctx: { system }, query, call };
 }
 
 describe('createDefaultCatalog', () => {
-  it('registers the twenty sketch tools', () => {
+  it('registers the twenty-one sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'storage_pool_status',
@@ -82,6 +89,7 @@ describe('createDefaultCatalog', () => {
       'iscsi_list',
       'nvmeof_list',
       'users_list',
+      'directory_services_status',
       'snapshots_create',
     ]);
   });
@@ -164,6 +172,12 @@ describe('createDefaultCatalog', () => {
 
   it('advertises users_list to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('users_list');
+  });
+
+  it('advertises directory_services_status to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'directory_services_status',
+    );
   });
 });
 
@@ -5157,5 +5171,252 @@ describe('users_list', () => {
     // about concurrency rather than order.
     expect(query.mock.calls.map((one) => one[0])).toEqual(['user.query', 'group.query']);
     await listing;
+  });
+});
+
+describe('directory_services_status', () => {
+  /** The live join state, as `directoryservices.status` reports it. */
+  const status = (over: Record<string, unknown> = {}) => ({
+    type: 'ACTIVEDIRECTORY',
+    status: 'HEALTHY',
+    status_msg: null,
+    ...over,
+  });
+
+  /**
+   * The configuration, as `directoryservices.config` reports it. `credential`
+   * carries a real password field, and is here to be dropped: this fixture is
+   * what makes "no credential material" assertable rather than assumed.
+   */
+  const config = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    service_type: 'ACTIVEDIRECTORY',
+    credential: {
+      credential_type: 'KERBEROS_USER',
+      username: 'administrator',
+      password: 'notarealbindsecret',
+    },
+    enable: true,
+    enable_account_cache: true,
+    enable_dns_updates: false,
+    timeout: 10,
+    kerberos_realm: 'EXAMPLE.COM',
+    configuration: {
+      hostname: 'nas',
+      domain: 'example.com',
+      site: null,
+      computer_account_ou: null,
+      use_default_domain: false,
+      enable_trusted_domains: false,
+      trusted_domains: [],
+    },
+    ...over,
+  });
+
+  const reported = async (
+    rows: Partial<Record<string, unknown>> = {},
+    failures: Partial<Record<string, unknown>> = {},
+  ): Promise<Record<string, unknown>> => {
+    const { ctx } = failingSystem(
+      {
+        ['directoryservices.status']: status(),
+        ['directoryservices.config']: config(),
+        ...rows,
+      },
+      failures,
+    );
+    return (await directoryServicesStatus.handler(ctx, {})) as Record<string, unknown>;
+  };
+
+  it('reports the service, its domain and its live state', async () => {
+    expect(await reported()).toEqual({
+      service_type: 'ACTIVEDIRECTORY',
+      status: 'HEALTHY',
+      status_message: null,
+      enabled: true,
+      domain: 'example.com',
+      server_urls: null,
+      kerberos_realm: 'EXAMPLE.COM',
+      credential_type: 'KERBEROS_USER',
+      config_error: null,
+    });
+  });
+
+  it('returns no credential material, and no field a later release adds', async () => {
+    const result = await reported({
+      ['directoryservices.status']: status({ future_field: 'added by a later release' }),
+      ['directoryservices.config']: config({ future_field: 'added by a later release' }),
+    });
+    expect(Object.keys(result)).toEqual([
+      'service_type',
+      'status',
+      'status_message',
+      'enabled',
+      'domain',
+      'server_urls',
+      'kerberos_realm',
+      'credential_type',
+      'config_error',
+    ]);
+    // Asserted against the whole serialized result rather than field by field:
+    // a secret that reached a nested object would pass a key check on the top
+    // level and still be in front of the caller.
+    const serialized = JSON.stringify(result);
+    for (const secret of ['notarealbindsecret', 'administrator', 'added by a later release']) {
+      expect(serialized).not.toContain(secret);
+    }
+  });
+
+  it('reports a system with no directory service as a null service type', async () => {
+    // The ordinary case, and not a failure: everything the configuration would
+    // have contributed is absent rather than unreadable, so `config_error` is
+    // null too.
+    expect(
+      await reported({
+        ['directoryservices.status']: status({ type: null, status: 'DISABLED' }),
+        ['directoryservices.config']: config({
+          service_type: null,
+          credential: null,
+          enable: false,
+          kerberos_realm: null,
+          configuration: null,
+        }),
+      }),
+    ).toEqual({
+      service_type: null,
+      status: 'DISABLED',
+      status_message: null,
+      enabled: false,
+      domain: null,
+      server_urls: null,
+      kerberos_realm: null,
+      credential_type: null,
+      config_error: null,
+    });
+  });
+
+  it('distinguishes a broken join from an unconfigured system without prose', async () => {
+    const faulted = await reported({
+      ['directoryservices.status']: status({
+        status: 'FAULTED',
+        status_msg: 'kinit failed: Clock skew too great',
+      }),
+    });
+    expect(faulted).toMatchObject({
+      service_type: 'ACTIVEDIRECTORY',
+      status: 'FAULTED',
+      status_message: 'kinit failed: Clock skew too great',
+    });
+    const absent = await reported({
+      ['directoryservices.status']: status({ type: null, status: 'DISABLED' }),
+    });
+    expect(absent).toMatchObject({ service_type: null, status: 'DISABLED' });
+  });
+
+  it('identifies an LDAP directory by its server URLs, having no domain', async () => {
+    const ldap = await reported({
+      ['directoryservices.status']: status({ type: 'LDAP' }),
+      ['directoryservices.config']: config({
+        service_type: 'LDAP',
+        kerberos_realm: null,
+        credential: {
+          credential_type: 'LDAP_PLAIN',
+          binddn: 'cn=nas,dc=example,dc=com',
+          bindpw: 'notarealbindpw',
+        },
+        configuration: {
+          server_urls: ['ldaps://ldap1.example.com', 'ldaps://ldap2.example.com'],
+          basedn: 'dc=example,dc=com',
+          starttls: false,
+          validate_certificates: true,
+        },
+      }),
+    });
+    expect(ldap).toMatchObject({
+      service_type: 'LDAP',
+      // Null because an LDAP directory has no domain, not because one was
+      // configured and could not be read — `config_error` is what says that.
+      domain: null,
+      server_urls: ['ldaps://ldap1.example.com', 'ldaps://ldap2.example.com'],
+      kerberos_realm: null,
+      credential_type: 'LDAP_PLAIN',
+      config_error: null,
+    });
+    expect(JSON.stringify(ldap)).not.toContain('notarealbindpw');
+  });
+
+  it('reports an IPA domain, and no server URLs beside it', async () => {
+    expect(
+      await reported({
+        ['directoryservices.status']: status({ type: 'IPA' }),
+        ['directoryservices.config']: config({
+          service_type: 'IPA',
+          configuration: {
+            target_server: 'ipa.example.com',
+            hostname: 'nas',
+            domain: 'ipa.example.com',
+            basedn: 'dc=ipa,dc=example,dc=com',
+          },
+        }),
+      }),
+    ).toMatchObject({ service_type: 'IPA', domain: 'ipa.example.com', server_urls: null });
+  });
+
+  it('reports a state the system did not send as null rather than as healthy', async () => {
+    expect(
+      await reported({ ['directoryservices.status']: status({ status: undefined }) }),
+    ).toMatchObject({ status: null, status_message: null });
+  });
+
+  it('reports an unset message or realm as null rather than as a value', async () => {
+    // The middleware sends `""` for text it does not have; passing that through
+    // would put a field in the result that says nothing.
+    expect(
+      await reported({
+        ['directoryservices.status']: status({ status_msg: '' }),
+        ['directoryservices.config']: config({ kerberos_realm: '' }),
+      }),
+    ).toMatchObject({ status_message: null, kerberos_realm: null });
+  });
+
+  it('names the failure when the configuration cannot be read, and reports the state anyway', async () => {
+    // The join state is the question, and it comes from the other read — so a
+    // configuration that could not be read costs the domain and nothing else.
+    expect(
+      await reported({}, { ['directoryservices.config']: new Error('permission denied') }),
+    ).toEqual({
+      service_type: 'ACTIVEDIRECTORY',
+      status: 'HEALTHY',
+      status_message: null,
+      enabled: null,
+      domain: null,
+      server_urls: null,
+      kerberos_realm: null,
+      credential_type: null,
+      config_error: 'permission denied',
+    });
+  });
+
+  it('raises when the join state itself cannot be read', async () => {
+    // The configuration alone answers none of the question, so this one is
+    // fatal where the configuration read is reported.
+    await expect(
+      reported({}, { ['directoryservices.status']: new Error('nope') }),
+    ).rejects.toThrow('nope');
+  });
+
+  it('issues both reads before awaiting either of them', async () => {
+    const { ctx, call } = failingSystem({
+      ['directoryservices.status']: status(),
+      ['directoryservices.config']: config(),
+    });
+    const pending = directoryServicesStatus.handler(ctx, {});
+    // Asserted before the handler is awaited at all, which is what makes this
+    // about concurrency rather than order.
+    expect(call.mock.calls.map((one) => one[0])).toEqual([
+      'directoryservices.status',
+      'directoryservices.config',
+    ]);
+    await pending;
   });
 });
