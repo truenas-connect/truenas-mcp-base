@@ -3,10 +3,11 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the forty sketch tools', () => {
+  it('registers the forty-one sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
+      'system_reboot_info',
       'audit_log_query',
       'audit_config',
       'storage_pool_status',
@@ -237,6 +238,12 @@ describe('createDefaultCatalog', () => {
   it('advertises services_status to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
       'services_status',
+    );
+  });
+
+  it('advertises system_reboot_info to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'system_reboot_info',
     );
   });
 });
