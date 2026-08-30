@@ -335,6 +335,20 @@ describe('cloudsync_run', () => {
         ended: true,
         succeeded: false,
         state: 'SUPERSEDED',
+        // And still reports the finish time: a state the client completed on is
+        // an ended run whether or not this family's own terminal list names it,
+        // so `finished_at` follows `ended` rather than that list. Reporting null
+        // here would have this result call the run over and refuse to say when.
+        finished_at: '2025-08-24T01:46:40.000Z',
+      });
+    });
+
+    it('reports no finish time for an ended job that recorded none it can read', async () => {
+      const { ctx } = jobSystem({ job: of(jobAt('SUCCESS', { time_finished: 'yesterday' })) });
+      expect(await cloudsyncRun.execute(ctx, { id: 4 })).toMatchObject({
+        ended: true,
+        succeeded: true,
+        finished_at: null,
       });
     });
 
@@ -355,8 +369,8 @@ describe('cloudsync_run', () => {
           // Still running is neither a success nor a failure.
           succeeded: null,
           state: 'RUNNING',
-          // Only a state that describes an ended run makes the recorded time a
-          // finish time, and RUNNING is not one — the row carries one anyway.
+          // Nothing is a finish time until the run has ended, and this one has
+          // not — the row carries a time anyway, which is the earlier run's.
           finished_at: null,
         });
       } finally {

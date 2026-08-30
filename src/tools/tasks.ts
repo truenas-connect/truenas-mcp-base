@@ -2076,7 +2076,8 @@ export const cloudsyncRun: MutatingTool = {
     'could not read, or no job was seen at all — and `state` and `job_id` are ' +
     'what tell those apart: a state beside `ended: false` is a sync still ' +
     'under way, a null `state` beside a `job_id` is a job whose state was ' +
-    'unreadable, and both null is a job this tool never saw. IN NONE OF THE ' +
+    'unreadable, and both null is a job this tool never saw OR one whose state ' +
+    'and id were both unreadable. IN NONE OF THE ' +
     'THREE HAS ANYTHING FAILED. `succeeded` is the answer to "did it work": ' +
     'true where the job ended in a state this catalog reads as success, false ' +
     'where it ended in any other state — including one added by a later ' +
@@ -2092,15 +2093,24 @@ export const cloudsyncRun: MutatingTool = {
     'null where it recorded none, so a job that ended without succeeding and ' +
     'with a null `error` failed for a reason the system did not record — it ' +
     'has not succeeded. `finished_at` is when the job ended, as an ISO 8601 ' +
-    'UTC timestamp, reported only under a state that describes an ended run ' +
-    'and null under every other. `job_id` is the job\'s numeric identity and ' +
+    'UTC timestamp, REPORTED ONLY WHERE `ended` IS TRUE — so it moves with ' +
+    '`ended` and never contradicts it — and null everywhere else, INCLUDING A ' +
+    'JOB STILL RUNNING, whose record can already carry the finish time of an ' +
+    'earlier run. It is also null where the job ended and recorded no time ' +
+    'this tool could read. `job_id` is the job\'s numeric identity and ' +
     'MATCHES `id` IN `tasks_recent_runs`, WHICH IS HOW A SYNC THAT WAS STILL ' +
     'RUNNING IS FOLLOWED UP — this tool reports no progress percentage and no ' +
     'live status, and that tool reports both. `job_id` is null where no job ' +
-    'event named the job within the watch, which does NOT mean the sync did ' +
-    'not start: the call was made, and `cloudsync_tasks_list` will report the ' +
+    'event named the job within the watch, and ALSO where a job event was seen ' +
+    'and the id it carried was not a number this tool could read — so a null ' +
+    '`job_id` beside a non-null `state` is the second of those. NEITHER MEANS ' +
+    'THE SYNC DID ' +
+    'NOT START: the call was made, and `cloudsync_tasks_list` will report the ' +
     'run against the task. `task_id` is the `id` that was asked for and ' +
-    '`dry_run` what was actually sent. THIS TOOL CANNOT STOP A RUNNING SYNC, ' +
+    '`dry_run` what was actually sent. `watched_seconds` is the CEILING that ' +
+    'applied to the watch and not how long it actually lasted — a job that ' +
+    'ended in two seconds still reports the full bound. THIS TOOL CANNOT STOP ' +
+    'A RUNNING SYNC, ' +
     'cannot change, create or delete a task, and cannot sync anything that is ' +
     'not already a task on the system. WHAT THE RUN DOES TO THE DATA IS THE ' +
     "TASK'S OWN `transfer_mode`, WHICH THE PLAN NAMES AND THIS TOOL DOES NOT " +
@@ -2134,21 +2144,14 @@ export const cloudsyncRun: MutatingTool = {
   },
   requiredRole: Role.Full,
   mutating: true,
-  // `reversible` is a claim about the OPERATION — the run can be stopped — and
-  // not about the bytes, which a `SYNC` or a `MOVE` deletes for good. The two
-  // are not the same and this field cannot say both: `irreversible` exists only
-  // so the catalog can REJECT a tool (`catalog/catalog.ts` throws on it), so
-  // the other value would delete this tool rather than describe it more
-  // honestly.
-  //
-  // What settles which of the two it is: THIS TOOL TRIGGERS AN OPERATION IT
-  // DOES NOT AUTHOR. Everything a run deletes was decided by whoever configured
-  // the task — the mode, the paths, the direction — and the system does the
-  // same thing on its own at the next scheduled window. What this changes is
-  // WHEN, not WHAT, which is not the case the destructive-action policy is
-  // about: a tool that composed its own deletion would be. The account of what
-  // the run does to the data is in the description above and named in the plan,
-  // which is where the person approving it reads it.
+  // THIS TOOL TRIGGERS AN OPERATION IT DOES NOT AUTHOR, which is the case
+  // `Destructiveness` names at its own declaration in `catalog/tool.ts`:
+  // everything a run deletes was decided by
+  // whoever configured the task — the mode, the paths, the direction — and the
+  // system does the same thing on its own at the next scheduled window. What
+  // this changes is WHEN, not WHAT. The account of what the run does to the
+  // data is in the description above and named in the plan, which is where the
+  // person approving it reads it, and where that declaration says it belongs.
   destructiveness: 'reversible',
   normalizeArgs(rawArgs) {
     const run = parseRun(rawArgs);
@@ -2235,7 +2238,15 @@ export const cloudsyncRun: MutatingTool = {
       succeeded: ended ? SUCCEEDED_JOB_STATES.has(state) : null,
       state,
       error: jobError(record),
-      finished_at: jobFinishedAt(record, state),
+      // Gated on `ended` and NOT through {@link jobFinishedAt}, which reads
+      // {@link ENDED_JOB_STATES} — a list written down here. The two readings
+      // of "the run is over" disagree exactly where this tool is most careful:
+      // `ended` comes from the client's own completion, so a terminal state a
+      // later TrueNAS release adds is ended here and absent from that list, and
+      // this field would then report null for a run the same result has just
+      // called over. The listings keep the list because none of them carries an
+      // `ended` for it to contradict.
+      finished_at: ended ? isoOrNull(jobMillis(record?.time_finished)) : null,
     };
   },
 };

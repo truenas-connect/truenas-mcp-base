@@ -950,6 +950,16 @@ written down here. A completion carrying no emission is the client having found
 no such job, which establishes nothing — so both halves are required before
 anything is called ended.
 
+**Every other field that means "the run is over" is then read off THAT, not off
+a second list.** `finished_at` gates on `ended` rather than through
+`jobFinishedAt`, whose `ENDED_JOB_STATES` is a set written down in this
+repository: a terminal state a later TrueNAS release adds completes the client's
+stream and is absent from that set, so the two disagree exactly on the case this
+tool is careful about, and the result would call a run over and refuse to say
+when it ended. The listings keep reading the set because none of them carries an
+`ended` for it to contradict. **A tool with two derivations of one fact has to
+make one of them subordinate**, and the subordinate one is the local list.
+
 **Terminal does not mean succeeded, and on this method there is nothing else to
 read.** `cloudsync.sync` declares `response: null`, so the job's `result` is
 null on success and on failure alike; the client says as much itself. The
@@ -995,8 +1005,18 @@ unattended at the next scheduled window; this tool moves the moment, not the
 effect. A tool that composed a deletion of its own — chose the paths, or the
 mode — would be the case the destructive-action policy is actually about, and
 would not belong in the catalog at all. **Ask which of those two a new mutating
-tool is before reaching for either value**, and say the answer where the tool
-declares it rather than leaving the field to carry an argument on its own.
+tool is before reaching for either value.**
+
+**That rule is written at `Destructiveness`'s own declaration, and that is where
+it had to go.** `ToolCatalog.list()` puts `destructiveness` into every
+`AdvertisedTool`, so an adapter deciding how loudly to warn reads the field's
+doc comment — which said only "how hard a mutating tool is to undo" while a
+tool three fields away said `NOTHING HERE UNDOES ANY OF THAT`. A redefinition
+that lives in one tool's comment and in this file is not one the next tool over
+the seam inherits; a reviewer re-derives it per tool instead, which is what
+happened here twice. **Where a field's declared meaning and a tool's use of it
+come apart, fix the declaration** — the local comment then says which case the
+tool is, not what the field means.
 
 **The plan names one call, which is #119's distinction rather than a lapse.**
 `scheduled_task_set_enabled` names its read as a step because `execute` makes
