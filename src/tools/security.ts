@@ -269,9 +269,10 @@ export const securityConfig: ReadOnlyTool = {
     '`password_history_length` is how many previous passwords it refuses to let ' +
     'a user reuse, and `min_password_age` and `max_password_age` are how long a ' +
     'password must be kept before it may be changed and how long it may be kept ' +
-    'before it must be. EACH IS NULL WHERE THE SYSTEM STATED NO VALUE FOR IT, ' +
-    'which covers both a system that reported the field as unset and a TrueNAS ' +
-    'version that does not report the field at all — those are one answer here, ' +
+    'before it must be. EACH IS NULL WHERE THE SYSTEM REPORTED NO VALUE THIS ' +
+    'TOOL COULD READ, which covers a system that reported the field as unset, a ' +
+    'TrueNAS version that does not report the field at all, and a value that ' +
+    'arrived as something other than a finite number — those are one answer here, ' +
     'and that answer is "this was not established". A NULL IS NEVER A ZERO AND ' +
     'IS NEVER "NO POLICY". A null `min_password_length` does NOT mean passwords ' +
     'of any length are accepted, a null `password_history_length` does NOT mean ' +
@@ -315,11 +316,14 @@ export const securityConfig: ReadOnlyTool = {
     'seconds, minutes or steps. It is null where the system reported no number ' +
     'this tool could read. ' +
     'EVERYTHING HERE IS SYSTEM-WIDE SETTINGS AND NOTHING HERE IS PER-ACCOUNT. ' +
-    'Whether an individual account has two-factor set up, and what any account ' +
-    'is permitted to do, are reported by NO TOOL IN THIS CATALOG — `users_list` ' +
-    'returns no two-factor state and says outright that it does not report what ' +
-    'an account is permitted to do, so do not send a caller there for either. ' +
-    'Whether the hardware is CAPABLE of FIPS, ' +
+    'Whether an individual account has two-factor set up is reported by NO ' +
+    'TOOL IN THIS CATALOG — `users_list` returns no two-factor state, so do ' +
+    'not send a caller there for it. What an account is permitted to do is not ' +
+    'reported here either, and `users_list` says outright that it does not ' +
+    'report it; who may reach a SHARE, and with what rights, is `share_access`, ' +
+    'asked one share at a time rather than one account at a time, and nothing ' +
+    'in this catalog reports the privileges an account holds more broadly than ' +
+    'that. Whether the hardware is CAPABLE of FIPS, ' +
     'as opposed to whether it is on, is not reported. This tool only reports. ' +
     'It does not enable or disable FIPS or STIG mode, change any password ' +
     'policy setting, or turn two-factor authentication on or off — those are ' +
