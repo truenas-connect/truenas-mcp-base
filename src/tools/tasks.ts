@@ -4,6 +4,7 @@ import {
   EMPTY,
   firstValueFrom,
   lastValueFrom,
+  switchMap,
   takeUntil,
   tap,
   throwError,
@@ -57,7 +58,7 @@ import {
  * `cloudsync_run` is the second, and it is here for the same reason one step
  * on: it starts one of the tasks `cloudsync_tasks_list` reports, and its plan
  * names that task in the terms that listing already uses — description, path,
- * direction, the remote end and the credential by name.
+ * direction, the remote end, and the credential by name and id.
  */
 
 /**
@@ -2107,9 +2108,12 @@ export const cloudsyncRun: MutatingTool = {
     'or the job reported a state this tool could not read, or no job was seen ' +
     'at all. `state` and `job_id` narrow that and DO NOT PARTITION IT: a ' +
     'non-null `state` beside `ended: false` is any of the first three and this ' +
-    'tool cannot say which, a null `state` beside a `job_id` is a job whose ' +
-    'state was unreadable, and both null is a job this tool never saw OR one ' +
-    'whose state and id were both unreadable. IN NONE OF THEM HAS ANYTHING ' +
+    'tool cannot say which, a null `state` beside a `job_id` is a job the ' +
+    'system NAMED and then said nothing readable about — following it failed, ' +
+    'or the watch ran out before anything came back, or the state it reported ' +
+    'could not be read, and this tool cannot say which of those either — and ' +
+    'both null is a job no event named within the watch OR one whose id was ' +
+    'unreadable and whose state was too. IN NONE OF THEM HAS ANYTHING ' +
     'FAILED. `succeeded` is the answer to "did it work": true where the run ' +
     'ENDED in a state this catalog reads as success, false where it ENDED in ' +
     'any other state, and NULL WHERE NOTHING ESTABLISHED IT — which is every ' +
@@ -2134,13 +2138,15 @@ export const cloudsyncRun: MutatingTool = {
     'JOB RECORD CARRIES A TIME, since a run that was not established to be ' +
     'over has not been established to have ended then. It is also null where ' +
     'the job ended and recorded no time this tool could read. `job_id` is the ' +
-    'job\'s numeric identity and ' +
+    'job\'s numeric identity, TAKEN FROM THE JOB EVENT THAT NAMED THIS ' +
+    'REQUEST rather than from anything read about the job afterwards — so it ' +
+    'is reported even where the watch established nothing else at all — and it ' +
     'MATCHES `id` IN `tasks_recent_runs`, WHICH IS HOW A SYNC THAT WAS STILL ' +
     'RUNNING IS FOLLOWED UP — this tool reports no progress percentage and no ' +
     'live status, and that tool reports both. `job_id` is null where no job ' +
-    'event named the job within the watch, and ALSO where a job event was seen ' +
-    'and the id it carried was not a number this tool could read — so a null ' +
-    '`job_id` beside a non-null `state` is the second of those. NEITHER MEANS ' +
+    'event named the job within the watch, and ALSO where such an event was ' +
+    'seen and the id it carried was not a number this tool could read — so a ' +
+    'null `job_id` beside a non-null `state` is the second of those. NEITHER MEANS ' +
     'THE SYNC DID ' +
     'NOT START: the call was made, and `cloudsync_tasks_list` will report the ' +
     'run against the task. `task_id` is the `id` that was asked for and ' +
@@ -2230,6 +2236,7 @@ export const cloudsyncRun: MutatingTool = {
   },
   async execute(ctx, rawArgs) {
     const run = parseRun(rawArgs);
+    const api = ctx.system.client.api;
     // Set from the tracking observable COMPLETING rather than from comparing
     // the state against a list, because completion is the client's own
     // `isJobFinished` and so moves with the middleware's terminal set rather
@@ -2238,38 +2245,56 @@ export const cloudsyncRun: MutatingTool = {
     // watch ends leaves this false.
     let completed = false;
     // Whether the client ever reported on the job. Once it has, the job exists
-    // and its id is in hand, which is what the guard below turns on.
+    // and the run is under way, which is what the guard below turns on.
     let sawJob = false;
+    // The job's id, held from the moment the client correlates it.
+    let jobId: number | null = null;
     const watched = await lastValueFrom(
-      ctx.system.client.api
-        .job('cloudsync.sync', syncParams(run))
-        .pipe(
-          tap({
-            next: () => {
-              sawJob = true;
-            },
-            complete: () => {
-              completed = true;
-            },
-          }),
-          // An error raised while FOLLOWING a job the client has already
-          // reported on is not the call failing. `trackJob` reads
-          // `core.get_jobs` and listens on a socket that can drop; the sync is
-          // running whatever either of those does. Rejecting here would tell the
-          // caller the mutation failed AND take the job id with it, leaving a
-          // running sync that nothing can name — which is the failure the bound
-          // above exists to prevent, reached from the other side. So the watch
-          // ends and the result reports what was established, `ended` false.
-          //
-          // Before the first emission there is no id to keep and nothing to
-          // report, and the likeliest cause is the call itself being rejected —
-          // so that still fails, as it must.
-          catchError((error: unknown) => (sawJob ? EMPTY : throwError(() => error))),
-          takeUntil(timer(SYNC_WATCH_MS)),
-        ),
+      // Started and then followed in two steps rather than through `api.job`,
+      // which is exactly these two steps piped together. What the split buys is
+      // WHEN the id becomes readable here: `api.job` consumes it inside its own
+      // `switchMap`, so nothing of the job reaches this pipe until `trackJob`
+      // emits — and `trackJob` starts by dispatching `core.get_jobs`, which can
+      // fail on its own. The job is already running by then and the client
+      // already has its id, so absorbing that failure and reporting the id is
+      // the whole point of the guard below; through `api.job` it would instead
+      // reject with nothing, which is the unnameable run this tool is built to
+      // avoid. The client's own reason to prefer `api.job` is the result type,
+      // and `cloudsync.sync` declares `response: null` — there is no result to
+      // lose.
+      api.callAndGetJobId('cloudsync.sync', syncParams(run)).pipe(
+        tap((id) => {
+          // A job event has named this request, so the run is under way. The id
+          // is read through the same guard every other middleware number goes
+          // through: the client declares it a number, and a declared type is a
+          // claim about what is sent rather than about the value received.
+          sawJob = true;
+          jobId = numberOrNull(id);
+        }),
+        switchMap((id) => api.trackJob(id)),
+        tap({
+          complete: () => {
+            completed = true;
+          },
+        }),
+        // An error raised once a job event has named this request is not the
+        // call failing. The follow-up read and the event stream both go over a
+        // socket that can drop; the sync is running whatever either of those
+        // does. Rejecting here would tell the caller the mutation failed AND
+        // take the job id with it, leaving a running sync that nothing can name
+        // — which is the failure the bound above exists to prevent, reached
+        // from the other side. So the watch ends and the result reports what
+        // was established, `ended` false, with the id.
+        //
+        // Before that event there is nothing of the job to report and no id to
+        // keep, so an error there still fails, as it must.
+        catchError((error: unknown) => (sawJob ? EMPTY : throwError(() => error))),
+        takeUntil(timer(SYNC_WATCH_MS)),
+      ),
       // No emission at all: the request went out and nothing this tool can see
-      // came back about a job, which is reported rather than thrown — the sync
-      // may well be running.
+      // came back about the job, which is reported rather than thrown — the
+      // sync may well be running, and where an event named it `jobId` says so
+      // even though this is null.
       { defaultValue: null },
     );
     const record = lastRunOf(watched);
@@ -2284,7 +2309,13 @@ export const cloudsyncRun: MutatingTool = {
     return {
       task_id: run.id,
       dry_run: run.dryRun,
-      job_id: numberOrNull(recordOrNull(watched)?.['id']),
+      // The id the client correlated off the job event, NOT the `id` on
+      // whatever the tracking last reported. They are the same number — the
+      // tracking filters on it — and only the first survives a watch that ends
+      // with nothing having been read about the job, which is exactly when a
+      // caller most needs something to name the run with. One fact, one
+      // derivation.
+      job_id: jobId,
       watched_seconds: SYNC_WATCH_SECONDS,
       ended,
       // The state and nothing else. `result` is null on this method whatever

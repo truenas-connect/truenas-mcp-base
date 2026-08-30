@@ -50,22 +50,37 @@ const jobAt = (state: string, extra: Record<string, unknown> = {}) => ({
 });
 
 /**
- * A system listing `rows` for `cloudsync.query` and following a started job
- * through `job`.
+ * A system listing `rows` for `cloudsync.query`, correlating a started job's id
+ * through `callAndGetJobId` and following it through `trackJob`.
+ *
+ * Those are the two halves `api.job` pipes together, and the tool uses them
+ * apart so that the id is in hand before anything is read about the job — so
+ * the fake has to be able to move them independently. `started` is the id
+ * stream and `job` the tracking that follows it.
  */
 function jobSystem(
   options: {
     rows?: unknown;
+    started?: Observable<number>;
     job?: Observable<unknown>;
     queryFails?: unknown;
   } = {},
-): { ctx: ToolContext; query: ReturnType<typeof vi.fn>; job: ReturnType<typeof vi.fn> } {
+): {
+  ctx: ToolContext;
+  query: ReturnType<typeof vi.fn>;
+  start: ReturnType<typeof vi.fn>;
+  track: ReturnType<typeof vi.fn>;
+} {
   const query = vi.fn(() =>
     'queryFails' in options ? throwError(() => options.queryFails) : of(options.rows ?? [task]),
   );
-  const job = vi.fn(() => options.job ?? of(jobAt('SUCCESS')));
-  const system = { name: 'nas', client: { api: { query, job } } } as unknown as SystemHandle;
-  return { ctx: { system }, query, job };
+  const start = vi.fn(() => options.started ?? of(77));
+  const track = vi.fn(() => options.job ?? of(jobAt('SUCCESS')));
+  const system = {
+    name: 'nas',
+    client: { api: { query, callAndGetJobId: start, trackJob: track } },
+  } as unknown as SystemHandle;
+  return { ctx: { system }, query, start, track };
 }
 
 /** The one step the plan returns, typed. */
@@ -279,9 +294,9 @@ describe('cloudsync_run', () => {
     });
 
     it('starts nothing', async () => {
-      const { ctx, job } = jobSystem();
+      const { ctx, start } = jobSystem();
       await planStep(ctx, { id: 4 });
-      expect(job).not.toHaveBeenCalled();
+      expect(start).not.toHaveBeenCalled();
     });
 
     it('lets a failed read fail the plan, since nothing has been approved yet', async () => {
@@ -292,15 +307,17 @@ describe('cloudsync_run', () => {
 
   describe('execute', () => {
     it('starts the job through the job surface, with the params the plan named', async () => {
-      const { ctx, job } = jobSystem();
+      const { ctx, start, track } = jobSystem();
       await cloudsyncRun.execute(ctx, { id: 4 });
-      expect(job).toHaveBeenCalledWith('cloudsync.sync', [4, { dry_run: false }]);
+      expect(start).toHaveBeenCalledWith('cloudsync.sync', [4, { dry_run: false }]);
+      // And follows the job the client correlated, rather than one it named.
+      expect(track).toHaveBeenCalledWith(77);
     });
 
     it('passes a dry run through as asked, and reports what was sent', async () => {
-      const { ctx, job } = jobSystem();
+      const { ctx, start } = jobSystem();
       const result = await cloudsyncRun.execute(ctx, { id: 4, dry_run: true });
-      expect(job).toHaveBeenCalledWith('cloudsync.sync', [4, { dry_run: true }]);
+      expect(start).toHaveBeenCalledWith('cloudsync.sync', [4, { dry_run: true }]);
       expect(result).toMatchObject({ task_id: 4, dry_run: true });
     });
 
@@ -399,7 +416,8 @@ describe('cloudsync_run', () => {
     });
 
     it('establishes nothing from a job it never saw, and does not call that a failure', async () => {
-      const { ctx } = jobSystem({ job: EMPTY });
+      // No job event named the request, so there is no id and nothing to track.
+      const { ctx, track } = jobSystem({ started: EMPTY });
       expect(await cloudsyncRun.execute(ctx, { id: 4 })).toMatchObject({
         job_id: null,
         ended: false,
@@ -407,6 +425,20 @@ describe('cloudsync_run', () => {
         state: null,
         error: null,
         finished_at: null,
+      });
+      expect(track).not.toHaveBeenCalled();
+    });
+
+    it('keeps the id of a job the client named and then reported nothing about', async () => {
+      // The event correlated the id — the sync IS running — and the tracking
+      // said nothing readable. `ended` is false and the caller still gets the
+      // one thing that can name the run.
+      const { ctx } = jobSystem({ job: EMPTY });
+      expect(await cloudsyncRun.execute(ctx, { id: 4 })).toMatchObject({
+        job_id: 77,
+        ended: false,
+        succeeded: null,
+        state: null,
       });
     });
 
@@ -420,8 +452,10 @@ describe('cloudsync_run', () => {
       });
     });
 
-    it('reports no job id where the emission carries none this tool can read', async () => {
-      const { ctx } = jobSystem({ job: of(jobAt('SUCCESS', { id: 'seventy-seven' })) });
+    it('reports no job id where the event carried none this tool can read', async () => {
+      // The client declares the id a number; a declared type is a claim about
+      // what is sent rather than about the value received.
+      const { ctx } = jobSystem({ started: of('seventy-seven' as unknown as number) });
       expect(await cloudsyncRun.execute(ctx, { id: 4 })).toMatchObject({
         job_id: null,
         succeeded: true,
@@ -429,8 +463,22 @@ describe('cloudsync_run', () => {
     });
 
     it('lets a rejected call fail, since there is then no run to report on', async () => {
-      const { ctx } = jobSystem({ job: throwError(() => new Error('not authorised')) });
+      const { ctx } = jobSystem({ started: throwError(() => new Error('not authorised')) });
       await expect(cloudsyncRun.execute(ctx, { id: 4 })).rejects.toThrow('not authorised');
+    });
+
+    it('does not fail the call when the FOLLOW-UP READ fails before it reports anything', async () => {
+      // `trackJob` starts by dispatching `core.get_jobs`, which can fail on its
+      // own — after the event correlated the id, so the sync is running. Through
+      // `api.job` this would reject with nothing: the id is consumed inside that
+      // method's `switchMap` and never reaches the tool.
+      const { ctx } = jobSystem({ job: throwError(() => new Error('core.get_jobs failed')) });
+      expect(await cloudsyncRun.execute(ctx, { id: 4 })).toMatchObject({
+        job_id: 77,
+        ended: false,
+        succeeded: null,
+        state: null,
+      });
     });
 
     it('keeps the job id when following the job fails after it has been seen', async () => {
@@ -466,9 +514,9 @@ describe('cloudsync_run', () => {
     });
 
     it('rejects arguments it cannot read before making any call', async () => {
-      const { ctx, job } = jobSystem();
+      const { ctx, start } = jobSystem();
       await expect(cloudsyncRun.execute(ctx, { id: 'four' })).rejects.toThrow('"id" is required');
-      expect(job).not.toHaveBeenCalled();
+      expect(start).not.toHaveBeenCalled();
     });
   });
 });

@@ -950,10 +950,30 @@ that reject the handler tells the caller the sync failed when it is running, and
 throws away the job id in the same act — the unnameable-run failure the bound
 exists to prevent, reached from the other side. So an error after the client has
 reported on the job ends the watch and the result says what was established,
-which is `ended: false`. An error BEFORE the first emission still fails: there
-is no id to keep, nothing to report, and the likeliest cause is the call being
-rejected. **A mutating tool that follows its own effect has two failure eras,
-and only the first of them is the call's.**
+which is `ended: false`. An error BEFORE the client has named the job still
+fails: there is no id to keep and nothing to report. **A mutating tool that
+follows its own effect has two failure eras, and only the first of them is the
+call's.**
+
+**Which is why this tool calls `callAndGetJobId` and `trackJob` apart rather
+than `api.job`, which is those two piped together.** The two eras are divided by
+the moment the client correlates the job id off the job event, and `api.job`
+consumes that id inside its own `switchMap` — nothing of the job reaches the
+caller's pipe until `trackJob` emits. But `trackJob` opens by dispatching
+`core.get_jobs`, which can fail on its own, and by then the sync is running and
+the client has its id. Through `api.job` that failure arrives as a rejection
+carrying nothing: the caller is told the mutation failed, and the only number
+that could still name the run is gone. **Where a client method pipes two stages
+together and the seam between them is where a tool's own guard lives, call the
+stages.** What that costs is the client's stated reason to prefer `api.job` — a
+job typed `result: unknown` — and it costs nothing here, because `cloudsync.sync`
+declares `response: null` and this tool never reads `result`.
+
+`job_id` then comes from that correlation and NOT from the `id` on whatever the
+tracking last reported. They are the same number, since the tracking filters on
+it — and only the first survives a watch that established nothing else, which is
+exactly when a caller most needs something to name the run with. **One fact, one
+derivation**, the same rule `finished_at` follows above.
 
 **Whether the job ended is read from the tracking COMPLETING, not from a state
 list.** The client completes the stream on its own `isJobFinished`, so
