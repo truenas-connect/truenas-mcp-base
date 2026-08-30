@@ -803,6 +803,9 @@ interface DiskAttributes extends DiskFileAttributes {
   zvol_volsize: number | null;
 }
 
+/** The nested record a USB device names its host hardware in. */
+type UsbIdentifiers = NonNullable<AttributesOf<'USB'>['usb']>;
+
 /** A USB device passed through to the VM. */
 interface UsbAttributes {
   controller_type: string | null;
@@ -909,14 +912,18 @@ function readAttributes(dtype: string, held: Record<string, unknown>): DeviceAtt
     case 'USB': {
       const usb = held as AttributesOf<'USB'>;
       // The identifiers are one level down, in a record the client declares
-      // optional and nullable. Both are null where it held none, which is the
-      // same answer this file gives for every unreadable field.
-      const identifiers = recordOrNull(usb.usb) ?? {};
+      // optional and nullable. Read back as a partial of that record's own
+      // declared type for the reason the envelope is: read by string index
+      // instead, a regenerated client renaming either key would null both
+      // silently, with no build error and with fixtures written by hand
+      // against the same old names. Both are null where the record held none,
+      // which is the same answer this file gives for every unreadable field.
+      const identifiers = (recordOrNull(usb.usb) ?? {}) as Partial<UsbIdentifiers>;
       return {
         controller_type: textOrNull(usb.controller_type),
         device: textOrNull(usb.device),
-        vendor_id: textOrNull(identifiers['vendor_id']),
-        product_id: textOrNull(identifiers['product_id']),
+        vendor_id: textOrNull(identifiers.vendor_id),
+        product_id: textOrNull(identifiers.product_id),
       } satisfies UsbAttributes;
     }
     default:
@@ -990,8 +997,10 @@ export const vmDevices: ReadOnlyTool = {
     'IT IS and decides which fields `attributes` carries: `DISK` and `RAW` are ' +
     'disks, `CDROM` an image, `NIC` a network interface, `DISPLAY` the ' +
     'graphical console, `PCI` and `USB` host hardware passed through. EACH ' +
-    'KIND IS REPORTED THROUGH ITS OWN SET OF FIELDS and no field of one kind ' +
-    'appears on another, so read `dtype` before reading `attributes`. For ' +
+    'KIND IS REPORTED THROUGH ITS OWN SET OF FIELDS, and a name two kinds ' +
+    'share MEANS WHATEVER THAT KIND\'S OWN ENTRY BELOW SAYS IT MEANS — `type` ' +
+    'is on four of them and is a different thing on each — so read `dtype` ' +
+    'before reading `attributes`. For ' +
     '`DISK`: `path` is what backs it, `zvol_name` and `zvol_volsize` the zvol ' +
     'where one does, `create_zvol` whether TrueNAS made that zvol itself. For ' +
     '`RAW`: `path` is the image file, `exists` whether the system says that ' +
@@ -1032,8 +1041,11 @@ export const vmDevices: ReadOnlyTool = {
     'attachment could not be read, and nothing here says which. FOUR FIELDS ' +
     'ARE THE EXCEPTION, because the API declares them present and non-null on ' +
     'their kind: `dtype`, a `CDROM` `path`, a `PCI` `pptdev` and a `RAW` ' +
-    '`path`. A null in one of those is this tool failing to read the value, ' +
-    'never the device recording none. AN ' +
+    '`path`. A null in one of those is a value that did not reach this tool as ' +
+    'something it could read — WHICH INCLUDES ONE THE SYSTEM SENT AS EMPTY ' +
+    'TEXT, and this surface does send empty strings for required fields — and ' +
+    'is not the device recording an absence, since the API gives those four no ' +
+    'way to record one. AN ' +
     'EMPTY `devices` LIST IS A SYSTEM WITH NO LIBVIRT-BACKED VM DEVICES AT ' +
     'ALL, which includes a system with no libvirt-backed VMs. A machine ' +
     '`vms_list` reports with `source` `vm` AND NO ROW HERE HAS NO DEVICES ' +
