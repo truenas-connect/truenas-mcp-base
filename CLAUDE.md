@@ -943,6 +943,18 @@ route was taken.** `api.job` is `callAndGetJobId` piped into `trackJob`, and
 silently aborted a half-finished upload would be the worst defect such a tool
 could have, so this is checked against the client rather than assumed of it.
 
+**An error raised while FOLLOWING the job is not the call failing, and must not
+be reported as one.** `trackJob` reads `core.get_jobs` and listens on a socket
+that can drop, so the stream can error long after the mutation landed. Letting
+that reject the handler tells the caller the sync failed when it is running, and
+throws away the job id in the same act — the unnameable-run failure the bound
+exists to prevent, reached from the other side. So an error after the client has
+reported on the job ends the watch and the result says what was established,
+which is `ended: false`. An error BEFORE the first emission still fails: there
+is no id to keep, nothing to report, and the likeliest cause is the call being
+rejected. **A mutating tool that follows its own effect has two failure eras,
+and only the first of them is the call's.**
+
 **Whether the job ended is read from the tracking COMPLETING, not from a state
 list.** The client completes the stream on its own `isJobFinished`, so
 completion moves with the middleware's terminal set instead of with a set
@@ -952,13 +964,21 @@ anything is called ended.
 
 **Every other field that means "the run is over" is then read off THAT, not off
 a second list.** `finished_at` gates on `ended` rather than through
-`jobFinishedAt`, whose `ENDED_JOB_STATES` is a set written down in this
-repository: a terminal state a later TrueNAS release adds completes the client's
-stream and is absent from that set, so the two disagree exactly on the case this
-tool is careful about, and the result would call a run over and refuse to say
-when it ended. The listings keep reading the set because none of them carries an
-`ended` for it to contradict. **A tool with two derivations of one fact has to
-make one of them subordinate**, and the subordinate one is the local list.
+`jobFinishedAt`, whose `ENDED_JOB_STATES` is this repository's own set. The two
+are **equal on the pinned client** — its `terminalStates`, which is what
+`isJobFinished` tests and so what completes the tracking, holds exactly those
+five states, read out of `dist/index.js` rather than assumed — so this is not a
+bug being fixed. It is two independently maintained lists that happen to agree,
+and a client release widening its own would have this result call a run ended
+and refuse to say when it ended. **A tool with two derivations of one fact makes
+one of them subordinate**, and the subordinate one is the local list. The
+listings keep reading the set: none of them carries an `ended` to disagree with.
+
+The trap that costs a round here is stating the divergence as something a later
+**TrueNAS** release does. It is not: the terminal set is the CLIENT's, so only a
+client bump moves it, and nothing a middleware adds reaches it on its own. A
+job in a state neither list names does not complete the tracking at all — it
+runs until the bound expires and reports `ended: false`.
 
 **Terminal does not mean succeeded, and on this method there is nothing else to
 read.** `cloudsync.sync` declares `response: null`, so the job's `result` is

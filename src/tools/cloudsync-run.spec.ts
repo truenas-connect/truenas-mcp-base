@@ -329,16 +329,22 @@ describe('cloudsync_run', () => {
       });
     });
 
-    it('does not read an unfamiliar terminal state as a success', async () => {
+    // The tracking completing on a state neither this file nor the pinned
+    // client calls terminal is a stream that client CANNOT currently produce:
+    // its `terminalStates` holds the same five as `ENDED_JOB_STATES`, so a
+    // SUPERSEDED job runs on until the bound expires. What this fixture models
+    // is a client release that widens that set — the one case where the two
+    // lists come apart — and it is written as a test because both fields have
+    // to stay honest when it happens, not because the state is reachable today.
+    it('reads a terminal state neither list names as ended and not as a success', async () => {
       const { ctx } = jobSystem({ job: of(jobAt('SUPERSEDED')) });
       expect(await cloudsyncRun.execute(ctx, { id: 4 })).toMatchObject({
         ended: true,
         succeeded: false,
         state: 'SUPERSEDED',
-        // And still reports the finish time: a state the client completed on is
-        // an ended run whether or not this family's own terminal list names it,
-        // so `finished_at` follows `ended` rather than that list. Reporting null
-        // here would have this result call the run over and refuse to say when.
+        // And the finish time follows `ended`. Reading `ENDED_JOB_STATES` here
+        // instead would have one result call the run over and refuse to say
+        // when it ended.
         finished_at: '2025-08-24T01:46:40.000Z',
       });
     });
@@ -411,6 +417,38 @@ describe('cloudsync_run', () => {
     it('lets a rejected call fail, since there is then no run to report on', async () => {
       const { ctx } = jobSystem({ job: throwError(() => new Error('not authorised')) });
       await expect(cloudsyncRun.execute(ctx, { id: 4 })).rejects.toThrow('not authorised');
+    });
+
+    it('keeps the job id when following the job fails after it has been seen', async () => {
+      const { ctx } = jobSystem({
+        job: concat(of(jobAt('RUNNING')), throwError(() => new Error('connection dropped'))),
+      });
+      // The sync is running and this is the only call that ever knew its id, so
+      // rejecting here would tell the caller the mutation failed and lose the
+      // one thing that could still name the run.
+      expect(await cloudsyncRun.execute(ctx, { id: 4 })).toMatchObject({
+        job_id: 77,
+        ended: false,
+        succeeded: null,
+        state: 'RUNNING',
+        finished_at: null,
+      });
+    });
+
+    it('does not report a job as ended because following it stopped', async () => {
+      const { ctx } = jobSystem({
+        job: concat(of(jobAt('SUCCESS')), throwError(() => new Error('connection dropped'))),
+      });
+      // The state read is SUCCESS and the stream did not complete, so nothing
+      // established that the run is over — `ended` is what says so and it is
+      // false, which is what keeps `succeeded` from being read off a state the
+      // job may still move out of.
+      expect(await cloudsyncRun.execute(ctx, { id: 4 })).toMatchObject({
+        state: 'SUCCESS',
+        ended: false,
+        succeeded: null,
+        finished_at: null,
+      });
     });
 
     it('rejects arguments it cannot read before making any call', async () => {

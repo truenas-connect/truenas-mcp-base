@@ -1,5 +1,14 @@
 import type { JobParams } from '@truenas/api-client';
-import { firstValueFrom, lastValueFrom, takeUntil, tap, timer } from 'rxjs';
+import {
+  catchError,
+  EMPTY,
+  firstValueFrom,
+  lastValueFrom,
+  takeUntil,
+  tap,
+  throwError,
+  timer,
+} from 'rxjs';
 import { Role } from '@/interfaces';
 import { ApiSurface, MutatingTool, PlanStep, ReadOnlyTool, ToolContext } from '@/catalog/tool';
 import {
@@ -2070,9 +2079,16 @@ export const cloudsyncRun: MutatingTool = {
     'minutes for a small delta, hours for a first upload — so this tool ' +
     'WATCHES THE JOB FOR AT MOST `watched_seconds` AND THEN RETURNS WHATEVER ' +
     'IT HAS, leaving the sync running. It never waits for the copy to finish. ' +
+    'THE WATCH ALSO ENDS IF FOLLOWING THE JOB FAILS — a dropped connection, a ' +
+    'failed read of the job list — and that is reported as what was ' +
+    'established rather than as the sync having failed, since the run was ' +
+    'already under way. A failure BEFORE anything was seen of the job fails ' +
+    'this call instead, and even then MAY STILL HAVE STARTED THE SYNC: check ' +
+    '`cloudsync_tasks_list` rather than assuming nothing ran. ' +
     '`ended` is whether the job was established to have reached a state it will ' +
     'not move out of. TRUE MEANS THE RUN IS OVER; FALSE IS THREE ANSWERS AND ' +
-    'NOT ONE — the sync is still going, or the job reported a state this tool ' +
+    'NOT ONE — the sync is still going (which includes a watch cut short by ' +
+    'either of those), or the job reported a state this tool ' +
     'could not read, or no job was seen at all — and `state` and `job_id` are ' +
     'what tell those apart: a state beside `ended: false` is a sync still ' +
     'under way, a null `state` beside a `job_id` is a job whose state was ' +
@@ -2200,15 +2216,34 @@ export const cloudsyncRun: MutatingTool = {
     // unsubscribing, which is not a completion, so a job still running when the
     // watch ends leaves this false.
     let completed = false;
+    // Whether the client ever reported on the job. Once it has, the job exists
+    // and its id is in hand, which is what the guard below turns on.
+    let sawJob = false;
     const watched = await lastValueFrom(
       ctx.system.client.api
         .job('cloudsync.sync', syncParams(run))
         .pipe(
           tap({
+            next: () => {
+              sawJob = true;
+            },
             complete: () => {
               completed = true;
             },
           }),
+          // An error raised while FOLLOWING a job the client has already
+          // reported on is not the call failing. `trackJob` reads
+          // `core.get_jobs` and listens on a socket that can drop; the sync is
+          // running whatever either of those does. Rejecting here would tell the
+          // caller the mutation failed AND take the job id with it, leaving a
+          // running sync that nothing can name — which is the failure the bound
+          // above exists to prevent, reached from the other side. So the watch
+          // ends and the result reports what was established, `ended` false.
+          //
+          // Before the first emission there is no id to keep and nothing to
+          // report, and the likeliest cause is the call itself being rejected —
+          // so that still fails, as it must.
+          catchError((error: unknown) => (sawJob ? EMPTY : throwError(() => error))),
           takeUntil(timer(SYNC_WATCH_MS)),
         ),
       // No emission at all: the request went out and nothing this tool can see
@@ -2239,13 +2274,16 @@ export const cloudsyncRun: MutatingTool = {
       state,
       error: jobError(record),
       // Gated on `ended` and NOT through {@link jobFinishedAt}, which reads
-      // {@link ENDED_JOB_STATES} — a list written down here. The two readings
-      // of "the run is over" disagree exactly where this tool is most careful:
-      // `ended` comes from the client's own completion, so a terminal state a
-      // later TrueNAS release adds is ended here and absent from that list, and
-      // this field would then report null for a run the same result has just
-      // called over. The listings keep the list because none of them carries an
-      // `ended` for it to contradict.
+      // {@link ENDED_JOB_STATES}. The two agree on the PINNED client and are
+      // not the same reading: the client's `terminalStates` — what
+      // `isJobFinished` tests, and so what completes the tracking — holds
+      // exactly these five, checked in its `dist/index.js` rather than assumed,
+      // while the set here is this repository's own. Two independently
+      // maintained lists that happen to be equal today, and a client release
+      // that widens its own would leave this result calling a run ended and
+      // refusing to say when. `ended` is the claim this tool has already made,
+      // so the finish time follows it and cannot contradict it. The listings
+      // keep reading the set: none of them carries an `ended` to disagree with.
       finished_at: ended ? isoOrNull(jobMillis(record?.time_finished)) : null,
     };
   },
