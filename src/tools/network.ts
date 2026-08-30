@@ -2,7 +2,14 @@ import type { CallResponse } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ApiSurface, ReadOnlyTool } from '@/catalog/tool';
-import { errorText, numberOrNull, recordOrNull, textList, textOrNull } from '@/tools/common';
+import {
+  booleanOrNull,
+  errorText,
+  numberOrNull,
+  recordOrNull,
+  textList,
+  textOrNull,
+} from '@/tools/common';
 
 /**
  * Networking family. Two tools split it by what is being asked about:
@@ -345,14 +352,23 @@ export const networkInterfaces: ReadOnlyTool = {
 /**
  * The settings over the interfaces: hostname, DNS, gateways and static routes.
  *
- * Three reads, and only the first is the answer. `network.configuration.config`
+ * Four reads, and only the first is the answer. `network.configuration.config`
  * holds what is CONFIGURED on this system; `network.general.summary` holds the
  * default routes and nameservers actually IN EFFECT; `staticroute.query` holds
- * the routes configured by hand. The first two are the same facts read from two
+ * the routes configured by hand; `interface.has_pending_changes` says whether
+ * any of it is uncommitted. The first two are the same facts read from two
  * sides, and the difference between them is the question this tool exists to
  * answer: a system addressed by DHCP has a gateway and nameservers in effect
  * and nothing configured, and a system whose configuration has not been applied
  * has the reverse.
+ *
+ * The fourth read is what says whether the answer is settled at all. TrueNAS
+ * applies a network change behind a commit-and-confirm timer, so an uncommitted
+ * change REVERTS on its own if nobody confirms it — and a caller told only what
+ * is configured will describe a configuration that will not exist in a few
+ * minutes. `interface.has_pending_changes` answers that yes/no for the SYSTEM
+ * and names no interface, so this reports it as one field over the whole result
+ * rather than per gateway or per nameserver.
  *
  * That comparison is what distinguishes an inherited value from a configured
  * one, rather than a field on the configuration saying so. The client declares
@@ -373,7 +389,7 @@ export const networkInterfaces: ReadOnlyTool = {
 
 /** One read that did not complete, and why. */
 interface ConfigFailure {
-  source: 'effective_values' | 'static_routes';
+  source: 'effective_values' | 'static_routes' | 'changes_pending';
   error: string;
 }
 
@@ -587,7 +603,14 @@ export const networkConfig: ReadOnlyTool = {
     'and the routes configured by hand. These are the settings OVER the ' +
     'interfaces; `network_interfaces` is what reports the interfaces ' +
     'themselves, their links and their addresses, and neither tool reports ' +
-    'the other. Wherever the system can say both, a value is reported from ' +
+    'the other. `changes_pending` is whether this system has NETWORK CHANGES ' +
+    'THAT HAVE NOT BEEN COMMITTED: true means everything else reported here ' +
+    'is PROVISIONAL and REVERTS ON ITS OWN unless it is confirmed, false ' +
+    'means none is pending and what is reported is what the system is ' +
+    'keeping, and NULL MEANS THE READ DID NOT COMPLETE — a null here is never ' +
+    '"none pending". It answers for the SYSTEM, and does not say WHICH ' +
+    'INTERFACE a pending change is on, WHAT the change is, or HOW LONG is ' +
+    'left before it reverts. Wherever the system can say both, a value is reported from ' +
     'BOTH SIDES: what is CONFIGURED on this system, and what is IN EFFECT ' +
     'right now. The two differ in both directions — a system addressed by ' +
     'DHCP has a gateway and nameservers in effect with nothing configured, ' +
@@ -636,7 +659,8 @@ export const networkConfig: ReadOnlyTool = {
     'ABSENT — when it names `effective_values`, every `in_effect` is null and ' +
     'no value can be reported as `AUTOMATIC`, so a `STATIC` gateway or ' +
     'nameserver is still correct there while the absence of one is not ' +
-    'evidence of anything. This tool reports settings as they are: it does ' +
+    'evidence of anything, and when it names `changes_pending`, nothing can ' +
+    'be said about whether these settings are provisional. This tool reports settings as they are: it does ' +
     'not change any network setting, and IT DOES NOT TEST whether a name ' +
     'resolves, a gateway answers or a host is reachable — a nameserver ' +
     'reported here is one the system is configured to use, not one confirmed ' +
@@ -649,20 +673,31 @@ export const networkConfig: ReadOnlyTool = {
     // Every read is issued before any is awaited, so none waits on another.
     // Only the configuration is allowed to fail the tool: it is the answer,
     // and the other two sharpen it.
-    const [config, summary, routes] = await Promise.all([
+    const [config, summary, routes, pending] = await Promise.all([
       firstValueFrom(system.client.api.call('network.configuration.config')),
       attempt('effective_values', () =>
         firstValueFrom(system.client.api.call('network.general.summary')),
       ),
       attempt('static_routes', () => firstValueFrom(system.client.api.query('staticroute.query'))),
+      attempt('changes_pending', () =>
+        firstValueFrom(system.client.api.call('interface.has_pending_changes')),
+      ),
     ]);
 
     const effective = effectiveValues(summary.value);
     const failures: ConfigFailure[] = [];
     if (summary.failure !== null) failures.push(summary.failure);
     if (routes.failure !== null) failures.push(routes.failure);
+    if (pending.failure !== null) failures.push(pending.failure);
 
     return {
+      // First, because it qualifies every other field rather than sitting
+      // beside them: a pending change makes the whole configuration below
+      // provisional. Read through a guard like everything else here — the
+      // client declares a bare boolean, and a response that is not one leaves
+      // this null rather than reporting a system as settled on the strength of
+      // a shape this tool could not read.
+      changes_pending: booleanOrNull(pending.value),
       hostname: localHostname(config),
       domain: textOrNull(config['domain']),
       search_domains: textList(config['domains']),
