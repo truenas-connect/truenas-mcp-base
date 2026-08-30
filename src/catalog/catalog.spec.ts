@@ -32,11 +32,32 @@ describe('ToolCatalog', () => {
     expect(() => catalog.register(readOnly('a_b'))).toThrow(/already registered/);
   });
 
-  it('rejects irreversibly destructive tools by policy', () => {
+  it('rejects irreversibly destructive tools by policy, on the narrow claim', () => {
     const catalog = new ToolCatalog();
-    expect(() =>
-      catalog.register(mutating('storage_delete_pool', { destructiveness: 'irreversible' })),
-    ).toThrow(/destructive-action policy/);
+    const register = () =>
+      catalog.register(mutating('storage_delete_pool', { destructiveness: 'irreversible' }));
+    expect(register).toThrow(/destructive-action policy/);
+    // The message says COMPOSES on purpose (#122): the check rejects a tool that
+    // chooses what is destroyed, and says nothing about one that triggers an
+    // operation an operator authored. Nothing was asserting that wording, so a
+    // message widened back to "keeps such operations out of the catalog" — a
+    // guarantee this check cannot make — would have passed.
+    expect(register).toThrow(/composes an irreversibly destructive operation/);
+  });
+
+  it('registers the reversible value, and advertises it', () => {
+    // The other half of the registration outcome, and the value every tool in
+    // the catalog carries — including one that only TRIGGERS an operation
+    // configured elsewhere, which is `cloudsync_run` and is the case #128
+    // decided not to give a value of its own. What such a run does to the data
+    // is in the tool's description and its plan, never in this field.
+    const catalog = new ToolCatalog();
+    const tool = mutating('cloudsync_run', { destructiveness: 'reversible' });
+    catalog.register(tool);
+    expect(catalog.get('cloudsync_run')).toBe(tool);
+    expect(catalog.list(Role.Full)).toEqual([
+      expect.objectContaining({ name: 'cloudsync_run', destructiveness: 'reversible' }),
+    ]);
   });
 
   it('rejects tools declaring reserved executor arguments', () => {

@@ -1166,6 +1166,53 @@ a `SHUTDOWN` script is the one where switching it off at the wrong moment costs
 most, which is `transferModeSentence`'s refusal to default to the harmless mode
 in a second family.
 
+### Two values, because the data effect is not a property of the tool (#128)
+
+`Destructiveness` stays `'reversible' | 'irreversible'`. #122 settled why
+`cloudsync_run` takes the first — the field records the operation, the
+description carries the account of the data, and the test for a triggering tool
+is whether it authors the destruction or only its timing. What this ticket asked
+was the next question: whether the TYPE should grow to say it, either as a third
+value that registers like `reversible` and advertises differently, or as a
+separate field for what the operation does to the data. Neither, and the reason
+is one #122 never had to reach for.
+
+**The data effect is not a property of the tool. It is a property of the entity
+the caller names at call time.** `cloudsync_run`'s effect is the named task's own
+`transfer_mode`, read at plan time: `COPY` deletes nothing, `SYNC` and `MOVE`
+delete for good, and the same tool is all three across three ids. A value or a
+field fixed at the tool's declaration has only two ways to be written and both
+are wrong — worst case for every call, which tells an approver "may delete"
+about a `COPY` task and teaches it to discount the warning, or a reading of
+state a declaration cannot see. **The plan and the description are the only two
+places a per-call fact can be stated**, and they already state it.
+
+The kinds coming next sharpen that rather than strain it. `cronjob.run` executes
+an arbitrary operator-written command, and the strongest true thing a static
+field could say about one is "whatever the operator wrote" — which is prose, and
+belongs where prose goes.
+
+**A third value is also dearer than it looks, because exactly one value is
+load-bearing.** `irreversible` is the only one that changes what
+`ToolCatalog.register` does, so a `'triggers'` that registers like `reversible`
+adds a case to a public-barrel type on which every consumer's switch gains a
+branch the check ignores. Worse, it lands on `AdvertisedTool.destructiveness`,
+whose doc comment exists to say the field must not be read alone — and a value
+named for the case is an invitation to read it alone. **Do not widen a field to
+carry a fact that is only true per call.**
+
+So what this ticket changed is the tests, and the tests are the part that was
+actually missing. `catalog.spec.ts` now covers the registration outcome for BOTH
+values: `irreversible` rejected, asserted on the narrow wording — that the tool
+*composes* such an operation — and `reversible` registering, retrievable and
+advertised carrying the value. The narrowing #122 made to that rejection
+message, to `README.md` and to the field's own declaration had **nothing
+asserting it**, so a later edit restoring the broad promise (that the policy
+keeps irreversibly destructive operations out of the catalog, which is a
+guarantee this check cannot make) would have passed every test. **A redefinition
+that lives only in prose is one edit away from being undone** — where the rule
+is enforced by a message rather than by a type, pin the message.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
