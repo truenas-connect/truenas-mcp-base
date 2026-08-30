@@ -49,9 +49,55 @@ describe('apps_list', () => {
         image_updates_available: false,
       },
     ]);
-    // The tool reads the app list and nothing else, with no filters and no
-    // options: unlike disks_list there is no `extra` the rows depend on.
-    expect(query.mock.calls).toEqual([['app.query']]);
+    // The tool reads the app list and nothing else. No filters — every
+    // installed app is the subject — and the only option is the projection
+    // below, which names exactly the six fields the mapping above reads.
+    expect(query.mock.calls).toEqual([
+      [
+        'app.query',
+        [],
+        {
+          select: [
+            'name',
+            'version',
+            'latest_version',
+            'state',
+            'upgrade_available',
+            'image_updates_available',
+          ],
+        },
+      ],
+    ]);
+  });
+
+  it('asks for no field it does not report, and reports every field it asks for', async () => {
+    // The two halves of "names the fields its mapping reads", checked against
+    // each other rather than against a list restated in this test: a `select`
+    // that grew a field the mapping drops is bytes bought for nothing, and one
+    // that lost a field the mapping reads is a null the caller cannot explain.
+    const { ctx, query } = fakeSystem({ ['app.query']: [app({})] });
+    const [result] = (await appsList.handler(ctx, {})) as Record<string, unknown>[];
+    const [, , options] = query.mock.calls[0] as [string, unknown[], { select: string[] }];
+    expect([...options.select].sort()).toEqual(Object.keys(result).sort());
+  });
+
+  it('reads a field the projection asked for and the row does not carry as null', async () => {
+    // The failure mode `select` introduces: middleware honours it on its
+    // current api version, so a field named here can be ABSENT from the row
+    // rather than null on it. `undefined` serializes to no key, so without the
+    // fallback the caller would get an object missing fields the description
+    // promises — which reads as a different shape rather than as a null.
+    const { ctx } = fakeSystem({ ['app.query']: [{}] });
+    expect(await appsList.handler(ctx, {})).toEqual([
+      {
+        name: null,
+        version: null,
+        latest_version: null,
+        state: null,
+        upgrade_available: null,
+        image_updates_available: null,
+      },
+    ]);
   });
 
   it('surfaces neither the install-time config nor a field a later release adds', async () => {
@@ -294,6 +340,48 @@ describe('apps_update_summary', () => {
       ],
     });
     expect(call.mock.calls).toEqual([['app.upgrade_summary', ['plex']]]);
+  });
+
+  it('asks the listing for four fields, which is fewer than apps_list reads', async () => {
+    // Not the same projection as `apps_list`, and deliberately so: this tool
+    // reports neither `latest_version` from the listing nor
+    // `image_updates_available` at all, and it needs `human_version`, which
+    // `apps_list` drops. A `select` shared between the two would ask each path
+    // for fields it has no mapping for.
+    const { ctx, query } = fakeSystem({
+      ['app.query']: [app({})],
+      ['app.upgrade_summary']: summary({}),
+    });
+    await appsUpdateSummary.handler(ctx, {});
+    expect(query.mock.calls).toEqual([
+      ['app.query', [], { select: ['name', 'version', 'human_version', 'upgrade_available'] }],
+    ]);
+  });
+
+  it('reads a row carrying none of the projected fields as unknown, not as up to date', async () => {
+    // Same failure mode as `apps_list`'s, landing somewhere it matters more: a
+    // row whose `upgrade_available` is ABSENT rather than false must stay in
+    // the list saying so. Dropping it would report one fewer application as
+    // having an update waiting than the read established.
+    const { ctx, call } = perApp([{}], {});
+    expect(await appsUpdateSummary.handler(ctx, {})).toEqual({
+      unavailable: null,
+      entries: [
+        {
+          app: null,
+          unavailable:
+            'the system did not report whether an update is waiting for this application, so no ' +
+            'update summary was read',
+          installed_version: null,
+          installed_human_version: null,
+          upgrade_version: null,
+          upgrade_human_version: null,
+          latest_version: null,
+          latest_human_version: null,
+        },
+      ],
+    });
+    expect(call).not.toHaveBeenCalled();
   });
 
   it('reports neither the changelog nor the other versions available', async () => {

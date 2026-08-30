@@ -1815,8 +1815,13 @@ const NO_MEMORY_FIGURE = 'the system answered with no memory figure this tool co
  * as bare records the field names below would compile whatever they were asked
  * for, so a regenerated client that renames one would turn its value into a null
  * with no build error and with hand-written fixtures that still pass.
+ *
+ * The app row is narrowed to the three fields {@link fromApp} reads, matching
+ * the `select` its listing now names (#115). The narrowing is what keeps the two
+ * in step: drop a field from that `select` and this stops compiling, because the
+ * rows no longer satisfy `fromApp`.
  */
-type AppEntry = ApiSurface['call']['app.query']['entity'];
+type AppEntry = Pick<ApiSurface['call']['app.query']['entity'], 'id' | 'name' | 'state'>;
 type VmEntry = ApiSurface['call']['vm.query']['entity'];
 type VirtInstanceEntry = ApiSurface['call']['virt.instance.query']['entity'];
 
@@ -2038,7 +2043,15 @@ export const reportingAppVmUsage: ReadOnlyTool = {
     // All three listings are issued before any is awaited, and each is caught:
     // see `listing` for why none of them may fail the tool.
     const [apps, vms, instances] = await Promise.all([
-      listing('app', () => firstValueFrom(system.client.api.query('app.query'))),
+      // Three fields, which is every one `fromApp` reads — neither figure this
+      // tool reports is readable from an app row at all, so the rest of a row
+      // that is the catalog's bulkiest never needs to cross the wire. Written
+      // inline for the same reason the `virt.instance.query` filter below is.
+      listing('app', () =>
+        firstValueFrom(
+          system.client.api.query('app.query', [], { select: ['id', 'name', 'state'] }),
+        ),
+      ),
       listing('vm', () => firstValueFrom(system.client.api.query('vm.query'))),
       listing('virt_instance', () =>
         firstValueFrom(
