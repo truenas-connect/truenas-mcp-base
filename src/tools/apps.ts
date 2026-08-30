@@ -94,13 +94,19 @@ type EngineStatus = CallResponse<ApiSurface, 'docker.status'>['status'];
 
 /**
  * Which of the engine's status words mean applications can run, one entry per
- * declared member.
+ * member the PINNED surface declares.
  *
- * Typed as a total `Record` over the union ON PURPOSE. A TrueNAS release that
- * adds a status word breaks this build, which is the point: the alternative — a
- * list of the words that mean "not running" — would silently answer `false` for
- * a word nobody here has read, and `false` on this field is the positive claim
- * that nothing on the system can run.
+ * Typed as a total `Record` over the union ON PURPOSE, so that a member added to
+ * the surface this reads cannot be left unmapped silently. What it does NOT do
+ * is bound what a live system can send, and the client already shows why:
+ * `ApiSurface` is `DefaultApiDirectory`, the OLDEST supported directory (seven
+ * words), while a later one declares `MIGRATING` and `MIGRATION_FAILED` too. A
+ * system running that release can send either of them TODAY.
+ *
+ * That is the reason the lookup below answers null for an unmapped word rather
+ * than false. The exhaustiveness is a check on this file against the surface it
+ * compiles against; the null is what keeps the answer honest about every
+ * surface it does not.
  */
 const ENGINE_RUNNING: Record<EngineStatus, boolean> = {
   PENDING: false,

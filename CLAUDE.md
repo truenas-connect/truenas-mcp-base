@@ -589,11 +589,24 @@ as `boot_pool_status` names the boot pool's scan record.
 
 **A status word this catalog has not read is UNKNOWN, never the negative.**
 `app_engine_status`'s `running` is derived through a total `Record` over the
-client's own status union, so a TrueNAS release adding a word breaks the build
-rather than being answered `false` — and `false` there is the positive claim
-that nothing on the system can run. The membership test is `Object.hasOwn` and
-not `in`, which walks the prototype: `'constructor'` is `in` every object
-literal and would have been read back as a boolean the field cannot hold.
+status union, which is exhaustiveness-checked against the surface and answers
+null for anything not in it — `false` there is the positive claim that nothing
+on the system can run.
+
+**The exhaustiveness check is not a bound on what a system can send, and
+reading it as one is the trap.** `ApiSurface` is `DefaultApiDirectory`, the
+OLDEST supported directory (#91), so a total `Record` over a union taken from it
+is total over the oldest surface only: `docker.status` declares seven status
+words there and nine on a later one, and a system on that release can send
+`MIGRATING` today with nothing failing to compile. **Every mapping keyed off a
+union derived from `ApiSurface` needs the unmapped case to be an honest answer
+rather than a branch presumed unreachable** — which is the same reading #100
+gives its `default` arm, arrived at from the version skew instead of from a
+method's union differing from an event's.
+
+The membership test is `Object.hasOwn` and not `in`, which walks the prototype:
+`'constructor'` is `in` every object literal and would have been read back as a
+boolean the field cannot hold.
 
 ## Conventions
 
