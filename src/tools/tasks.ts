@@ -1370,6 +1370,19 @@ interface TaskKind {
   noun: string;
   /** The catalog tool whose rows carry the `id` this tool takes. */
   listedBy: string;
+  /**
+   * The catalog tool that reports this kind's cron fields, or null where no
+   * tool here reports them.
+   *
+   * It is {@link TaskKind.listedBy} for five of the six and null for
+   * `replication`: `replication_status` answers about a task's state and its
+   * last run and carries no `schedule` at all, so the fallback in
+   * {@link schedulePhrase} pointing at it would send the person approving the
+   * plan to a field that is not there. Listing a kind's id and reporting its
+   * schedule are two different promises, and only the first is what `listedBy`
+   * makes.
+   */
+  cronFieldsListedBy: string | null;
   /** The middleware method the plan's read step names. */
   readMethod: string;
   /** The middleware method the plan's mutation step names. */
@@ -1411,14 +1424,25 @@ const NONE_REPORTED = '(the system reported none)';
  * A schedule this tool does not render in words is stated as exactly that,
  * never as one the system reported none of: `describeSchedule` answers null for
  * both a missing field and a shape it will not put into English, and the two
- * are a limit of this tool rather than a task without a schedule. The listing
- * tool reports the cron fields exactly either way, so the caller is pointed at
- * it.
+ * are a limit of this tool rather than a task without a schedule.
+ *
+ * Where a tool here does report the cron fields exactly, the caller is pointed
+ * at it — and that is {@link TaskKind.cronFieldsListedBy} rather than
+ * {@link TaskKind.listedBy}, because for `replication` no tool does. A pointer
+ * naming a tool that answers nothing about the schedule is worse than no
+ * pointer: it reads as the exact account being one call away, and the approver
+ * who makes that call finds no such field and cannot tell a tool that omits it
+ * from a task that has none.
  */
 function schedulePhrase(spec: TaskKind, row: Record<string, unknown>): string {
   const schedule = taskSchedule(row);
   const words = schedule === null ? null : describeSchedule(schedule);
-  return `schedule ${words ?? `(not rendered in words here; \`${spec.listedBy}\` reports its cron fields)`}`;
+  if (words !== null) return `schedule ${words}`;
+  return `schedule ${
+    spec.cronFieldsListedBy === null
+      ? '(not rendered in words here, and no tool in this catalog reports its cron fields)'
+      : `(not rendered in words here; \`${spec.cronFieldsListedBy}\` reports its cron fields)`
+  }`;
 }
 
 /**
@@ -1452,6 +1476,7 @@ const TASK_KINDS: TaskKind[] = [
     kind: 'periodic_snapshot',
     noun: 'periodic snapshot task',
     listedBy: 'snapshot_tasks_list',
+    cronFieldsListedBy: 'snapshot_tasks_list',
     readMethod: 'pool.snapshottask.query',
     updateMethod: 'pool.snapshottask.update',
     read: (ctx, id) =>
@@ -1464,6 +1489,7 @@ const TASK_KINDS: TaskKind[] = [
     kind: 'cloud_sync',
     noun: 'cloud sync task',
     listedBy: 'cloudsync_tasks_list',
+    cronFieldsListedBy: 'cloudsync_tasks_list',
     readMethod: 'cloudsync.query',
     updateMethod: 'cloudsync.update',
     read: (ctx, id) =>
@@ -1480,6 +1506,9 @@ const TASK_KINDS: TaskKind[] = [
     kind: 'replication',
     noun: 'replication task',
     listedBy: 'replication_status',
+    // The one kind whose listing tool reports no schedule: `replication_status`
+    // answers what the task's last run did, not when the next one is due.
+    cronFieldsListedBy: null,
     readMethod: 'replication.query',
     updateMethod: 'replication.update',
     read: (ctx, id) =>
@@ -1495,6 +1524,7 @@ const TASK_KINDS: TaskKind[] = [
     kind: 'cron',
     noun: 'cron job',
     listedBy: 'automated_tasks_list',
+    cronFieldsListedBy: 'automated_tasks_list',
     readMethod: 'cronjob.query',
     updateMethod: 'cronjob.update',
     read: (ctx, id) =>
@@ -1515,6 +1545,7 @@ const TASK_KINDS: TaskKind[] = [
     kind: 'rsync',
     noun: 'rsync task',
     listedBy: 'automated_tasks_list',
+    cronFieldsListedBy: 'automated_tasks_list',
     readMethod: 'rsynctask.query',
     updateMethod: 'rsynctask.update',
     read: (ctx, id) =>
@@ -1534,6 +1565,7 @@ const TASK_KINDS: TaskKind[] = [
     kind: 'cloud_backup',
     noun: 'cloud backup task',
     listedBy: 'automated_tasks_list',
+    cronFieldsListedBy: 'automated_tasks_list',
     readMethod: 'cloud_backup.query',
     updateMethod: 'cloud_backup.update',
     read: (ctx, id) =>
@@ -1681,8 +1713,11 @@ export const scheduledTaskSetEnabled: MutatingTool = {
     '`previously_enabled` is the task\'s state as read immediately before the ' +
     'call. `resulting_enabled` is the state read back off the response the ' +
     'update itself answered with, which is the updated task. `changed` is true ' +
-    'where those two disagree and false where they are the same — so false is ' +
-    '"it was already in that state", not "the call failed". ALL THREE OF ' +
+    'where those two disagree and false where they are the same, WHICH IS TWO ' +
+    'OUTCOMES AND NOT ONE: either the task was already in the requested state, ' +
+    'or the call did not apply and left it in the other one. `confirmed` is ' +
+    'what tells those two apart, and `changed` must not be read without it. ' +
+    'ALL THREE OF ' +
     '`previously_enabled`, `resulting_enabled` AND `changed` ARE NULL WHERE ' +
     'THE STATE BEHIND THEM COULD NOT BE ESTABLISHED, WHICH IS NOT "NOTHING ' +
     'CHANGED", and `changed` is null whenever either of the other two is. ' +

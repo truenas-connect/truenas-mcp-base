@@ -164,6 +164,17 @@ describe('scheduled_task_set_enabled', () => {
     expect(description).toContain('ONLY THE `enabled` FIELD IS SENT');
   });
 
+  it('does not let `changed: false` claim the task was already in the requested state', () => {
+    // `changed` compares the two READINGS, so false covers the unapplied call
+    // as well as the no-op — the case at "does not report success when the
+    // response disagrees with the request" below. A description partitioning it
+    // on `changed` alone reads a still-enabled backup task as already off.
+    const description = scheduledTaskSetEnabled.description;
+    expect(description).toContain('WHICH IS TWO OUTCOMES AND NOT ONE');
+    expect(description).toContain('the call did not apply');
+    expect(description).toContain('`changed` must not be read without it');
+  });
+
   it('normalizes args: keeps the three and drops unknown keys', () => {
     expect(
       scheduledTaskSetEnabled.normalizeArgs?.({
@@ -500,6 +511,19 @@ describe('scheduled_task_set_enabled', () => {
       const { ctx } = system(cloudSync, [{ ...cloudSync.row, schedule: null }]);
       const [, mutation] = await scheduledTaskSetEnabled.plan(ctx, off(cloudSync));
       expect(mutation.description).toContain('schedule (not rendered in words here');
+    });
+
+    it('points at no tool for a replication task, because none reports its cron fields', async () => {
+      // `replication_status` lists the id this tool takes and reports no
+      // `schedule` whatever, so the pointer the other five kinds carry would
+      // send the approver to a field that is not there.
+      const replication = kinds[2];
+      const { ctx } = system(replication, [{ ...replication.row, schedule: null }]);
+      const [, mutation] = await scheduledTaskSetEnabled.plan(ctx, off(replication));
+      expect(mutation.description).toContain(
+        'schedule (not rendered in words here, and no tool in this catalog reports its cron fields)',
+      );
+      expect(mutation.description).not.toContain('`replication_status` reports its cron fields');
     });
 
     it("renders a periodic snapshot task's daily window, which only it carries", async () => {
