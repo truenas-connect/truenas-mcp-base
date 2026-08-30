@@ -362,13 +362,20 @@ export const networkInterfaces: ReadOnlyTool = {
  * and nothing configured, and a system whose configuration has not been applied
  * has the reverse.
  *
- * The fourth read is what says whether the answer is settled at all. TrueNAS
- * applies a network change behind a commit-and-confirm timer, so an uncommitted
- * change REVERTS on its own if nobody confirms it — and a caller told only what
- * is configured will describe a configuration that will not exist in a few
- * minutes. `interface.has_pending_changes` answers that yes/no for the SYSTEM
- * and names no interface, so this reports it as one field over the whole result
- * rather than per gateway or per nameserver.
+ * The fourth read is what says whether the answer is settled at all. A network
+ * change on TrueNAS is saved before it is applied, and applying it starts a
+ * rollback timer that puts it back unless somebody confirms it — so a pending
+ * change is one that either has not taken effect or is about to be undone, and
+ * a caller told only what is configured will describe a configuration that will
+ * not exist in a few minutes.
+ *
+ * `interface.has_pending_changes` answers yes/no for the SYSTEM and takes no
+ * argument, so this reports it as one field over the whole result rather than
+ * per gateway or per nameserver. It is also the whole of what it answers: which
+ * of the two states above a pending change is in is `interface.checkin_waiting`
+ * and is a second read this tool does not make, so the description promises
+ * neither it nor how long is left — the pair either would need is what makes
+ * that a tool of its own rather than a field here.
  *
  * That comparison is what distinguishes an inherited value from a configured
  * one, rather than a field on the configuration saying so. The client declares
@@ -605,12 +612,17 @@ export const networkConfig: ReadOnlyTool = {
     'themselves, their links and their addresses, and neither tool reports ' +
     'the other. `changes_pending` is whether this system has NETWORK CHANGES ' +
     'THAT HAVE NOT BEEN COMMITTED: true means everything else reported here ' +
-    'is PROVISIONAL and REVERTS ON ITS OWN unless it is confirmed, false ' +
-    'means none is pending and what is reported is what the system is ' +
-    'keeping, and NULL MEANS THE READ DID NOT COMPLETE — a null here is never ' +
-    '"none pending". It answers for the SYSTEM, and does not say WHICH ' +
-    'INTERFACE a pending change is on, WHAT the change is, or HOW LONG is ' +
-    'left before it reverts. Wherever the system can say both, a value is reported from ' +
+    'is PROVISIONAL — a pending change has NOT been permanently applied, and ' +
+    'ONCE IT IS APPLIED IT REVERTS ON ITS OWN unless it is confirmed within ' +
+    "the system's rollback window. False means none is pending and what is " +
+    'reported is what the system is keeping. NULL MEANS THE COMMIT STATE ' +
+    'COULD NOT BE READ — either the read did not complete, in which case ' +
+    '`failures` names `changes_pending`, or it completed and answered ' +
+    'something other than a yes/no, in which case it does not; A NULL IS ' +
+    'NEVER "none pending" either way. It answers for the SYSTEM, and does not ' +
+    'say WHICH INTERFACE a pending change is on, WHAT the change is, WHETHER ' +
+    'it has been applied yet, or HOW LONG is left before it reverts. ' +
+    'Wherever the system can say both, a value is reported from ' +
     'BOTH SIDES: what is CONFIGURED on this system, and what is IN EFFECT ' +
     'right now. The two differ in both directions — a system addressed by ' +
     'DHCP has a gateway and nameservers in effect with nothing configured, ' +
@@ -672,7 +684,7 @@ export const networkConfig: ReadOnlyTool = {
   async handler({ system }) {
     // Every read is issued before any is awaited, so none waits on another.
     // Only the configuration is allowed to fail the tool: it is the answer,
-    // and the other two sharpen it.
+    // and the other three qualify it.
     const [config, summary, routes, pending] = await Promise.all([
       firstValueFrom(system.client.api.call('network.configuration.config')),
       attempt('effective_values', () =>
