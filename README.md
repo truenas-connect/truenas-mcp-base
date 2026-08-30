@@ -35,12 +35,17 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `system_health_report`, `fleet_compliance_report`, `fleet_health_rollup`.
   Mutating family, all of them two-phase plan/confirm and all
   `destructiveness: 'reversible'`: `snapshots_create`, `alerts_dismiss`,
-  `alerts_restore`, `scheduled_task_set_enabled`, `cloudsync_run` — the last of
-  these the only one that starts a background job, which it watches for a
-  bounded time and then reports on rather than waiting out. `destructiveness`
+  `alerts_restore`, `scheduled_task_set_enabled`, `cloudsync_run`,
+  `automated_task_set_enabled` — `cloudsync_run` the only one that starts a
+  background job, which it watches for a bounded time and then reports on
+  rather than waiting out. `destructiveness`
   is about a tool's own operation and not about the data that operation acts
   on: `cloudsync_run` starts a task whose own `transfer_mode` may delete data
   for good, which its description and its plan state and this field does not.
+  The last two switch a task on or off between them and neither covers the
+  other's kinds: `scheduled_task_set_enabled` takes the six that run on a
+  schedule, and `automated_task_set_enabled` the init/shutdown scripts, which
+  run at a point in the system's lifecycle instead.
 - **System registry** — 1..N named systems, each owning its own
   `@truenas/api-client` instance and credentials; `systems` selector
   (name / list / `all`, defaulting when one system is registered).

@@ -59,6 +59,12 @@ import {
  * on: it starts one of the tasks `cloudsync_tasks_list` reports, and its plan
  * names that task in the terms that listing already uses — description, path,
  * direction, the remote end, and the credential by name and id.
+ *
+ * `automated_task_set_enabled` is the third, and it exists because the tool
+ * above it deliberately refuses a kind: an init/shutdown script is not
+ * scheduled, so `scheduled_task_set_enabled`'s name cannot carry it. The two
+ * together are what makes every `enabled` in this family's listings actionable;
+ * neither name covers what the other does, and each description says so.
  */
 
 /**
@@ -2337,6 +2343,325 @@ export const cloudsyncRun: MutatingTool = {
       // so the finish time follows it and cannot contradict it. The listings
       // keep reading the set: none of them carries an `ended` to disagree with.
       finished_at: ended ? isoOrNull(jobMillis(record?.time_finished)) : null,
+    };
+  },
+};
+
+/**
+ * `automated_task_set_enabled`: switching one init/shutdown script on or off,
+ * and the other half of {@link scheduledTaskSetEnabled}.
+ *
+ * THE NAME IS THE DECISION HERE, and it is the one thing about this tool worth
+ * arguing over. `scheduled_task_set_enabled` covers the six kinds that run on a
+ * schedule and refuses this one because its own name promises a schedule an
+ * init/shutdown script does not have (#121); the kind it refuses then needs a
+ * name that claims no schedule, and `automated_task_set_enabled` is the one
+ * that matches `automated_tasks_list`, which is the tool these ids come from.
+ *
+ * WHAT THAT NAME COSTS, STATED RATHER THAN GLOSSED. `automated_tasks_list` has
+ * FOUR sections and this tool acts on ONE of them: a cron job, an rsync task
+ * and a cloud backup task are all listed there, are all automated tasks by any
+ * ordinary reading, and are all switched by the OTHER tool. So the name is
+ * broader than the tool, which is the house's most common review finding —
+ * `storage_scrub_history` promising history the data cannot hold — pointed at a
+ * tool name instead of a field. Three things carry that weight instead of the
+ * name, and all three are load-bearing:
+ *
+ * - The description says outright, first, which of the four sections this
+ *   takes ids from and which tool takes the other three.
+ * - `id` is documented as coming from `init_shutdown_scripts` specifically.
+ *   Task ids are per-table integers, so a cron job's id 3 is also an
+ *   init/shutdown script's id 3 and this tool cannot tell that it was handed
+ *   the wrong one — there is no discriminator to require, because there is only
+ *   one kind here.
+ * - The plan therefore has to be recognisable, which is what actually stops a
+ *   mis-aimed id: an approver reading "the init/shutdown script with comment
+ *   ..." sees a thing that is not the cron job they meant, and refuses.
+ *
+ * The alternative name — `init_shutdown_script_set_enabled` — says exactly what
+ * the tool does and would need renaming the day a second non-scheduled kind
+ * arrives. The ticket chose breadth; this comment is here so the next reader
+ * knows it was a choice and what pays for it.
+ *
+ * ONLY `enabled` IS SENT, for {@link scheduledTaskSetEnabled}'s reason:
+ * `initshutdownscript.update` takes a partial `InitShutdownScriptUpdate`, so
+ * round-tripping more of the row than was asked for can revert a concurrent
+ * edit — and that type declares `command`, `script`, `when` and `timeout`,
+ * every one of which this tool has no business writing.
+ *
+ * NO SCHEDULE IS RENDERED AND NONE MAY BE INVENTED. {@link describeTask} ends
+ * every task with a schedule phrase; this one cannot, because there is no cron
+ * record to read and a phrase in its place would be this tool's own fiction
+ * about when the work happens (#97). What replaces it is the lifecycle point
+ * the script actually carries, and a pointer at the tool that says what each
+ * point means.
+ */
+
+/**
+ * How the plan states when in the system's lifecycle a script runs, or that the
+ * system reported nothing this tool could read.
+ *
+ * The three values are NOT glossed here. `automated_tasks_list`'s description
+ * already says what `PREINIT`, `POSTINIT` and `SHUTDOWN` name, and a second
+ * account of them written into a plan is a second opinion that can drift from
+ * the first — the same reason {@link TRANSFER_ENDS} restates
+ * `cloudsync_tasks_list`'s reading of `direction` rather than deriving its own.
+ * The value is passed through as the system spelled it and the approver is
+ * pointed at the tool that describes it, which is {@link schedulePhrase}'s move
+ * for a schedule it will not put into English.
+ *
+ * A `when` this tool could not read says exactly that. It is not defaulted to
+ * startup: an approver told nothing would read the silence as the script
+ * running at boot, and a script that runs on the way DOWN is the one where
+ * switching it off at the wrong moment matters most.
+ */
+function lifecycleSentence(row: Record<string, unknown>): string {
+  const when = textOrNull(row['when']);
+  const point =
+    when === null
+      ? 'The system reported no lifecycle point for it this tool could read'
+      : `It runs at ${when}`;
+  return (
+    `${point} — an init/shutdown script runs at a point in the system's ` +
+    'lifecycle rather than at a time of day, has no schedule at all, and ' +
+    '`automated_tasks_list` is where each lifecycle point is described.'
+  );
+}
+
+/**
+ * The script in the terms `automated_tasks_list` reports it, for the human
+ * approving the plan.
+ *
+ * NEITHER `command` NOR `script` IS AMONG THESE, which is #121's call for a
+ * cron job's `command` reaching both fields of the one entry that has them: a
+ * `command` is whatever an operator typed and can hold a password someone
+ * inlined, a `script` is a path this repository never reads the contents of,
+ * and a plan is shown to a person and then recorded. `comment`, `when` and
+ * `type` identify the entry without repeating either. `type` is carried because
+ * it is what says WHICH of the two is in use, which is the part of them an
+ * approver needs and the part that holds no secret.
+ *
+ * A label the system named no value for is stated as {@link NONE_REPORTED}
+ * rather than dropped, as {@link describeTask}'s are: a plan silently omitting
+ * the comment reads as a script without one, and the approver cannot tell
+ * which.
+ */
+function describeInitShutdownScript(row: Record<string, unknown>, id: number): string {
+  const labelled: [string, string | null][] = [
+    // The middleware's own name for the free-text label on these; there is no
+    // `description` on the row, exactly as `mapInitShutdownScript` records.
+    ['comment', textOrNull(row['comment'])],
+    ['when', textOrNull(row['when'])],
+    ['type', textOrNull(row['type'])],
+  ];
+  const named = labelled.map(
+    ([name, value]) => `${name} ${value === null ? NONE_REPORTED : `"${value}"`}`,
+  );
+  return `the init/shutdown script with ${named.join(', ')} (id ${id})`;
+}
+
+/**
+ * The caller's two arguments, or the error naming what is wrong with them.
+ *
+ * Strict on both, as {@link parseSwitch} is and word for word for the same
+ * reason: coercing `"false"` to true would switch ON a script the caller asked
+ * to switch off, which is not a narrower answer to the question asked but the
+ * opposite one. There is no `kind` to resolve — this tool has one — so what
+ * {@link parseSwitch} does in three checks this does in two.
+ */
+function parseScriptSwitch(args: Record<string, unknown>): { id: number; enabled: boolean } {
+  const id = args['id'];
+  if (typeof id !== 'number' || !Number.isInteger(id)) {
+    throw new Error('"id" is required and must be a whole number');
+  }
+  const enabled = args['enabled'];
+  if (typeof enabled !== 'boolean') {
+    throw new Error('"enabled" is required and must be a boolean');
+  }
+  return { id, enabled };
+}
+
+/** Where the ids this tool takes come from, in the one wording used throughout. */
+const SCRIPT_IDS_FROM = 'the `init_shutdown_scripts` section of `automated_tasks_list`';
+
+export const automatedTaskSetEnabled: MutatingTool = {
+  name: 'automated_task_set_enabled',
+  description:
+    'Turns one init/shutdown script on this TrueNAS system on or off, and ' +
+    'changes nothing else about it. Two-phase: called without a ' +
+    'confirmation_token it returns a plan for user approval; called with one it ' +
+    'switches the script. THIS TOOL ACTS ON INIT/SHUTDOWN SCRIPTS AND ON ' +
+    'NOTHING ELSE. `automated_tasks_list` has four sections and `id` HERE COMES ' +
+    'FROM ITS `init_shutdown_scripts` SECTION ONLY: a cron job, an rsync task ' +
+    'or a cloud backup task is switched by `scheduled_task_set_enabled`, with ' +
+    'its `kind` set to `cron`, `rsync` or `cloud_backup`, and that tool also ' +
+    'covers periodic snapshot, cloud sync and replication tasks. THIS TOOL ' +
+    'CANNOT TELL THAT IT WAS HANDED AN id FROM THE WRONG SECTION: task ids are ' +
+    'per-table integers, so id 3 exists under every kind and names a different ' +
+    'task under each, and there is no `kind` argument here because this tool ' +
+    'covers exactly one. CHECK THE PLAN NAMES THE ENTRY YOU MEANT before ' +
+    'approving it. It exists separately because an init/shutdown script IS NOT ' +
+    'SCHEDULED — it runs at a point in the system\'s lifecycle, which `when` ' +
+    'names — so a tool named for scheduled tasks cannot carry it. `enabled` is ' +
+    'the state to move the script to, true or false, and is required: there is ' +
+    'no toggle, because a toggle acts on a state read after the plan was ' +
+    'approved. ONLY THE `enabled` FIELD IS SENT. The script\'s type, its ' +
+    'command or path, its lifecycle point and its timeout are left exactly as ' +
+    'they are, and this tool cannot change them, cannot create or delete a ' +
+    'script, and cannot run one now. THE PLAN NAMES THE SCRIPT IN HUMAN TERMS ' +
+    '— its `comment`, its `when` and its `type` — beside the id, so that what ' +
+    'is approved is recognisable. NEITHER THE `command` NOR THE `script` PATH ' +
+    'IS REPEATED IN THE PLAN: a command is whatever an operator typed and can ' +
+    'contain a secret, and a script path is not read; `automated_tasks_list` is ' +
+    'where both are reported. NO SCHEDULE IS STATED ANYWHERE, because there is ' +
+    'none — `automated_tasks_list` describes what each lifecycle point means. ' +
+    'PLANNING AGAINST AN id NO INIT/SHUTDOWN SCRIPT HAS FAILS, naming the id ' +
+    'and the section its ids come from — so an approved plan is always a plan ' +
+    'about a script that existed when it was made, and a failure here is very ' +
+    'often an id belonging to one of the other three sections rather than a ' +
+    'missing script. SWITCHING A SCRIPT TO THE STATE IT IS ALREADY IN IS NOT AN ' +
+    'ERROR, and the result says which of the two happened. `requested_enabled` ' +
+    'is what was asked for. `previously_enabled` is the script\'s state as read ' +
+    'immediately before the call. `resulting_enabled` is the state read back ' +
+    'off the response the update itself answered with, which is the updated ' +
+    'script. `changed` is true where those two disagree and false where they ' +
+    'are the same, WHICH IS TWO OUTCOMES AND NOT ONE: either the script was ' +
+    'already in the requested state, or the call did not apply and left it in ' +
+    'the other one. `confirmed` is what tells those two apart, and `changed` ' +
+    'must not be read without it. ALL THREE OF `previously_enabled`, ' +
+    '`resulting_enabled` AND `changed` ARE NULL WHERE THE STATE BEHIND THEM ' +
+    'COULD NOT BE ESTABLISHED, WHICH IS NOT "NOTHING CHANGED", and `changed` is ' +
+    'null whenever either of the other two is. `confirmed` is whether ' +
+    '`resulting_enabled` is what was requested: true is the system reporting ' +
+    'back the state that was asked for, FALSE IS THE SYSTEM REPORTING THE OTHER ' +
+    'STATE AND IS NOT A SUCCESS — the call did not reject and the script is not ' +
+    'in the requested state — and null is a response that stated no `enabled` ' +
+    'this tool could read, under which nothing here establishes what the script ' +
+    'is now set to. `lookup` says what the read before the call did: `FOUND` is ' +
+    'a read that named this script, `NOT_FOUND` a read that completed and ' +
+    'listed no init/shutdown script with that id (it was deleted between the ' +
+    'plan and the confirmation), and `UNREADABLE` a read that failed, with ' +
+    '`lookup_error` naming why. IT HAS THREE VALUES AND `previously_enabled` ' +
+    'HAS FOUR CAUSES FOR ITS NULL: the two above, and ALSO `FOUND` where the ' +
+    'script stated no `enabled` this tool could read as a boolean. So `lookup` ' +
+    'alone does not tell them apart, and `FOUND` beside a null ' +
+    '`previously_enabled` is that fourth case. THE UPDATE IS ATTEMPTED IN ALL ' +
+    'THREE CASES, because what runs must be what was approved. WHAT A DISABLED ' +
+    'SCRIPT COSTS IS NOT VISIBLE UNTIL THE SYSTEM NEXT REACHES THAT POINT IN ' +
+    'ITS LIFECYCLE: a `PREINIT` or `POSTINIT` script switched off announces ' +
+    'nothing until the next boot, and a `SHUTDOWN` one not until the system is ' +
+    'going down. `automated_tasks_list` reports it as `enabled: false` and ' +
+    'nothing raises an alert. This tool is the exact inverse of itself with ' +
+    '`enabled` flipped.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'integer',
+        description:
+          "The init/shutdown script's `id` as the `init_shutdown_scripts` " +
+          'section of `automated_tasks_list` reports it, on the system being ' +
+          'targeted. It is unique only within that section: the same integer ' +
+          'names a different task in the other three, and this tool cannot ' +
+          'tell the difference.',
+      },
+      enabled: {
+        type: 'boolean',
+        description:
+          'The state to move the script to: true switches it on, false ' +
+          'switches it off. Required — this is not a toggle.',
+      },
+    },
+    required: ['id', 'enabled'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // The operation is a boolean on one row and the inverse call puts it back, so
+  // this is the plain case `reversible` was written for — the distinction
+  // `Destructiveness` draws at its own declaration, between a tool that authors
+  // a destruction and one that only triggers an operator's, does not arise
+  // here. What the script itself does when it next runs is the operator's, and
+  // this tool neither reads nor changes it.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const { id, enabled } = parseScriptSwitch(rawArgs);
+    return { id, enabled };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const { id, enabled } = parseScriptSwitch(rawArgs);
+    const rows = await firstValueFrom(
+      ctx.system.client.api.query('initshutdownscript.query', [['id', '=', id]]),
+    );
+    const row = rowWithId(rows, id);
+    // Naming where the ids come from matters more here than it does for the
+    // six kinds: there is no `kind` to have got wrong, so a caller that reaches
+    // this failure has most likely handed over an id from one of the other
+    // three sections of the same listing.
+    if (row === null) {
+      throw new Error(
+        `No init/shutdown script with id ${id} on this system — the ids this ` +
+          `tool takes come from ${SCRIPT_IDS_FROM}`,
+      );
+    }
+    return [
+      {
+        method: 'initshutdownscript.query',
+        params: readParams(id),
+        description:
+          `Read this system's init/shutdown script with id ${id}, to report whether it was ` +
+          'already in the state this call moves it to. Changes nothing.',
+      },
+      {
+        method: 'initshutdownscript.update',
+        params: [id, { enabled }],
+        description:
+          `${enabled ? 'Enable' : 'Disable'} ${describeInitShutdownScript(row, id)}. ` +
+          `${lifecycleSentence(row)} Only the enabled flag is sent, and neither the ` +
+          "script's command nor its path is repeated here. " +
+          `${switchSentence(booleanOrNull(row['enabled']), enabled)}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const { id, enabled } = parseScriptSwitch(rawArgs);
+    const api = ctx.system.client.api;
+    // Caught rather than thrown, as {@link scheduledTaskSetEnabled}'s is: this
+    // read exists to describe the outcome, and letting it fail the call would
+    // lose an approval the user has already given for a mutation that is still
+    // safe to make.
+    let row: Record<string, unknown> | null = null;
+    let lookupError: string | null = null;
+    try {
+      row = rowWithId(
+        await firstValueFrom(api.query('initshutdownscript.query', [['id', '=', id]])),
+        id,
+      );
+    } catch (reason) {
+      lookupError = errorText(reason);
+    }
+    // Unconditional, whatever the read said. Skipping the update for a script
+    // the read no longer lists would be `execute` branching on state read at
+    // execution time, which is what the confirmation token cannot bind.
+    const updated = await firstValueFrom(
+      api.call('initshutdownscript.update', [id, { enabled }]),
+    );
+    const previous = row === null ? null : booleanOrNull(row['enabled']);
+    // The method answers with the updated script, so what it says about
+    // `enabled` is the state that actually resulted — read back through the
+    // same guard rather than echoing what was asked for.
+    const resulting = booleanOrNull(recordOrNull(updated)?.['enabled']);
+    return {
+      id,
+      requested_enabled: enabled,
+      lookup: lookupError !== null ? 'UNREADABLE' : row === null ? 'NOT_FOUND' : 'FOUND',
+      lookup_error: lookupError,
+      previously_enabled: previous,
+      resulting_enabled: resulting,
+      // Both readings or nothing, for the reason its sibling gives: a `changed`
+      // derived from the request rather than from the response would report a
+      // call the system did not apply as having changed something.
+      changed: previous === null || resulting === null ? null : previous !== resulting,
+      confirmed: resulting === null ? null : resulting === enabled,
     };
   },
 };
