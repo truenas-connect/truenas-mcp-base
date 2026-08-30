@@ -50,6 +50,15 @@ import { booleanOrNull, errorText, recordOrNull, textOrNull } from '@/tools/comm
  * claim token, so naming the output fields is what keeps them out of the tool
  * result and so out of the conversation, exactly as in `disks.ts`. Trimming is
  * the point of the tool rather than a nicety, on both counts.
+ *
+ * The query also names those fields, so the size job now starts at the wire
+ * rather than at the mapping (#115). THAT DOES NOT RETIRE THE ALLOWLIST, and
+ * the reason is in the client's own types: middleware honours `select` on its
+ * CURRENT api version, and a client talking to a newer appliance over an older
+ * version gets every non-required field's default filled back in. So a
+ * projected row can arrive padded — with `config` on it — and the allowlist is
+ * what keeps it out of the result either way. `select` narrows the read; only
+ * the mapping bounds what a caller sees.
  */
 
 export const appsList: ReadOnlyTool = {
@@ -59,27 +68,73 @@ export const appsList: ReadOnlyTool = {
     'running state, and whether an update is waiting. Apps that are not ' +
     'running are included — `state` distinguishes STOPPED from CRASHED, and ' +
     'from the transient DEPLOYING and STOPPING. `upgrade_available` means a ' +
-    'newer catalog version exists (`latest_version` names it, and is null ' +
-    'when the system does not know of one); `image_updates_available` is the ' +
-    'separate question of whether the containers the app already runs have ' +
-    'newer images, which is the only kind of update a custom app can have.',
+    'newer catalog version exists (`latest_version` names it); ' +
+    '`image_updates_available` is the separate question of whether the ' +
+    'containers the app already runs have newer images, which is the only ' +
+    'kind of update a custom app can have. EVERY FIELD IS NULL WHERE THE ' +
+    'SYSTEM REPORTED NO VALUE FOR IT, and A NULL IS NEVER TO BE READ AS THE ' +
+    'NEGATIVE. A null `upgrade_available` or `image_updates_available` means ' +
+    'NOTHING WAS ESTABLISHED about that kind of update; it is not the claim ' +
+    'that none is waiting, which is FALSE. `latest_version` is null both ' +
+    'where the system knows of no newer version and where it reported none, ' +
+    'and this tool does not tell those two apart. A null `name`, `version` ' +
+    'or `state` is the system having reported no value under that name, and ' +
+    'a null `state` is NOT an app that is stopped. An app is never left out ' +
+    'of the list for carrying one, so a null never shortens this list. THERE ' +
+    'IS NO PARTIAL ANSWER HERE: the listing either succeeds or this tool ' +
+    'fails, so a null is always about one field of one app rather than about ' +
+    'a read that did not happen.',
   inputSchema: { type: 'object', properties: {} },
   requiredRole: Role.ReadOnly,
   mutating: false,
   async handler({ system }) {
-    const apps = await firstValueFrom(system.client.api.query('app.query'));
+    // The options object is written INLINE, as the filter in
+    // `reporting_app_vm_usage` is: the client infers the result type from the
+    // options *literal*, so a `select` hoisted to a `const` widens and the rows
+    // degrade from `Pick<AppEntry, …>` to `Partial<AppEntry>`. Imprecise rather
+    // than unsound, but it would stop the compiler catching a field this
+    // mapping reads and the select forgot.
+    const apps = await firstValueFrom(
+      system.client.api.query('app.query', [], {
+        select: [
+          'name',
+          'version',
+          'latest_version',
+          'state',
+          'upgrade_available',
+          'image_updates_available',
+        ],
+      }),
+    );
     return apps.map((app) => ({
-      name: app.name,
+      // `?? null` on every field, because a projection is the one read where a
+      // field this tool names can be absent from the row rather than null on
+      // it: middleware HONOURING the select returns those fields and no
+      // others, so a name that is not a field on the release answering — one a
+      // later release drops, or renames — comes back as no key at all. Not
+      // honouring it is the opposite failure and needs no fallback: an
+      // unrecognised parameter is dropped rather than refused, and the row
+      // arrives whole.
+      //
+      // `undefined` serializes to no key, so without the fallback a caller
+      // would get an object missing fields the description promises instead of
+      // nulls it can see are absent — the reason `boot.ts` spells out an
+      // unread section's fields rather than leaving them off.
+      //
+      // It is `?? null` and not `textOrNull`: this ticket is bandwidth, and a
+      // guard would additionally change what a malformed value reports, which
+      // is a change to what the tool says.
+      name: app.name ?? null,
       // The catalog version of the app as installed. `human_version` is the
       // middleware's display string for the same thing and is deliberately
       // not surfaced: it splices the upstream software's version onto this
       // one, so the two read as disagreeing, and only `version` is comparable
       // with `latest_version`.
-      version: app.version,
-      latest_version: app.latest_version,
-      state: app.state,
-      upgrade_available: app.upgrade_available,
-      image_updates_available: app.image_updates_available,
+      version: app.version ?? null,
+      latest_version: app.latest_version ?? null,
+      state: app.state ?? null,
+      upgrade_available: app.upgrade_available ?? null,
+      image_updates_available: app.image_updates_available ?? null,
     }));
   },
 };
@@ -236,8 +291,20 @@ export const appEngineStatus: ReadOnlyTool = {
   },
 };
 
-/** An application as `app.query` reports it. */
-type AppEntry = ApiSurface['call']['app.query']['entity'];
+/**
+ * An application as `app.query` reports it, narrowed to the fields
+ * {@link candidateOf} reads — which are the fields the call's `select` names.
+ *
+ * The two are kept in step by the compiler rather than by hand: the handler
+ * passes these rows straight to `candidateOf`, so a `select` that stops naming
+ * one of them stops type-checking. The other direction — a `select` naming more
+ * than this reads — is wasted bytes rather than a wrong answer, and nothing
+ * catches it.
+ */
+type AppEntry = Pick<
+  ApiSurface['call']['app.query']['entity'],
+  'name' | 'version' | 'human_version' | 'upgrade_available'
+>;
 
 /**
  * One application's waiting update, or the stated reason none was read.
@@ -426,7 +493,20 @@ export const appsUpdateSummary: ReadOnlyTool = {
   async handler({ system }) {
     let candidates: Candidate[];
     try {
-      const rows = await firstValueFrom(system.client.api.query('app.query'));
+      // Four fields, and NOT the six `apps_list` asks for. The lists overlap
+      // without either containing the other: `candidateOf` never reads
+      // `latest_version` or `image_updates_available` — the newest catalog
+      // version this tool reports comes from `app.upgrade_summary` rather than
+      // from the listing — and it does read `human_version`, which `apps_list`
+      // deliberately drops. A `select` shared between the two paths would ask
+      // each of them for fields it has no mapping for.
+      //
+      // Written inline for the reason `apps_list` gives above.
+      const rows = await firstValueFrom(
+        system.client.api.query('app.query', [], {
+          select: ['name', 'version', 'human_version', 'upgrade_available'],
+        }),
+      );
       if (!Array.isArray(rows)) return { unavailable: NOT_A_LIST, entries: null };
       // Chosen inside the `try` with the read that produced them, so a row that
       // cannot be reached into at all — a null or an undefined in the list — is

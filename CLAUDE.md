@@ -661,6 +661,51 @@ readable in the client, and **where two directories declare one field
 differently, a reduction that both shapes satisfy is worth more than a guard
 that matches the pinned one exactly.**
 
+### `select` narrows the read; only the allowlist bounds the result (#115)
+
+Every `app.query` call in `src/tools/` now passes a `select` naming the fields
+its mapping reads — six for `apps_list`, four for `apps_update_summary`, three
+for `reporting_app_vm_usage`. Three different lists on one method, because the
+list belongs to the CALL SITE's mapping rather than to the method: a shared one
+would ask each path for fields it has no mapping for, which is the cost this is
+removing.
+
+**It does not retire the allowlist, and reading it as a replacement is a
+credential-boundary regression.** The client's own types state why: middleware
+honours `select` on its CURRENT api version, and a client talking to a newer
+appliance over an older one gets the version-adaptation step filling in every
+non-required field's default — so a projected row comes back PADDED. Measured by
+the client's authors on a 27.0.0 appliance: over `/api/v26.0.0`, 25 of 44 query
+methods returned unrequested fields; over `/api/v27.0.0`, none did. The client's
+`MAX_SUPPORTED_VERSION` lags on purpose. An `app.query` row's `config` holds
+install-time values that routinely include an API key or a claim token, and
+padding can put it back on the wire. `select` is a bandwidth measure and the
+allowlist is the boundary; the second is not optional because the first is
+present.
+
+Two things that follow for any later projection:
+
+- **Write the options object INLINE.** The client infers the result type from
+  the options *literal* (`const O extends QueryListOptions<…>`), so a `select`
+  hoisted to a `const` widens and the rows degrade from `Pick<E, …>` to
+  `Partial<E>`. Imprecise rather than unsound — but the precision is what makes
+  the compiler catch a mapping reading a field the `select` forgot, which is the
+  only thing keeping the two in step. Same reason `reporting_app_vm_usage`
+  inlines its `virt.instance.query` filter.
+- **A projected field can be ABSENT from the row rather than null on it**, which
+  is a shape no unprojected read produces. `undefined` serializes to no key, so
+  a mapping that passes it through answers with an object missing fields the
+  description promises — see `boot.ts` on why an unread section spells its
+  fields out. `apps_list` uses `?? null` and not the `common.ts` guards on
+  purpose: the guards would additionally change what a malformed value reports,
+  and that is a change to what the tool says rather than to what it reads.
+
+**Confirm `select` against the declared type before relying on it, never against
+a passing test.** An unrecognised query parameter is dropped rather than refused,
+so a tool that silently received every field looks identical to one that worked.
+The confirmation here was `QueryOptions<T>` in the pinned client's
+`dist/index.d.ts`, reached through `DefaultApiDirectory`.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

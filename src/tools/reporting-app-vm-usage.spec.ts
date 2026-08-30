@@ -162,6 +162,39 @@ describe('reporting_app_vm_usage', () => {
     });
   });
 
+  it('asks the app listing for the three fields it reports, and nothing else', async () => {
+    // Neither figure this tool reports is readable from an app row, so an app
+    // contributes an identifier, a name and a state and nothing more — while
+    // the row it comes from is the bulkiest in the catalog. The other two
+    // listings are unprojected: a VM row's `status` and `devices` are read, and
+    // narrowing them is not this ticket's subject.
+    const fake = usageSystem();
+    await reported(fake);
+    expect(fake.query.mock.calls).toContainEqual([
+      'app.query',
+      [],
+      { select: ['id', 'name', 'state'] },
+    ]);
+  });
+
+  it('reads an app row carrying none of the projected fields as nulls, not as absent keys', async () => {
+    // A projection honoured against a release that does not carry one of the
+    // names — dropped or renamed since — arrives as a row without the key.
+    // The entry still has to answer with every field the description promises.
+    const [entry] = await entries({ apps: [{}], vms: [], instances: [] });
+    expect(entry).toEqual({
+      kind: 'app',
+      source: 'app',
+      id: null,
+      name: null,
+      state: null,
+      cpu_percent: null,
+      cpu_unavailable: expect.stringContaining('subscription'),
+      memory_used_bytes: null,
+      memory_unavailable: expect.stringContaining('subscription'),
+    });
+  });
+
   it('reads a running libvirt VM by its own id, so two VMs do not share one figure', async () => {
     const fake = usageSystem({
       apps: [],
