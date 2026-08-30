@@ -486,6 +486,20 @@ plain allowlist and no such list — the extra fields are the price of not being
 able to check, not a default. Null there means the record was not a record;
 empty means it was read and every key it carried is reported.
 
+**Over a LIST of such records that rule moves up a level and stops being the
+same rule.** `unreported_state_fields` is null where `states` was not a list at
+all, and its empty case covers two answers rather than one: every entry's keys
+were reported, and no entry was a record in the first place. It is a union
+across entries, so a key can be both reported for one entry and named because
+another did not report it. What follows is the part a description is most
+likely to overpromise: **an entry that could not be read is counted and leaves
+no other trace** — it names no key, adds no type, and neither list has a length
+that can be compared against the count to find it, because one holds distinct
+kinds and the other key names. Say that outright, or report a count of the
+unreadable entries and make a comparison true; offering the caller an
+arithmetic that does not work is the same defect as any other description
+promising more than the normalization delivers.
+
 ### A live-session tool is its own family, not a third tool in `shares.ts` (#98)
 
 `shares.ts` merges SMB and NFS into one list on the stated ground that a person

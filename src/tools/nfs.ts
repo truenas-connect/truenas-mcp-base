@@ -340,7 +340,8 @@ export const nfsClients: ReadOnlyTool = {
     'have not been checked against a live system. Nothing from either record ' +
     'is passed through: `unreported_info_fields` and `unreported_state_fields` ' +
     'name — by key name only, never by value — every key the records actually ' +
-    'carried WHOSE VALUE IS NOT REPORTED ABOVE, which covers a key this tool ' +
+    'carried WHOSE VALUE IS NOT REPORTED ABOVE, judged per record, which covers ' +
+    'a key this tool ' +
     'does not look for and equally a key it does look for whose value was not ' +
     'of the type it reads. IF THE NAMED FIELDS ARE ALL NULL AND THOSE LISTS ' +
     'ARE FULL, the values are in the records under the names listed and this ' +
@@ -353,10 +354,18 @@ export const nfsClients: ReadOnlyTool = {
     'that name. `unreported_info_fields` is null where `info` was not a record ' +
     'at all, and empty where it was read and every key it carried is reported. ' +
     '`unreported_state_fields` IS THE SAME DISTINCTION OVER A LIST AND NOT OVER ' +
-    'ONE RECORD: it is null where `states` was not a list, and otherwise names ' +
-    'the keys across every entry that was itself a record — an entry that was ' +
-    'not one names no key at all and is visible only as `state_count` ' +
-    'exceeding what `state_types` and this list account for. ' +
+    'ONE RECORD: it is null where `states` was not a list, and otherwise is the ' +
+    'union of the unreported keys of every entry that was itself a record. ' +
+    'Being a union, it names a key some entry did not report even where another ' +
+    'entry did — `type` is listed whenever any entry carried one this tool ' +
+    'could not read, whether or not `state_types` names a kind read from a ' +
+    'different entry. AN ENTRY THAT WAS NOT A RECORD AT ALL LEAVES NO TRACE ' +
+    'BEYOND BEING COUNTED: it names no key here, adds no type, and is not ' +
+    'distinguishable from an entry that was read. NEITHER LIST HAS A LENGTH ' +
+    'THAT CAN BE COMPARED AGAINST `state_count` — `state_types` holds distinct ' +
+    'kinds and this one holds key names, so several entries can answer one ' +
+    'type and one entry several keys — and this tool reports no count of the ' +
+    'entries it could not read. ' +
     '`nfsv3` AND `nfsv4` ARE NULL ' +
     'WHEN THAT VERSION COULD NOT BE READ and empty when it was read and no ' +
     'client was found — never the same answer. The two reads are independent, ' +
