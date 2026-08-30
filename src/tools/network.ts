@@ -356,26 +356,34 @@ export const networkInterfaces: ReadOnlyTool = {
  * holds what is CONFIGURED on this system; `network.general.summary` holds the
  * default routes and nameservers actually IN EFFECT; `staticroute.query` holds
  * the routes configured by hand; `interface.has_pending_changes` says whether
- * any of it is uncommitted. The first two are the same facts read from two
- * sides, and the difference between them is the question this tool exists to
- * answer: a system addressed by DHCP has a gateway and nameservers in effect
- * and nothing configured, and a system whose configuration has not been applied
- * has the reverse.
+ * an INTERFACE change is waiting to be committed. The first two are the same
+ * facts read from two sides, and the difference between them is the question
+ * this tool exists to answer: a system addressed by DHCP has a gateway and
+ * nameservers in effect and nothing configured, and a system whose
+ * configuration has not been applied has the reverse.
  *
- * The fourth read is what says whether the answer is settled at all. A network
- * change on TrueNAS is saved before it is applied, and applying it starts a
- * rollback timer that puts it back unless somebody confirms it — so a pending
- * change is one that either has not taken effect or is about to be undone, and
- * a caller told only what is configured will describe a configuration that will
- * not exist in a few minutes.
+ * The fourth read is the one whose subject is not this tool's, and the scope is
+ * the whole of why it is a warning rather than a verdict. An interface change on
+ * TrueNAS is saved before it is applied, and applying it starts a rollback timer
+ * that puts it back unless somebody confirms it — so a pending change is one
+ * that either has not taken effect or is about to be undone. What
+ * `interface.has_pending_changes` answers over is the staging area that
+ * `interface.create/update/delete` fill and `interface.checkin` clears:
+ * interfaces, aliases, bridges, VLANs and link aggregations, which is the
+ * subject of `network_interfaces`. Nothing reported HERE is staged that way —
+ * `network.configuration.config` and `staticroute.query` take effect on update
+ * — so a true is NOT a claim that the hostname, DNS, gateways or static routes
+ * beside it are provisional. It is worth reporting anyway because the
+ * `in_effect` side of this result is read off the running system, and rolling an
+ * interface change back moves which route and nameservers that is.
  *
- * `interface.has_pending_changes` answers yes/no for the SYSTEM and takes no
- * argument, so this reports it as one field over the whole result rather than
- * per gateway or per nameserver. It is also the whole of what it answers: which
- * of the two states above a pending change is in is `interface.checkin_waiting`
- * and is a second read this tool does not make, so the description promises
- * neither it nor how long is left — the pair either would need is what makes
- * that a tool of its own rather than a field here.
+ * It answers yes/no for the SYSTEM and takes no argument, so this reports it as
+ * one field over the whole result rather than per gateway or per nameserver. It
+ * is also the whole of what it answers: which of the two states above a pending
+ * change is in is `interface.checkin_waiting` and is a second read this tool
+ * does not make, so the description promises neither it nor how long is left —
+ * the pair either would need is what makes that a tool of its own rather than a
+ * field here.
  *
  * That comparison is what distinguishes an inherited value from a configured
  * one, rather than a field on the configuration saying so. The client declares
@@ -610,12 +618,19 @@ export const networkConfig: ReadOnlyTool = {
     'and the routes configured by hand. These are the settings OVER the ' +
     'interfaces; `network_interfaces` is what reports the interfaces ' +
     'themselves, their links and their addresses, and neither tool reports ' +
-    'the other. `changes_pending` is whether this system has NETWORK CHANGES ' +
-    'THAT HAVE NOT BEEN COMMITTED: true means everything else reported here ' +
-    'is PROVISIONAL — a pending change has NOT been permanently applied, and ' +
-    'ONCE IT IS APPLIED IT REVERTS ON ITS OWN unless it is confirmed within ' +
-    "the system's rollback window. False means none is pending and what is " +
-    'reported is what the system is keeping. NULL MEANS THE COMMIT STATE ' +
+    'the other. `changes_pending` is whether this system has an INTERFACE ' +
+    'CHANGE THAT HAS NOT BEEN COMMITTED — a change to an interface, an alias, ' +
+    'a bridge, a VLAN or a link aggregation, WHICH IS WHAT `network_interfaces` ' +
+    'REPORTS AND NOT WHAT THIS TOOL DOES. True means one is pending: it has ' +
+    'NOT been permanently applied, and ONCE IT IS APPLIED IT REVERTS ON ITS ' +
+    "OWN unless it is confirmed within the system's rollback window. IT SAYS " +
+    'NOTHING ABOUT WHETHER THE HOSTNAME, DOMAIN, DNS SERVERS, CONFIGURED ' +
+    'GATEWAYS OR STATIC ROUTES REPORTED HERE ARE COMMITTED — those are not ' +
+    'staged behind a commit, so a true MUST NOT be read as making them ' +
+    'provisional. What a pending interface change can move is the `in_effect` ' +
+    'side of this result, since rolling one back changes which default route ' +
+    'and nameservers the system is using. False means no interface change is ' +
+    'pending. NULL MEANS THE COMMIT STATE ' +
     'COULD NOT BE READ — either the read did not complete, in which case ' +
     '`failures` names `changes_pending`, or it completed and answered ' +
     'something other than a yes/no, in which case it does not; A NULL IS ' +
@@ -672,7 +687,8 @@ export const networkConfig: ReadOnlyTool = {
     'no value can be reported as `AUTOMATIC`, so a `STATIC` gateway or ' +
     'nameserver is still correct there while the absence of one is not ' +
     'evidence of anything, and when it names `changes_pending`, nothing can ' +
-    'be said about whether these settings are provisional. This tool reports settings as they are: it does ' +
+    'be said about whether an interface change is waiting to be committed. ' +
+    'This tool reports settings as they are: it does ' +
     'not change any network setting, and IT DOES NOT TEST whether a name ' +
     'resolves, a gateway answers or a host is reachable — a nameserver ' +
     'reported here is one the system is configured to use, not one confirmed ' +
@@ -703,12 +719,14 @@ export const networkConfig: ReadOnlyTool = {
     if (pending.failure !== null) failures.push(pending.failure);
 
     return {
-      // First, because it qualifies every other field rather than sitting
-      // beside them: a pending change makes the whole configuration below
-      // provisional. Read through a guard like everything else here — the
-      // client declares a bare boolean, and a response that is not one leaves
-      // this null rather than reporting a system as settled on the strength of
-      // a shape this tool could not read.
+      // First, because it is the caveat over the reading rather than one more
+      // setting: a pending interface change can move the `in_effect` side of
+      // everything below. It does not make the configured side provisional —
+      // see the description, and the block comment above for what the staging
+      // area it answers over actually holds. Read through a guard like
+      // everything else here — the client declares a bare boolean, and a
+      // response that is not one leaves this null rather than reporting a
+      // system as settled on the strength of a shape this tool could not read.
       changes_pending: booleanOrNull(pending.value),
       hostname: localHostname(config),
       domain: textOrNull(config['domain']),
