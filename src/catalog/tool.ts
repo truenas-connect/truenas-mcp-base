@@ -48,9 +48,31 @@ export interface PlanStep {
 }
 
 /**
- * How hard a mutating tool is to undo. `irreversible` exists only so the
- * catalog can reject it: per the destructive-action policy, irreversibly
- * destructive operations are absent from the catalog by construction.
+ * How hard a mutating tool's OWN operation is to undo — which is not the same
+ * question as what that operation does to the data it acts on.
+ *
+ * `irreversible` exists only so the catalog can reject it: per the
+ * destructive-action policy, a tool that COMPOSES an irreversibly destructive
+ * operation is absent from the catalog by construction. That is narrower than
+ * "nothing here can destroy data", and the difference is the paragraph below.
+ * So the two values are not a scale with a safe end and a dangerous one; the
+ * second is a rejection, and every tool that registers carries the first.
+ *
+ * What that leaves for a tool that TRIGGERS an operation someone else authored
+ * is `reversible`, and the reason is the distinction above rather than a
+ * loophole. `cloudsync_run` starts a cloud sync task whose own `transfer_mode`
+ * may delete data for good; the mode, the paths and the direction were all
+ * decided by whoever configured the task, and the system does the same thing
+ * unattended at the next scheduled window. Such a tool moves the moment, not
+ * the effect, and the operation it does author — the run — can be stopped. A
+ * tool that composed a destruction of its own, choosing the paths or the mode,
+ * is the case the policy is actually about and does not belong in the catalog
+ * at all. **Ask which of those two a new mutating tool is** before reading this
+ * field as a claim about the data.
+ *
+ * So an adapter deciding how loudly to warn cannot read this field alone: what
+ * an operation does to the data is in the tool's `description`, which is where
+ * such a tool is required to state it.
  */
 export type Destructiveness = 'reversible' | 'irreversible';
 

@@ -898,6 +898,213 @@ without it, and a plan is shown to a person and then recorded. Passing a field
 through in a listing whose description warns about it is not the same act as
 putting it in a mutating tool's approval text.
 
+### A job-backed tool watches for a bounded time and reports what it has (#122)
+
+`cloudsync_run` is the catalog's first tool that starts a job, and the shape it
+takes is the one later job-backed tools should copy.
+
+**The core needed nothing.** `ApiSurface` is `DefaultApiDirectory`, whose shape
+is `{ call, job, event }`, so `system.client.api.job(method, params)` was
+already available to every handler and already typed off the *job* directory —
+a key space disjoint from the call directory, so a job method is unreachable
+through `api.call` and vice versa. The client sends the request, correlates the
+job id off the job events, tracks the job and completes the observable at a
+terminal state. Earlier discussion here treated job support as a core
+prerequisite; it was not.
+
+**The duration decision is the one a job-backed tool actually has to make, and
+awaiting completion is the wrong default.** A cloud sync is unbounded — minutes
+for a delta, hours for a first upload — and awaiting it holds the MCP tool call
+open for the whole thing. The host times out, and the call it times out on is
+the only one that ever knew the job id, so the run continues with nothing able
+to name it afterwards. So: **watch for a bounded time, then report either how
+the job ended or that it is still going, with the job id either way.**
+
+Starting the job and returning the id immediately is what that degrades to when
+the bound passes, which makes it the floor rather than a third option — and it
+is not the wait-free route it looks like, because the id itself arrives from the
+first job event carrying the request's id and so waits on the network too. A
+bound is owed either way; this spends it on an answer that is sometimes
+complete.
+
+**The bound is a ceiling on the tool's patience, not an estimate of the job.**
+It has to sit comfortably inside the MCP host's own timeout, since a bound that
+outlives the host's never gets to report anything at all — and the host's is not
+readable from here, because `src/interfaces.ts` is the whole environment
+boundary and carries no deadline. Thirty seconds is chosen to be shorter than
+the shortest in ordinary use rather than tuned to any one of them, and it is
+returned as `watched_seconds` so a caller never infers which bound applied, the
+same way `snapshots_list` returns the `limit` it used.
+
+**Ending the watch must not end the job, and that was established before the
+route was taken.** `api.job` is `callAndGetJobId` piped into `trackJob`, and
+`trackJob` only observes — it filters the job event stream and reads
+`core.get_jobs`. Unsubscribing sends nothing to the middleware. A bound that
+silently aborted a half-finished upload would be the worst defect such a tool
+could have, so this is checked against the client rather than assumed of it.
+
+**An error raised while FOLLOWING the job is not the call failing, and must not
+be reported as one.** `trackJob` reads `core.get_jobs` and listens on a socket
+that can drop, so the stream can error long after the mutation landed. Letting
+that reject the handler tells the caller the sync failed when it is running, and
+throws away the job id in the same act — the unnameable-run failure the bound
+exists to prevent, reached from the other side. So an error after the client has
+reported on the job ends the watch and the result says what was established,
+which is `ended: false`. An error BEFORE the client has named the job still
+fails: there is no id to keep and nothing to report. **A mutating tool that
+follows its own effect has two failure eras, and only the first of them is the
+call's.**
+
+**Which is why this tool calls `callAndGetJobId` and `trackJob` apart rather
+than `api.job`, which is those two piped together.** The two eras are divided by
+the moment the client correlates the job id off the job event, and `api.job`
+consumes that id inside its own `switchMap` — nothing of the job reaches the
+caller's pipe until `trackJob` emits. But `trackJob` opens by dispatching
+`core.get_jobs`, which can fail on its own, and by then the sync is running and
+the client has its id. Through `api.job` that failure arrives as a rejection
+carrying nothing: the caller is told the mutation failed, and the only number
+that could still name the run is gone. **Where a client method pipes two stages
+together and the seam between them is where a tool's own guard lives, call the
+stages.** What that costs is the client's stated reason to prefer `api.job` — a
+job typed `result: unknown` — and it costs nothing here, because `cloudsync.sync`
+declares `response: null` and this tool never reads `result`.
+
+`job_id` then comes from that correlation and NOT from the `id` on whatever the
+tracking last reported. They are the same number, since the tracking filters on
+it — and only the first survives a watch that established nothing else, which is
+exactly when a caller most needs something to name the run with. **One fact, one
+derivation**, the same rule `finished_at` follows above.
+
+**Whether the job ended is read from the tracking COMPLETING, not from a state
+list.** The client completes the stream on its own `isJobFinished`, so
+completion moves with the middleware's terminal set instead of with a set
+written down here. A completion carrying no emission is the client having found
+no such job, which establishes nothing — so both halves are required before
+anything is called ended.
+
+**Every other field that means "the run is over" is then read off THAT, not off
+a second list.** `finished_at` gates on `ended` rather than through
+`jobFinishedAt`, whose `ENDED_JOB_STATES` is this repository's own set. The two
+are **equal on the pinned client** — its `terminalStates`, which is what
+`isJobFinished` tests and so what completes the tracking, holds exactly those
+five states, read out of `dist/index.js` rather than assumed — so this is not a
+bug being fixed. It is two independently maintained lists that happen to agree,
+and a client release widening its own would have this result call a run ended
+and refuse to say when it ended. **A tool with two derivations of one fact makes
+one of them subordinate**, and the subordinate one is the local list. The
+listings keep reading the set: none of them carries an `ended` to disagree with.
+
+The trap that costs a round here is stating the divergence as something a later
+**TrueNAS** release does. It is not: the terminal set is the CLIENT's, so only a
+client bump moves it, and nothing a middleware adds reaches it on its own. A
+job in a state neither list names does not complete the tracking at all — it
+runs until the bound expires and reports `ended: false`.
+
+**Terminal does not mean succeeded, and on this method there is nothing else to
+read.** `cloudsync.sync` declares `response: null`, so the job's `result` is
+null on success and on failure alike; the client says as much itself. The
+outcome is read from `state` against the same success vocabulary the tasks
+family already reads a run's state against, and `result` is not read at all — a
+tool that awaited completion and reported success would have reported every
+failed sync as a success. A terminal state this catalog does not recognise is
+**not** read as a success, which is `tasks_recent_runs`'s direction: a run that
+cannot be shown to have worked has not been shown to have worked.
+
+**`ended: false` is "not established", and the description must not enumerate
+it as a partition.** It covers a sync still going, a watch cut short by an
+error, a state the client does not treat as terminal, an unreadable state, and
+no job seen at all — and `state` and `job_id` narrow that without separating the
+first three. Two review rounds were spent here on one sentence promising three
+answers over four causes and then telling a caller which was which. **A
+not-established field is not a status enum**; say what it rules out and name
+what cannot be told apart. `succeeded` null is every one of those cases, and is
+neither a failure nor a success. The tool reports no progress percentage and no
+live status, and names `tasks_recent_runs` — whose `id` is this tool's `job_id`
+— as where a still-running sync is followed up.
+
+**A state that looks like a success does not make one, and that is the same
+rule.** `succeeded` is null beside a `state` of `SUCCESS` where the run was not
+established to be over, because the outcome is read off `ended` and a job can
+move out of a state this tool merely saw. **Do not describe an unrecognised
+terminal state as reporting `succeeded: false`** — the honest claim is the
+weaker one this tool actually makes, that no state the catalog does not know is
+ever read as a success, whichever way the watch ended.
+
+**A plan names what the operation does to the data, not what the tool's name
+suggests it does.** `cloudsync_run` starts a task whose own `transfer_mode` — a
+required field on the pinned entity — decides whether the run DELETES anything:
+`COPY` deletes nothing, `SYNC` removes whatever at the destination is not at the
+source, and `MOVE` removes the source once the copy lands. A plan step reading
+"this copies data" would have been true for one of the three and would have
+hidden a deletion behind the word the tool is named for. The mode is named in
+the plan, its effect is spelled out in the mode's own terms, and a mode this
+catalog cannot read says so rather than defaulting to the harmless one — an
+approver told nothing about deletion reads the silence as "nothing is deleted",
+which is the one reading that costs data.
+
+**A plan identifies an entity every way the listing it borrows its terms from
+does.** A cloud sync task's `credentials` is declared a whole record and the
+middleware also sends the id-only form, which is why `credentialId` exists and
+why `cloudsync_tasks_list` reports `credential_id` beside `credential_name`. A
+plan reading only the name renders "credential (the system reported none)" for
+a task that named its credential perfectly well — **a reduced identification is
+not a shorter answer but a STATED ABSENCE**, and it is stated in the one text a
+person reads before approving. Both labels are carried, under the listing's own
+field names so the two accounts cannot be read as two facts. This is #93's
+direction rule reaching a plan: a field dropping towards a claim has to be
+refused, and "no credential" is a claim.
+
+**`destructiveness` is about the operation, not about the bytes, and it cannot
+say both.** A cloud sync run can be stopped; what it has already written or
+deleted is gone. The field is `reversible` because `irreversible` exists only so
+the catalog can REJECT a tool — `catalog/catalog.ts` throws on registration — so
+the other value would delete this tool rather than describe it more honestly.
+**Where those two come apart, the field records the operation and the
+description carries the account of the data**, and the description then may not
+claim reversibility on the field's behalf.
+
+What decides which value a triggering tool takes is **whether it authors the
+destruction or only its timing.** Everything a cloud sync run deletes was
+decided by whoever configured the task, and the system does the same thing
+unattended at the next scheduled window; this tool moves the moment, not the
+effect. A tool that composed a deletion of its own — chose the paths, or the
+mode — would be the case the destructive-action policy is actually about, and
+would not belong in the catalog at all. **Ask which of those two a new mutating
+tool is before reaching for either value.**
+
+**That rule is written at `Destructiveness`'s own declaration, and that is where
+it had to go.** `ToolCatalog.list()` puts `destructiveness` into every
+`AdvertisedTool`, so an adapter deciding how loudly to warn reads the field's
+doc comment — which said only "how hard a mutating tool is to undo" while a
+tool three fields away said `NOTHING HERE UNDOES ANY OF THAT`. A redefinition
+that lives in one tool's comment and in this file is not one the next tool over
+the seam inherits; a reviewer re-derives it per tool instead, which is what
+happened here twice. **Where a field's declared meaning and a tool's use of it
+come apart, fix the declaration** — the local comment then says which case the
+tool is, not what the field means.
+
+**The declaration was not the only place saying the old thing, and a rule is
+only fixed where every statement of it is.** `ToolCatalog.register`'s rejection
+message said the policy keeps irreversibly destructive *operations* out of the
+catalog, and `README.md` said it again in the same words — a guarantee broader
+than the check, which rejects a tool that COMPOSES such an operation and says
+nothing about one that triggers an operation an operator authored. Both now say
+the narrower true thing, and `AdvertisedTool.destructiveness` — the field an
+adapter actually reads, which had no doc comment at all — carries the pointer to
+`Destructiveness` and the warning not to read it alone. **When a redefinition
+lands, grep for the sentence it replaces**: the enforcement point, the advertised
+shape and the user-facing description each state a field's meaning
+independently, and a reader reaches whichever one is nearest.
+
+**The plan names one call, which is #119's distinction rather than a lapse.**
+`scheduled_task_set_enabled` names its read as a step because `execute` makes
+it; this tool reads only at plan time — to name the task, and to fail on an id
+no task has — and `execute` re-reads nothing, exactly as `snapshots_create` does
+not re-check its dataset. The `core.get_jobs` the client's tracking issues while
+following the job is named in the step's *description* instead, because a step's
+`params` are the exact params a call runs with and the job id does not exist
+until the approved call has been made.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

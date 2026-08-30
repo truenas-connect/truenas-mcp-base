@@ -1,6 +1,17 @@
-import { firstValueFrom } from 'rxjs';
+import type { JobParams } from '@truenas/api-client';
+import {
+  catchError,
+  EMPTY,
+  firstValueFrom,
+  lastValueFrom,
+  switchMap,
+  takeUntil,
+  tap,
+  throwError,
+  timer,
+} from 'rxjs';
 import { Role } from '@/interfaces';
-import { MutatingTool, PlanStep, ReadOnlyTool, ToolContext } from '@/catalog/tool';
+import { ApiSurface, MutatingTool, PlanStep, ReadOnlyTool, ToolContext } from '@/catalog/tool';
 import {
   booleanOrNull,
   errorText,
@@ -38,11 +49,16 @@ import {
  * long-running operation on TrueNAS is a job and they all land in the same
  * place.
  *
- * `scheduled_task_set_enabled` is the one tool here that changes anything, and
+ * `scheduled_task_set_enabled` is the first tool here that changes anything, and
  * it is the only one that acts on a kind another family lists: reading a task
  * and then switching it off is one question, and which file the listing lives
  * in is not part of it. It is written beside the schedule rendering above
  * because a plan naming a task has to name it the way its listing tool does.
+ *
+ * `cloudsync_run` is the second, and it is here for the same reason one step
+ * on: it starts one of the tasks `cloudsync_tasks_list` reports, and its plan
+ * names that task in the terms that listing already uses — description, path,
+ * direction, the remote end, and the credential by name and id.
  */
 
 /**
@@ -1842,6 +1858,485 @@ export const scheduledTaskSetEnabled: MutatingTool = {
       // having changed something.
       changed: previous === null || resulting === null ? null : previous !== resulting,
       confirmed: resulting === null ? null : resulting === enabled,
+    };
+  },
+};
+
+/**
+ * `cloudsync_run`: starting one cloud sync task now, and the catalog's first
+ * job-backed tool.
+ *
+ * THE JOB SEAM NEEDED NOTHING NEW IN THIS REPOSITORY. `ApiSurface` is
+ * `DefaultApiDirectory`, whose shape is `{ call, job, event }`, so
+ * `system.client.api.job(...)` was already available to every handler and typed
+ * off the job directory — the client sends the request, correlates the job id
+ * off the job events, tracks the job and completes the observable at a terminal
+ * state. Earlier discussion here treated job support as a core prerequisite;
+ * it is not, and that framing was wrong.
+ *
+ * TERMINAL DOES NOT MEAN SUCCEEDED, and on this method there is nothing else to
+ * read. `cloudsync.sync` declares `response: null`, so the job's `result` is
+ * null on success and on failure alike and cannot tell them apart — the client
+ * says so itself, that "reaching a terminal state is not on its own enough to
+ * assume a result". The outcome is read from `state`, against the same
+ * {@link SUCCEEDED_JOB_STATES} the rest of this family reads a run's state
+ * against, and `result` is not read at all. A tool that awaited completion and
+ * reported success would have reported every failed sync as a success.
+ *
+ * THE DURATION DECISION IS ROUTE 3 OF THE THREE THE TICKET NAMED: watch the job
+ * for a bounded time, then report either how it ended or that it is still
+ * going — with the job id either way. Why not the other two:
+ *
+ * - AWAITING COMPLETION holds the tool call open for as long as the copy takes,
+ *   which is minutes for a delta and hours for a first upload. The host times
+ *   out, and the call it times out on is the only one that ever knew the job
+ *   id, so the sync runs on with nothing able to name it afterwards.
+ * - STARTING AND RETURNING THE ID is what this degrades to when the bound
+ *   passes, so it is the floor rather than an alternative — and it is not the
+ *   bound-free route it looks like: the id itself arrives from the first job
+ *   event carrying this request's id, so that route waits on the network too
+ *   and needs a bound of its own, spent before any outcome could be known.
+ *   Route 3 spends the same wait on an answer that is sometimes complete.
+ *
+ * THE BOUND IS THE ONE NUMBER THIS TOOL HAS TO DEFEND. It must sit comfortably
+ * inside the MCP host's own timeout, because a bound that outlives the host's
+ * never gets to report anything at all; the host's is not readable from here —
+ * `src/interfaces.ts` is the whole environment boundary and carries no deadline
+ * — so {@link SYNC_WATCH_MS} is chosen to be shorter than the shortest in
+ * ordinary use rather than tuned to any one of them. It is returned as
+ * `watched_seconds`, so a caller never has to infer which bound applied, the
+ * same way `snapshots_list` returns the `limit` it actually used.
+ *
+ * ENDING THE WATCH DOES NOT END THE SYNC, and that is read off the client
+ * rather than assumed: `api.job` is `callAndGetJobId` piped into `trackJob`,
+ * and `trackJob` only observes — it filters the job event stream and reads
+ * `core.get_jobs`. Unsubscribing from it sends nothing to the middleware. A
+ * bound that silently aborted a half-finished upload would be the worst defect
+ * this tool could have, so it is the one property here established before the
+ * route was taken rather than after.
+ *
+ * THE PLAN NAMES ONE CALL, WHICH IS #119'S DISTINCTION RATHER THAN A LAPSE.
+ * `scheduled_task_set_enabled` names its read as a step because `execute` makes
+ * that read; this tool reads only at plan time — to name the task, and to fail
+ * on an id no task has — and `execute` re-reads nothing, exactly as
+ * `snapshots_create` does not re-check its dataset. The `core.get_jobs` the
+ * client's own tracking issues while following the job is named in the step's
+ * description instead of as a step, because a step's `params` are the exact
+ * params a call runs with and the job id does not exist until the approved call
+ * has been made.
+ */
+
+/**
+ * How long {@link cloudsyncRun} watches the job it started before reporting
+ * what it has and returning. Thirty seconds; see the note above for why the
+ * number is a ceiling on this tool's own patience rather than an estimate of
+ * how long a sync takes.
+ */
+const SYNC_WATCH_MS = 30_000;
+
+/** Seconds, for the result, so the bound is reported in the unit it is stated in. */
+const SYNC_WATCH_SECONDS = SYNC_WATCH_MS / 1000;
+
+/** The two arguments this tool takes, with `dry_run` already defaulted. */
+interface SyncRun {
+  id: number;
+  dryRun: boolean;
+}
+
+/**
+ * The caller's arguments, or the error naming what is wrong with them.
+ *
+ * Strict on both, as {@link parseSwitch} is and for the same reason: coercing
+ * `"false"` to true would move real data to a remote under an approval given
+ * for a dry run, which is not a narrower answer to the question asked but a
+ * different one. `id` must be a whole number, since the middleware holds these
+ * tasks under integer primary keys.
+ */
+function parseRun(args: Record<string, unknown>): SyncRun {
+  const id = args['id'];
+  if (typeof id !== 'number' || !Number.isInteger(id)) {
+    throw new Error('"id" is required and must be a whole number');
+  }
+  const dryRun = args['dry_run'];
+  if (dryRun != null && typeof dryRun !== 'boolean') {
+    throw new Error('"dry_run" must be a boolean');
+  }
+  return { id, dryRun: dryRun === true };
+}
+
+/**
+ * The params the job is started with, typed off the job directory — a disjoint
+ * key space from the call directory, so `CallParams` cannot name them.
+ *
+ * The options object is always sent rather than omitted when `dry_run` is
+ * false: the plan shows the params, and a plan whose second argument appears
+ * only on a dry run would be showing two different call shapes for one tool.
+ */
+function syncParams(run: SyncRun): JobParams<ApiSurface, 'cloudsync.sync'> {
+  return [run.id, { dry_run: run.dryRun }];
+}
+
+/**
+ * The task in the terms `cloudsync_tasks_list` reports it, for the human
+ * approving the plan.
+ *
+ * The remote end is named because that is what makes the approval meaningful —
+ * "run cloud sync task 4" says nothing about where the data is about to go. The
+ * credential is identified and nothing more: its `provider` holds the access
+ * key, token or password, exactly as in the listing this borrows its terms
+ * from.
+ *
+ * That listing identifies it TWO ways — `credential_name` and `credential_id` —
+ * and so does this, under those names, because {@link credentialId} exists for
+ * a reason this plan is subject to as well: the middleware also sends the
+ * id-only form, where there is no `name` to read. One label would then render
+ * as {@link NONE_REPORTED} for a task that named its credential perfectly well,
+ * which is a stated absence in the text a person approves rather than a field
+ * left out.
+ */
+function describeCloudSyncTask(task: Record<string, unknown>, id: number): string {
+  const credentials = task['credentials'];
+  const credential = credentialId(credentials);
+  const labelled: [string, string | null][] = [
+    ['description', stringField(task, 'description')],
+    ['path', stringField(task, 'path')],
+    ['direction', stringField(task, 'direction')],
+    ['transfer mode', stringField(task, 'transfer_mode')],
+    ['remote bucket', stringField(task['attributes'], 'bucket')],
+    ['remote folder', stringField(task['attributes'], 'folder')],
+    ['credential name', stringField(credentials, 'name')],
+    ['credential id', credential === null ? null : String(credential)],
+  ];
+  const named = labelled.map(
+    ([name, value]) => `${name} ${value === null ? NONE_REPORTED : `"${value}"`}`,
+  );
+  return `the cloud sync task with ${named.join(', ')} (id ${id})`;
+}
+
+/**
+ * What each transfer mode does to the data, in the plan's own words.
+ *
+ * `transfer_mode` is declared REQUIRED on the pinned cloud sync entity and it
+ * decides whether the run deletes anything: `COPY` deletes nothing, `SYNC`
+ * makes the destination match the source and so removes whatever is not at the
+ * source, and `MOVE` removes the source once the copy has landed. A plan that
+ * said "this copies data" for all three would hide a deletion behind the word
+ * the tool's name uses — a plan is what a person approves, so that is the same
+ * defect as a description promising more than the normalization delivers,
+ * pointed the other way.
+ */
+const TRANSFER_MODE_EFFECT: Record<string, string> = {
+  COPY: 'new and changed files are copied to the destination, and nothing is deleted at either end.',
+  SYNC:
+    'the destination is made to match the source, so anything at the destination that is ' +
+    'not at the source IS DELETED.',
+  MOVE: 'files are copied to the destination and are then DELETED FROM THE SOURCE.',
+};
+
+/**
+ * Which end is which, since every sentence above is written in terms of source
+ * and destination.
+ *
+ * This is `cloudsync_tasks_list`'s own reading of `direction`, restated rather
+ * than re-derived — that tool's description already says `path` is the local
+ * end, the source on a `PUSH` and the destination on a `PULL`.
+ */
+const TRANSFER_ENDS =
+  'On a PUSH this system is the source and the remote the destination; on a PULL it is the ' +
+  'other way round.';
+
+/**
+ * The effect sentence for this task's mode, or the statement that the effect
+ * was not established.
+ *
+ * A mode this tool cannot read is said to be exactly that, and NOT defaulted to
+ * the harmless one: an approver told nothing about deletion would read the
+ * absence as "nothing is deleted", which is the one reading that costs data.
+ *
+ * `Object.hasOwn` rather than `in`, which walks the prototype — `'constructor'`
+ * is `in` every object literal and would come back as a function where a
+ * sentence is expected (#101).
+ */
+function transferModeSentence(task: Record<string, unknown>): string {
+  const mode = stringField(task, 'transfer_mode');
+  const effect =
+    mode !== null && Object.hasOwn(TRANSFER_MODE_EFFECT, mode)
+      ? TRANSFER_MODE_EFFECT[mode]
+      : undefined;
+  if (effect !== undefined) return `Transfer mode ${mode}: ${effect} ${TRANSFER_ENDS}`;
+  return (
+    `Transfer mode ${mode === null ? NONE_REPORTED : `"${mode}"`}: whether this run DELETES ` +
+    'anything, at either end, is not established here — read the task\'s transfer mode before ' +
+    'approving.'
+  );
+}
+
+export const cloudsyncRun: MutatingTool = {
+  name: 'cloudsync_run',
+  description:
+    'Starts one cloud sync task on this TrueNAS system now, without waiting ' +
+    'for its schedule, and reports how far it got. Two-phase: called without a ' +
+    'confirmation_token it returns a plan for user approval; called with one it ' +
+    'starts the sync. `id` is the task\'s `id` as `cloudsync_tasks_list` ' +
+    'reports it, on the system being targeted, and PLANNING AGAINST AN id NO ' +
+    'CLOUD SYNC TASK HAS FAILS naming that id — so an approved plan is always ' +
+    'about a task that existed when it was made. The plan names the task the ' +
+    'way that listing does: its description, its local path, its direction, the ' +
+    'remote bucket and folder, and the stored credential by name and id — both, ' +
+    'as that listing reports them, since a task can name its credential by ' +
+    'either. No key, ' +
+    'token or password appears in the plan or in the result. `dry_run` reports ' +
+    'what the sync would do without moving any data, and DEFAULTS TO FALSE, so ' +
+    'an omitted `dry_run` copies for real. A DRY RUN STILL STARTS A JOB AND ' +
+    'STILL CONTACTS THE REMOTE — it is not a local simulation, and it costs ' +
+    'whatever listing the remote costs. THE RESULT IS ABOUT THE JOB THIS CALL ' +
+    'STARTED, AND "STARTED" IS NOT "SUCCEEDED". A cloud sync is unbounded — ' +
+    'minutes for a small delta, hours for a first upload — so this tool ' +
+    'WATCHES THE JOB FOR AT MOST `watched_seconds` AND THEN RETURNS WHATEVER ' +
+    'IT HAS, leaving the sync running. It never waits for the copy to finish. ' +
+    'THE WATCH ALSO ENDS IF FOLLOWING THE JOB FAILS — a dropped connection, a ' +
+    'failed read of the job list — and that is reported as what was ' +
+    'established rather than as the sync having failed, since the run was ' +
+    'already under way. A failure BEFORE anything was seen of the job fails ' +
+    'this call instead, and even then MAY STILL HAVE STARTED THE SYNC: check ' +
+    '`cloudsync_tasks_list` rather than assuming nothing ran. ' +
+    '`ended` is whether the job was ESTABLISHED to have reached a state it ' +
+    'will not move out of. TRUE MEANS THE RUN IS OVER. FALSE MEANS NOTHING WAS ' +
+    'ESTABLISHED AND IS NOT ONE ANSWER — the sync is still going, or the watch ' +
+    'was cut short by either of the failures above, or the job reached a state ' +
+    'the system does not treat as ending a run and so may or may not be over, ' +
+    'or the job reported a state this tool could not read, or no job was seen ' +
+    'at all. `state` and `job_id` narrow that and DO NOT PARTITION IT: a ' +
+    'non-null `state` beside `ended: false` is any of the first three and this ' +
+    'tool cannot say which, a null `state` beside a `job_id` is a job the ' +
+    'system NAMED and then said nothing readable about — following it failed, ' +
+    'or the watch ran out before anything came back, or the state it reported ' +
+    'could not be read, and this tool cannot say which of those either — and ' +
+    'both null is a job no event named within the watch OR one whose id was ' +
+    'unreadable and whose state was too. IN NONE OF THEM HAS ANYTHING ' +
+    'FAILED. `succeeded` is the answer to "did it work": true where the run ' +
+    'ENDED in a state this catalog reads as success, false where it ENDED in ' +
+    'any other state, and NULL WHERE NOTHING ESTABLISHED IT — which is every ' +
+    'case above where `ended` is false. A null `succeeded` IS NOT A FAILURE ' +
+    'AND IS NOT A SUCCESS, and A STATE THAT LOOKS LIKE A SUCCESS DOES NOT MAKE ' +
+    'ONE: `succeeded` is null beside a `state` of `SUCCESS` where the run was ' +
+    'not established to be over, since a job can still move out of a state ' +
+    'this tool merely saw. NO STATE THIS CATALOG DOES NOT KNOW IS EVER READ AS ' +
+    'A SUCCESS, whether the run ended in it or the watch ended without the run ' +
+    'ending — so a state a later TrueNAS release adds reports as itself and ' +
+    'never as a success. `state` is the state the system last ' +
+    'reported, passed through as the system spelled it and null where none was ' +
+    'read; `SUCCESS` and `FINISHED` are the two this tool counts as success. ' +
+    'The job\'s `result` is NOT read and could not settle any of this: ' +
+    '`cloudsync.sync` returns nothing, so a finished job carries a null result ' +
+    'whether it worked or failed. `error` is the text the job recorded and is ' +
+    'null where it recorded none, so a job that ended without succeeding and ' +
+    'with a null `error` failed for a reason the system did not record — it ' +
+    'has not succeeded. `finished_at` is when the job ended, as an ISO 8601 ' +
+    'UTC timestamp, REPORTED ONLY WHERE `ended` IS TRUE — so it moves with ' +
+    '`ended` and never contradicts it — and NULL EVERYWHERE ELSE EVEN IF THE ' +
+    'JOB RECORD CARRIES A TIME, since a run that was not established to be ' +
+    'over has not been established to have ended then. It is also null where ' +
+    'the job ended and recorded no time this tool could read. `job_id` is the ' +
+    'job\'s numeric identity, TAKEN FROM THE JOB EVENT THAT NAMED THIS ' +
+    'REQUEST rather than from anything read about the job afterwards — so it ' +
+    'is reported even where the watch established nothing else at all — and it ' +
+    'MATCHES `id` IN `tasks_recent_runs`, WHICH IS HOW A SYNC THAT WAS STILL ' +
+    'RUNNING IS FOLLOWED UP — this tool reports no progress percentage and no ' +
+    'live status, and that tool reports both. `job_id` is null where no job ' +
+    'event named the job within the watch, and ALSO where such an event was ' +
+    'seen and the id it carried was not a number this tool could read — so a ' +
+    'null `job_id` beside a non-null `state` is the second of those. NEITHER MEANS ' +
+    'THE SYNC DID ' +
+    'NOT START: the call was made, and `cloudsync_tasks_list` will report the ' +
+    'run against the task. `task_id` is the `id` that was asked for and ' +
+    '`dry_run` what was actually sent. `watched_seconds` is the CEILING that ' +
+    'applied to the watch and not how long it actually lasted — a job that ' +
+    'ended in two seconds still reports the full bound. THIS TOOL CANNOT STOP ' +
+    'A RUNNING SYNC, ' +
+    'cannot change, create or delete a task, and cannot sync anything that is ' +
+    'not already a task on the system. WHAT THE RUN DOES TO THE DATA IS THE ' +
+    "TASK'S OWN `transfer_mode`, WHICH THE PLAN NAMES AND THIS TOOL DOES NOT " +
+    'CHANGE: `COPY` deletes nothing, `SYNC` makes the destination match the ' +
+    'source and so DELETES whatever at the destination is not at the source, ' +
+    'and `MOVE` DELETES THE SOURCE once the copy lands — with `direction` ' +
+    'saying which end is which, this system being the source on a `PUSH` and ' +
+    'the destination on a `PULL`. NOTHING HERE UNDOES ANY OF THAT. The run ' +
+    'itself can be stopped from the TrueNAS UI, which is all this tool\'s ' +
+    "`destructiveness` records; the bytes it has already written or deleted " +
+    'stay written or deleted.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'integer',
+        description:
+          "The cloud sync task's `id` as `cloudsync_tasks_list` reports it, on " +
+          'the system being targeted.',
+      },
+      dry_run: {
+        type: 'boolean',
+        default: false,
+        description:
+          'Report what the sync would do without moving data. Default false, ' +
+          'which copies for real. A dry run still starts a job and still ' +
+          'contacts the remote.',
+      },
+    },
+    required: ['id'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // THIS TOOL TRIGGERS AN OPERATION IT DOES NOT AUTHOR, which is the case
+  // `Destructiveness` names at its own declaration in `catalog/tool.ts`:
+  // everything a run deletes was decided by
+  // whoever configured the task — the mode, the paths, the direction — and the
+  // system does the same thing on its own at the next scheduled window. What
+  // this changes is WHEN, not WHAT. The account of what the run does to the
+  // data is in the description above and named in the plan, which is where the
+  // person approving it reads it, and where that declaration says it belongs.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const run = parseRun(rawArgs);
+    return { id: run.id, dry_run: run.dryRun };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const run = parseRun(rawArgs);
+    // The id is checked on the response and not only asked for in the filter,
+    // for the reason {@link rowWithId} gives: a filter that did not apply comes
+    // back as the whole table, and the first row of that is a different task.
+    const rows = await firstValueFrom(
+      ctx.system.client.api.query('cloudsync.query', [['id', '=', run.id]]),
+    );
+    const task = rowWithId(rows, run.id);
+    if (task === null) {
+      throw new Error(
+        `No cloud sync task with id ${run.id} on this system — the ids this ` +
+          'tool takes come from `cloudsync_tasks_list`',
+      );
+    }
+    return [
+      {
+        method: 'cloudsync.sync',
+        params: syncParams(run),
+        description:
+          `${run.dryRun ? 'Dry-run' : 'Run'} ${describeCloudSyncTask(task, run.id)} now. ` +
+          `${transferModeSentence(task)} ` +
+          `${
+            run.dryRun
+              ? 'This is a dry run: it transfers and deletes nothing, and still contacts the remote.'
+              : 'This run does all of that for real.'
+          } ` +
+          'This starts a background job; the job is then followed through the ' +
+          "client's own tracking, which reads `core.get_jobs` and changes " +
+          `nothing, for at most ${SYNC_WATCH_SECONDS} seconds. The sync ` +
+          'continues after that whether or not it has finished.',
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const run = parseRun(rawArgs);
+    const api = ctx.system.client.api;
+    // Set from the tracking observable COMPLETING rather than from comparing
+    // the state against a list, because completion is the client's own
+    // `isJobFinished` and so moves with the middleware's terminal set rather
+    // than with a set written down here. The bound below cuts the stream by
+    // unsubscribing, which is not a completion, so a job still running when the
+    // watch ends leaves this false.
+    let completed = false;
+    // Whether the client ever reported on the job. Once it has, the job exists
+    // and the run is under way, which is what the guard below turns on.
+    let sawJob = false;
+    // The job's id, held from the moment the client correlates it.
+    let jobId: number | null = null;
+    const watched = await lastValueFrom(
+      // Started and then followed in two steps rather than through `api.job`,
+      // which is exactly these two steps piped together. What the split buys is
+      // WHEN the id becomes readable here: `api.job` consumes it inside its own
+      // `switchMap`, so nothing of the job reaches this pipe until `trackJob`
+      // emits — and `trackJob` starts by dispatching `core.get_jobs`, which can
+      // fail on its own. The job is already running by then and the client
+      // already has its id, so absorbing that failure and reporting the id is
+      // the whole point of the guard below; through `api.job` it would instead
+      // reject with nothing, which is the unnameable run this tool is built to
+      // avoid. The client's own reason to prefer `api.job` is the result type,
+      // and `cloudsync.sync` declares `response: null` — there is no result to
+      // lose.
+      api.callAndGetJobId('cloudsync.sync', syncParams(run)).pipe(
+        tap((id) => {
+          // A job event has named this request, so the run is under way. The id
+          // is read through the same guard every other middleware number goes
+          // through: the client declares it a number, and a declared type is a
+          // claim about what is sent rather than about the value received.
+          sawJob = true;
+          jobId = numberOrNull(id);
+        }),
+        switchMap((id) => api.trackJob(id)),
+        tap({
+          complete: () => {
+            completed = true;
+          },
+        }),
+        // An error raised once a job event has named this request is not the
+        // call failing. The follow-up read and the event stream both go over a
+        // socket that can drop; the sync is running whatever either of those
+        // does. Rejecting here would tell the caller the mutation failed AND
+        // take the job id with it, leaving a running sync that nothing can name
+        // — which is the failure the bound above exists to prevent, reached
+        // from the other side. So the watch ends and the result reports what
+        // was established, `ended` false, with the id.
+        //
+        // Before that event there is nothing of the job to report and no id to
+        // keep, so an error there still fails, as it must.
+        catchError((error: unknown) => (sawJob ? EMPTY : throwError(() => error))),
+        takeUntil(timer(SYNC_WATCH_MS)),
+      ),
+      // No emission at all: the request went out and nothing this tool can see
+      // came back about the job, which is reported rather than thrown — the
+      // sync may well be running, and where an event named it `jobId` says so
+      // even though this is null.
+      { defaultValue: null },
+    );
+    const record = lastRunOf(watched);
+    // Read through the same guards the listings read a job record with, and
+    // deliberately NOT through `lastRunState`, whose null case means "the task
+    // has never run" — an answer about a task, where this is an answer about
+    // one job that has just been started.
+    const state = stringField(watched, 'state');
+    // A completion with no emission is the client having found no such job,
+    // which establishes nothing about the run; both halves are required.
+    const ended = completed && state !== null;
+    return {
+      task_id: run.id,
+      dry_run: run.dryRun,
+      // The id the client correlated off the job event, NOT the `id` on
+      // whatever the tracking last reported. They are the same number — the
+      // tracking filters on it — and only the first survives a watch that ends
+      // with nothing having been read about the job, which is exactly when a
+      // caller most needs something to name the run with. One fact, one
+      // derivation.
+      job_id: jobId,
+      watched_seconds: SYNC_WATCH_SECONDS,
+      ended,
+      // The state and nothing else. `result` is null on this method whatever
+      // happened, so reading it could only ever have produced a wrong answer.
+      // The direction is `notSucceeded`'s: a terminal state this catalog does
+      // not recognise is not read as a success.
+      succeeded: ended ? SUCCEEDED_JOB_STATES.has(state) : null,
+      state,
+      error: jobError(record),
+      // Gated on `ended` and NOT through {@link jobFinishedAt}, which reads
+      // {@link ENDED_JOB_STATES}. The two agree on the PINNED client and are
+      // not the same reading: the client's `terminalStates` — what
+      // `isJobFinished` tests, and so what completes the tracking — holds
+      // exactly these five, checked in its `dist/index.js` rather than assumed,
+      // while the set here is this repository's own. Two independently
+      // maintained lists that happen to be equal today, and a client release
+      // that widens its own would leave this result calling a run ended and
+      // refusing to say when. `ended` is the claim this tool has already made,
+      // so the finish time follows it and cannot contradict it. The listings
+      // keep reading the set: none of them carries an `ended` to disagree with.
+      finished_at: ended ? isoOrNull(jobMillis(record?.time_finished)) : null,
     };
   },
 };

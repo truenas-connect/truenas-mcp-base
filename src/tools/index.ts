@@ -34,6 +34,7 @@ import {
 } from '@/tools/system';
 import {
   automatedTasksList,
+  cloudsyncRun,
   cloudsyncTasksList,
   scheduledTaskSetEnabled,
   snapshotTasksList,
@@ -41,7 +42,7 @@ import {
 } from '@/tools/tasks';
 import { vmDevices, vmLogs, vmsList } from '@/tools/vms';
 
-/** The sketch's catalog: forty-nine read-only tools plus four mutating tools. */
+/** The sketch's catalog: forty-nine read-only tools plus five mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -97,6 +98,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(alertsDismiss);
   catalog.register(alertsRestore);
   catalog.register(scheduledTaskSetEnabled);
+  catalog.register(cloudsyncRun);
   return catalog;
 }
 
@@ -114,6 +116,7 @@ export {
   bootPoolStatus,
   certificatesList,
   cloudCredentialsList,
+  cloudsyncRun,
   cloudsyncTasksList,
   createSnapshot,
   directoryServicesStatus,

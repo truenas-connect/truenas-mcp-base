@@ -130,4 +130,5 @@ export {
   alertsDismiss,
   alertsRestore,
   scheduledTaskSetEnabled,
+  cloudsyncRun,
 } from '@/tools/index';
