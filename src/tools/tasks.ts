@@ -484,8 +484,9 @@ function jobError(run: LastRun | null): string | null {
  * the value received — so a row that carries something else reads as
  * unreadable here rather than as a string it is not. The cloud backup and
  * rsync sections reach the same kind of field through a row this file reads as
- * `unknown`, with no declaration to lean on even in principle. A task's
- * credential IS declared, with a `name` typed a string — but the middleware
+ * `unknown`, which puts whatever the client declares for those rows out of
+ * reach at that seam. A task's credential IS declared, with a `name` typed a
+ * string — but the middleware
  * also sends the id-only form, so a row that does not honour the type is the
  * case a direct read would have got wrong.
  */
