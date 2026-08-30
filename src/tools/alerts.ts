@@ -18,8 +18,8 @@ export const alertsList: ReadOnlyTool = {
     'identifier `alerts_dismiss` and `alerts_restore` take, and IT IS ' +
     'PER-SYSTEM: it names one alert on the one system it was read from, so a ' +
     'uuid read from one system must not be passed to a tool call targeting ' +
-    'another. `id` is the alert\'s own class-and-key identifier, is what ' +
-    '`klass` groups with, and IS NOT THAT ARGUMENT: nothing states that it ' +
+    'another. `id` is a second identifier the middleware reports on the same ' +
+    'alert, and IS NOT THAT ARGUMENT: nothing states that it ' +
     "names one system's alert instance, so acting on it would be ambiguous " +
     'wherever the same condition is raised on more than one system.',
   inputSchema: { type: 'object', properties: {} },
