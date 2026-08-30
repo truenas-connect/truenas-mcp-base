@@ -540,9 +540,10 @@ at all (both null). Both readings have to be in the description: a null
 nothing.
 
 The other half is where #97's credential rule lands when the credential is
-inside an arm. `VMDisplayDevice.password` is the SPICE/VNC console passphrase,
-declared a plain `string` beside ordinary display settings, and the DISPLAY
-allowlist omits it — **not redacted, and not reported as whether one is set**,
+inside an arm. `VMDisplayDevice.password` is the SPICE/VNC console passphrase —
+declared `string | null` beside the display's ordinary settings, with nothing in
+the type saying it is a credential, and the DISPLAY allowlist omits it: **not
+redacted, and not reported as whether one is set**,
 since a tool result is recorded verbatim in the audit trail (S3.3). Naming the
 arm's fields one by one is what keeps it out, and what keeps out a second
 credential-shaped field a later release adds to any arm.

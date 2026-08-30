@@ -737,8 +737,9 @@ interface CdromAttributes {
  * A display device — the graphical console the VM is reachable on.
  *
  * `password` IS DELIBERATELY NOT REPORTED, IN ANY FORM. It is the passphrase
- * the SPICE or VNC console is protected with, declared a plain `string` on this
- * surface, and tool arguments and results are recorded verbatim in the audit
+ * the SPICE or VNC console is protected with, declared `string | null` beside
+ * the display's ordinary settings with nothing in the type saying it is a
+ * credential, and tool arguments and results are recorded verbatim in the audit
  * trail (S3.3) — the same reasoning that keeps a cloud backup's passphrase and
  * an rsync task's private key out of `automated_tasks_list` (#97). Naming the
  * fields one by one rather than trimming the record is what keeps it out, and
@@ -999,8 +1000,9 @@ export const vmDevices: ReadOnlyTool = {
     'graphical console, `PCI` and `USB` host hardware passed through. EACH ' +
     'KIND IS REPORTED THROUGH ITS OWN SET OF FIELDS, and a name two kinds ' +
     'share MEANS WHATEVER THAT KIND\'S OWN ENTRY BELOW SAYS IT MEANS — `type` ' +
-    'is on four of them and is a different thing on each — so read `dtype` ' +
-    'before reading `attributes`. For ' +
+    'is on four of them and is the emulated network card on `NIC`, the ' +
+    'display protocol on `DISPLAY`, and the emulated disk controller on `DISK` ' +
+    'and `RAW` — so read `dtype` before reading `attributes`. For ' +
     '`DISK`: `path` is what backs it, `zvol_name` and `zvol_volsize` the zvol ' +
     'where one does, `create_zvol` whether TrueNAS made that zvol itself. For ' +
     '`RAW`: `path` is the image file, `exists` whether the system says that ' +
@@ -1048,8 +1050,10 @@ export const vmDevices: ReadOnlyTool = {
     'way to record one. AN ' +
     'EMPTY `devices` LIST IS A SYSTEM WITH NO LIBVIRT-BACKED VM DEVICES AT ' +
     'ALL, which includes a system with no libvirt-backed VMs. A machine ' +
-    '`vms_list` reports with `source` `vm` AND NO ROW HERE HAS NO DEVICES ' +
-    'ATTACHED; one it reports with `source` `virt_instance` HAS NO ROW HERE ' +
+    '`vms_list` reports with `source` `vm` AND NO ROW HERE NAMING IT HAS NO ' +
+    'DEVICES ATTACHED — except that a row whose `vm` is null names no machine ' +
+    'and could be its, so that reading holds only while every row carries a ' +
+    '`vm`. One `vms_list` reports with `source` `virt_instance` HAS NO ROW HERE ' +
     'WHATEVER IS ATTACHED TO IT, so the same absence means opposite things for ' +
     'the two stacks and `source` is what tells them apart. This ' +
     'tool reports configuration and not liveness: it does not say whether a ' +
