@@ -99,6 +99,7 @@ export {
   replicationStatus,
   snapshotTasksList,
   cloudsyncTasksList,
+  automatedTasksList,
   tasksRecentRuns,
   sharesList,
   shareAccess,
