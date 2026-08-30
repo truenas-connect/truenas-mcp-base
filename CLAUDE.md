@@ -448,6 +448,46 @@ beside a named credential is not evidence the task has no remote host.
 promising more than the normalization delivers** — check that the payload states
 the grouping before writing one.
 
+### An unconfirmed allowlist over an open record names the keys it did not read (#98)
+
+`nfs_clients` reads `nfs.get_nfs4_clients`, whose row is `{ id, info, states }`
+with both of the last two typed `Record<string, unknown>` — the client declares
+that a record is there and says nothing whatever about what is in it. The
+allowlist convention still applies and the record must not be forwarded, so the
+tool has to name keys; but no live system was available to read the real ones
+off, so the names in `INFO_KEYS` are taken from what the Linux NFS server
+publishes per client and are a considered guess.
+
+**The guess is made checkable rather than hidden.** Every key the record
+actually carried that the tool does not read is reported by name, in
+`unreported_info_fields` and `unreported_state_fields`. A key name is not a
+value, so nothing a later TrueNAS release adds reaches a caller — but a caller
+seeing the named fields all null beside a full list of unreported names is
+looking at an allowlist whose spellings are wrong, not at a client the server
+knows nothing about. Those two readings are otherwise identical, and only one of
+them is a defect.
+
+**Reach for this only where the key names themselves are unconfirmed.** A record
+whose shape the client declares, or that has been read off a live system, gets a
+plain allowlist and no such list — the extra fields are the price of not being
+able to check, not a default. Null there means the record was not a record;
+empty means it was read and every key it carried is reported.
+
+### A live-session tool is its own family, not a third tool in `shares.ts` (#98)
+
+`shares.ts` merges SMB and NFS into one list on the stated ground that a person
+asking what a NAS shares is not asking a question about protocols. `nfs.ts` asks
+the opposite kind of question — who is connected — and there the protocol is the
+whole of the answer: NFSv3 is stateless and reports `{ ip, export }` mounts,
+NFSv4 registers a client with an id and open state, the two share no vocabulary,
+and they come from two middleware calls that fail independently. So they are two
+lists in a file of their own, the same way `block.ts` keeps iSCSI and NVMe-oF
+apart rather than folding them into one row type.
+
+**A row shape is what decides which file a tool goes in, not the protocol it
+names.** A second NFS tool answering a question about exports would belong in
+`shares.ts` despite this file existing.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

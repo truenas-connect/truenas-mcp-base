@@ -9,6 +9,7 @@ import { cloudCredentialsList } from '@/tools/credentials';
 import { disksList } from '@/tools/disks';
 import { fleetComplianceReport, fleetHealthRollup, haStatus } from '@/tools/fleet';
 import { networkConfig, networkInterfaces } from '@/tools/network';
+import { nfsClients } from '@/tools/nfs';
 import { poolTopology, scrubHistory } from '@/tools/pools';
 import { replicationStatus } from '@/tools/replication';
 import {
@@ -32,7 +33,7 @@ import {
 } from '@/tools/tasks';
 import { vmLogs, vmsList } from '@/tools/vms';
 
-/** The sketch's catalog: forty-three read-only tools plus one mutating tool. */
+/** The sketch's catalog: forty-four read-only tools plus one mutating tool. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -60,6 +61,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(tasksRecentRuns);
   catalog.register(sharesList);
   catalog.register(shareAccess);
+  catalog.register(nfsClients);
   catalog.register(iscsiList);
   catalog.register(nvmeofList);
   catalog.register(usersList);
@@ -103,6 +105,7 @@ export {
   listDatasets,
   networkConfig,
   networkInterfaces,
+  nfsClients,
   nvmeofList,
   poolStatus,
   poolTopology,
