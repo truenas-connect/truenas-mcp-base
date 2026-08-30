@@ -59,8 +59,11 @@ interface BootEnvironment {
 
 /**
  * One section read, or the reason it could not be — the per-family attempt pair
- * `system.ts` and `fleet.ts` each keep, typed here by this family's own two
- * payloads rather than generalised over them.
+ * `system.ts` and `fleet.ts` each keep, generic over this family's own two
+ * payloads and no further. It stays in this file rather than moving to
+ * `common.ts`: what the four files holding one of these share is the shape, not
+ * the function, and generalising over the failure type would couple every
+ * family to one signature for no gain.
  */
 interface Attempt<T> {
   value: T | null;
