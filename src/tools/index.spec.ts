@@ -3,13 +3,14 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the forty-two sketch tools', () => {
+  it('registers the forty-three sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
       'system_reboot_info',
       'audit_log_query',
       'audit_config',
+      'security_config',
       'storage_pool_status',
       'storage_pool_topology',
       'storage_scrub_history',
@@ -251,6 +252,12 @@ describe('createDefaultCatalog', () => {
   it('advertises boot_pool_status to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
       'boot_pool_status',
+    );
+  });
+
+  it('advertises security_config to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'security_config',
     );
   });
 });

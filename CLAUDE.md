@@ -331,6 +331,28 @@ not be read still carries every field it promises, as nulls: `undefined`
 serializes to no key at all, and a caller would otherwise get a shape it was
 never told about.
 
+### A unit goes in a field name only where the unit was established (#96)
+
+`security_config` reports `min_password_age`, `max_password_age` and `window`
+with no unit in the name, where `audit_config` reports `retention_days` and
+`boot_pool_status` reports `size_bytes`. The difference is not style either.
+`size_bytes` is a unit the payload's own field name carries; the three above are
+bare numbers on the pinned surface, which declares no unit for any of them and
+documents none. Suffixing them would have been this repository asserting a unit
+it never read — the same defect as a description promising more than the
+normalization delivers, one level down in the name.
+
+**A suffix is a claim, and a caller acts on it.** A `_days` on a number the
+system meant as seconds is worse than no suffix at all: an unsuffixed number is
+read as itself and asked about, and a wrongly suffixed one is converted. So
+carry the unit when the API states it, and otherwise keep the middleware's own
+name and say in the description that no unit is reported and the number is not
+to be converted.
+
+`retention_days` predates this and is not being renamed here — it is on a
+public barrel export and out of this ticket's scope. Treat it as the shape to
+check rather than the shape to copy.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
