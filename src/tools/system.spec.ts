@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeSystem, failingSystem } from '@/testing/fake-systems';
-import { auditConfig, auditLogQuery, rebootInfo, updateStatus } from '@/tools/index';
+import {
+  auditConfig,
+  auditLogQuery,
+  rebootInfo,
+  systemGeneralConfig,
+  updateStatus,
+} from '@/tools/index';
 
 describe('system_update_status', () => {
   /** `update.status` as the middleware sends it on a system with an update. */
@@ -870,6 +876,299 @@ describe('system_reboot_info', () => {
     const { ctx, call, query } = fakeSystem({ ['system.reboot.info']: info() });
     await rebootInfo.handler(ctx, {});
     expect(call.mock.calls.map((args) => args[0])).toEqual(['system.reboot.info']);
+    expect(query).not.toHaveBeenCalled();
+  });
+});
+
+describe('system_general_config', () => {
+  /** `system.general.config` as the middleware sends it, every field present. */
+  const config = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    ui_certificate: { id: 1, name: 'truenas_default' },
+    ui_httpsport: 443,
+    ui_httpsredirect: true,
+    ui_httpsprotocols: ['TLSv1.2', 'TLSv1.3'],
+    ui_port: 80,
+    ui_address: ['0.0.0.0'],
+    ui_v6address: ['::'],
+    ui_allowlist: [],
+    ui_consolemsg: false,
+    ui_x_frame_options: 'SAMEORIGIN',
+    kbdmap: 'us',
+    timezone: 'America/Los_Angeles',
+    usage_collection: true,
+    wizardshown: true,
+    usage_collection_is_set: true,
+    ds_auth: false,
+    ...over,
+  });
+
+  // Required rather than defaulted, so that a case about a system answering
+  // with `undefined` is not swallowed by the default.
+  const reported = async (answer: unknown): Promise<Record<string, unknown>> => {
+    const { ctx } = fakeSystem({ ['system.general.config']: answer });
+    return (await systemGeneralConfig.handler(ctx, {})) as Record<string, unknown>;
+  };
+
+  /** The result for a payload differing only in the fields the case is about. */
+  const forConfig = async (over: Record<string, unknown>): Promise<Record<string, unknown>> =>
+    reported(config(over));
+
+  /** One field of such a result, which is what most cases here are about. */
+  const field = async (over: Record<string, unknown>, name: string): Promise<unknown> =>
+    (await forConfig(over))[name];
+
+  it('reports the timezone and the settings beside it through named fields', async () => {
+    expect(await reported(config())).toEqual({
+      timezone: 'America/Los_Angeles',
+      keyboard_map: 'us',
+      ui_port: 80,
+      ui_https_port: 443,
+      ui_https_redirect: true,
+      ui_https_protocols: ['TLSv1.2', 'TLSv1.3'],
+      ui_addresses: ['0.0.0.0'],
+      ui_v6_addresses: ['::'],
+      ui_allowlist: [],
+      ui_x_frame_options: 'SAMEORIGIN',
+      ui_console_messages: false,
+      ui_certificate_configured: true,
+      usage_collection: true,
+      usage_collection_is_set: true,
+    });
+  });
+
+  it('tells the kinds of time apart by the value, not by the tool', async () => {
+    // A list of tool names is incomplete the day a tool is added and is
+    // silently wrong rather than loudly so; the shape of the value a caller is
+    // holding is not.
+    expect(systemGeneralConfig.description).toContain(
+      'DECIDE FROM THE VALUE YOU ARE HOLDING, NEVER FROM WHICH TOOL RETURNED IT',
+    );
+    // Already local, and converting it would move it by the offset.
+    expect(systemGeneralConfig.description).toContain(
+      'A RENDERED SCHEDULE — the English in a `schedule_description`',
+    );
+    expect(systemGeneralConfig.description).toContain('do NOT convert it');
+    // Absolute, and stating it as a wall-clock hour needs converting.
+    expect(systemGeneralConfig.description).toContain('IS ABSOLUTE');
+    expect(systemGeneralConfig.description).toContain('CONVERT one INTO this zone');
+    // Unstated, which is neither of the above and is the one a caller is most
+    // likely to convert twice.
+    expect(systemGeneralConfig.description).toContain(
+      'NOTHING IN THIS CATALOG ESTABLISHES WHAT ZONE IT IS IN',
+    );
+  });
+
+  it('covers the middleware date envelope, which a tool can forward unread', async () => {
+    // `alerts_list` returns `alert.datetime` as it arrived, and that can be the
+    // `{ $date: <epoch ms> }` carrier `common.ts` names — absolute, and needing
+    // the same conversion as a `Z`-suffixed string. Sorting it by "carries no
+    // `Z`" gives the answer backwards, which is why it is its own rule.
+    expect(systemGeneralConfig.description).toContain('AN OBJECT CARRYING A `$date`');
+    expect(systemGeneralConfig.description).toContain('MILLISECONDS SINCE THE EPOCH');
+    expect(systemGeneralConfig.description).toContain('CONVERT it into this zone exactly as (2)');
+    expect(systemGeneralConfig.description).toContain('It is not (3)');
+  });
+
+  it('names tools as examples and ends on a rule for a shape it does not describe', async () => {
+    // The defect a count of forms reproduces one level up from a list of tool
+    // names: both are closed, and the catalog grows. The last rule is what
+    // makes a form nobody has written down yet answerable honestly.
+    expect(systemGeneralConfig.description).toContain('AMONG THEM, named as');
+    expect(systemGeneralConfig.description).toContain('examples and not as the whole set');
+    expect(systemGeneralConfig.description).toContain(
+      'a shape none of the above describes — IS NOT COVERED BY THIS RULE',
+    );
+    expect(systemGeneralConfig.description).not.toContain('the catalog reports times in three');
+  });
+
+  it('does not claim to be the only tool reporting the timezone', async () => {
+    // `system_info` returns the same setting. What it does not do is say what
+    // the zone is the frame for, which is what this tool adds.
+    expect(systemGeneralConfig.description).toContain('`system_info` also returns a `timezone`');
+  });
+
+  it('nulls a timezone it could not read rather than falling back to UTC', async () => {
+    // The expensive direction: a wrong frame is applied silently to every time
+    // in the catalog, where a null is a question the caller has to ask.
+    for (const unreadable of [null, undefined, '', 7, ['UTC']]) {
+      expect(await field({ timezone: unreadable }, 'timezone')).toBeNull();
+    }
+    expect(systemGeneralConfig.description).toContain('which is NOT UTC');
+  });
+
+  it('carries no field the tool does not name, whatever the payload holds', async () => {
+    // `id`, `wizardshown` and `ds_auth` are in the fixture above and none of
+    // them is here; nor is a field a later TrueNAS release adds.
+    const result = await forConfig({ ui_restart_delay: 5, rollback_timeout: 60 });
+    expect(Object.keys(result)).toEqual([
+      'timezone',
+      'keyboard_map',
+      'ui_port',
+      'ui_https_port',
+      'ui_https_redirect',
+      'ui_https_protocols',
+      'ui_addresses',
+      'ui_v6_addresses',
+      'ui_allowlist',
+      'ui_x_frame_options',
+      'ui_console_messages',
+      'ui_certificate_configured',
+      'usage_collection',
+      'usage_collection_is_set',
+    ]);
+  });
+
+  it('reduces the certificate to whether one is configured, never the record', async () => {
+    // An open record forwarded would carry whatever a later release puts in it,
+    // and `certificates_list` is the tool for the detail.
+    const named = { ui_certificate: { id: 3, name: 'letsencrypt' } };
+    expect(await field(named, 'ui_certificate_configured')).toBe(true);
+    expect(JSON.stringify(await forConfig(named))).not.toContain('letsencrypt');
+  });
+
+  it("reads the newer surface's certificate id as one being configured", async () => {
+    // A later directory in the same client declares `ui_certificate` as the
+    // certificate's id rather than an embedded record, so a system on that
+    // release sends a number for a web UI that DOES have one. Reading only the
+    // record shape would answer null — "could not be read" — for exactly those
+    // systems.
+    expect(await field({ ui_certificate: 1 }, 'ui_certificate_configured')).toBe(true);
+    expect(await field({ ui_certificate: 0 }, 'ui_certificate_configured')).toBe(true);
+  });
+
+  it('keeps "no certificate" and "could not be read" apart', async () => {
+    // `recordOrNull` alone would answer null for both, and only one of them is
+    // something the system said.
+    expect(await field({ ui_certificate: null }, 'ui_certificate_configured')).toBe(false);
+    for (const unreadable of [undefined, 'truenas_default', [], Number.NaN]) {
+      expect(await field({ ui_certificate: unreadable }, 'ui_certificate_configured')).toBeNull();
+    }
+  });
+
+  it('reports the usage-collection pair together, keeping off apart from never chosen', async () => {
+    // Reporting the boolean alone loses exactly the distinction the second
+    // field exists to preserve.
+    const pair = async (over: Record<string, unknown>): Promise<unknown> => {
+      const result = await forConfig(over);
+      return [result['usage_collection'], result['usage_collection_is_set']];
+    };
+    // Nobody has answered the question, so the false beside it is a default
+    // rather than a decision.
+    expect(await pair({ usage_collection: false, usage_collection_is_set: false })).toEqual([
+      false,
+      false,
+    ]);
+    // The same false, and this time somebody chose it.
+    expect(await pair({ usage_collection: false, usage_collection_is_set: true })).toEqual([
+      false,
+      true,
+    ]);
+    for (const unreadable of [null, undefined, 'true', 1]) {
+      const [, isSet] = (await pair({ usage_collection_is_set: unreadable })) as unknown[];
+      expect(isSet).toBeNull();
+    }
+  });
+
+  it('reports the boolean settings three-valued, and never defaults one to false', async () => {
+    // A system that reported no value has not been shown to be redirecting
+    // plain HTTP, or to be hiding console messages.
+    for (const [sent, reported_] of [
+      ['ui_httpsredirect', 'ui_https_redirect'],
+      ['ui_consolemsg', 'ui_console_messages'],
+    ] as const) {
+      expect(await field({ [sent]: true }, reported_)).toBe(true);
+      expect(await field({ [sent]: false }, reported_)).toBe(false);
+      for (const unreadable of [null, undefined, 'true', 1]) {
+        expect(await field({ [sent]: unreadable }, reported_)).toBeNull();
+      }
+    }
+  });
+
+  it('nulls a port the system reported no number for, and keeps a zero', async () => {
+    expect(await field({ ui_port: 0 }, 'ui_port')).toBe(0);
+    for (const unreadable of [null, undefined, '443', Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(await field({ ui_port: unreadable }, 'ui_port')).toBeNull();
+      expect(await field({ ui_httpsport: unreadable }, 'ui_https_port')).toBeNull();
+    }
+  });
+
+  it('distinguishes a list the system named nothing in from one it could not read', async () => {
+    // Empty is an answer — the system reported the list and it names nothing —
+    // and null is the absence of one.
+    for (const [sent, reported_] of [
+      ['ui_httpsprotocols', 'ui_https_protocols'],
+      ['ui_address', 'ui_addresses'],
+      ['ui_v6address', 'ui_v6_addresses'],
+      ['ui_allowlist', 'ui_allowlist'],
+    ] as const) {
+      expect(await field({ [sent]: [] }, reported_)).toEqual([]);
+      for (const unreadable of [null, undefined, 'TLSv1.2', 7, {}]) {
+        expect(await field({ [sent]: unreadable }, reported_)).toBeNull();
+      }
+    }
+  });
+
+  it('nulls a list whole rather than dropping the entry it could not read', async () => {
+    // The #93 direction rule: a protocol list one entry shorter would hide the
+    // old TLS version this field is read for, and an address list one entry
+    // shorter would understate what the web UI listens on.
+    expect(await field({ ui_httpsprotocols: ['TLSv1', 7] }, 'ui_https_protocols')).toBeNull();
+    expect(await field({ ui_httpsprotocols: ['TLSv1', ''] }, 'ui_https_protocols')).toBeNull();
+    expect(await field({ ui_address: ['10.0.0.1', null] }, 'ui_addresses')).toBeNull();
+    expect(await field({ ui_v6address: ['::', {}] }, 'ui_v6_addresses')).toBeNull();
+    expect(await field({ ui_allowlist: ['10.0.0.0/8', 7] }, 'ui_allowlist')).toBeNull();
+  });
+
+  it('passes through a protocol and a framing policy the pinned client does not declare', async () => {
+    // These are values rather than fields, so a value a later TrueNAS release
+    // adds is answerable without a change here.
+    expect(await field({ ui_httpsprotocols: ['TLSv1.4'] }, 'ui_https_protocols')).toEqual([
+      'TLSv1.4',
+    ]);
+    expect(await field({ ui_x_frame_options: 'ALLOW_FROM' }, 'ui_x_frame_options')).toBe(
+      'ALLOW_FROM',
+    );
+  });
+
+  it('states no verdict about the TLS protocol list', async () => {
+    // The #47 decision: the list is the fact, and "acceptable" is a claim
+    // against a standard nobody supplied. A system still accepting TLSv1 gets
+    // the same shape of result as one that does not.
+    const legacy = await forConfig({ ui_httpsprotocols: ['TLSv1', 'TLSv1.1'] });
+    expect(legacy['ui_https_protocols']).toEqual(['TLSv1', 'TLSv1.1']);
+    expect(Object.keys(legacy)).toEqual(Object.keys(await reported(config())));
+    expect(systemGeneralConfig.description).toContain('THIS TOOL STATES NO VERDICT ABOUT THAT LIST');
+  });
+
+  it('nulls a keyboard map or a framing policy it could not read', async () => {
+    for (const unreadable of [null, undefined, '', 7]) {
+      expect(await field({ kbdmap: unreadable }, 'keyboard_map')).toBeNull();
+      expect(await field({ ui_x_frame_options: unreadable }, 'ui_x_frame_options')).toBeNull();
+    }
+  });
+
+  it('fails rather than answering nulls when the payload is not a configuration', async () => {
+    // Reached into rather than guarded, this would throw naming a property
+    // rather than the read that failed.
+    for (const answer of [null, undefined, 'general', 7, []]) {
+      await expect(reported(answer)).rejects.toThrow(
+        'system.general.config did not answer with a general configuration',
+      );
+    }
+  });
+
+  it('fails rather than answering a timezone of null when the read could not be made', async () => {
+    const { ctx } = failingSystem({}, { ['system.general.config']: new Error('connection reset') });
+    await expect(systemGeneralConfig.handler(ctx, {})).rejects.toThrow('connection reset');
+  });
+
+  it('never mutates, and reads no choices method', async () => {
+    // `timezone_choices`, `kbdmap_choices` and `country_choices` enumerate valid
+    // form values rather than facts about this system, and none of them is read.
+    const { ctx, call, query } = fakeSystem({ ['system.general.config']: config() });
+    await systemGeneralConfig.handler(ctx, {});
+    expect(call.mock.calls.map((args) => args[0])).toEqual(['system.general.config']);
     expect(query).not.toHaveBeenCalled();
   });
 });

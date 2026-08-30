@@ -83,6 +83,7 @@ export {
   auditLogQuery,
   auditConfig,
   securityConfig,
+  systemGeneralConfig,
   poolStatus,
   poolTopology,
   scrubHistory,

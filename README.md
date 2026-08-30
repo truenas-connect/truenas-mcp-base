@@ -15,7 +15,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
 - **Tool catalog** — curated tools with role metadata; irreversibly destructive
   operations are rejected at registration by policy. Read-only family:
   `system_info`, `system_update_status`, `system_reboot_info`,
-  `audit_log_query`, `audit_config`, `security_config`,
+  `audit_log_query`, `audit_config`, `security_config`, `system_general_config`,
   `storage_pool_status`, `storage_pool_topology`, `storage_scrub_history`,
   `boot_pool_status`,
   `storage_list_datasets`, `datasets_quota_report`, `disks_list`, `apps_list`,

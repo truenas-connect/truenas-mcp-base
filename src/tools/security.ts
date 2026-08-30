@@ -1,7 +1,13 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
-import { booleanOrNull, errorText, numberOrNull, recordOrNull, textOrNull } from '@/tools/common';
+import {
+  booleanOrNull,
+  errorText,
+  numberOrNull,
+  recordOrNull,
+  strictTextList,
+} from '@/tools/common';
 
 /**
  * The security posture SETTINGS of a system: FIPS and STIG mode, the password
@@ -69,29 +75,6 @@ interface TwoFactorSettings {
 interface Attempt<T> {
   value: T | null;
   error: string | null;
-}
-
-/**
- * The character classes the password policy requires, as names — or null where
- * the system listed something this tool cannot read as one.
- *
- * All-or-nothing rather than per-entry, which is why `textList` from
- * `common.ts` is not the guard here: that one drops an entry it cannot read,
- * and a ruleset one class shorter says the policy requires LESS than it does.
- * That is the #93 decision applied — a list that drops towards a claim must be
- * nulled, and "this system does not require special characters" is a claim a
- * dropped entry would make on no evidence. An EMPTY list is kept and is a
- * different answer: the system reported the ruleset and it names no classes.
- */
-function complexityRuleset(value: unknown): string[] | null {
-  if (!Array.isArray(value)) return null;
-  const classes: string[] = [];
-  for (const entry of value) {
-    const name = textOrNull(entry);
-    if (name === null) return null;
-    classes.push(name);
-  }
-  return classes;
 }
 
 /**
@@ -173,7 +156,13 @@ async function readSecurity(system: SystemHandle): Promise<Attempt<SecuritySetti
         max_password_age: numberOrNull(settings['max_password_age']),
         min_password_length: numberOrNull(settings['min_password_length']),
         password_history_length: numberOrNull(settings['password_history_length']),
-        password_complexity_ruleset: complexityRuleset(settings['password_complexity_ruleset']),
+        // `strictTextList` rather than `textList`, which drops what it cannot
+        // read: a ruleset one class shorter says the policy requires LESS than
+        // it does, and "this system does not require special characters" is a
+        // claim a dropped entry would make on no evidence. That is the #93
+        // direction rule. An EMPTY list is kept and is a different answer — the
+        // system reported the ruleset and it names no classes.
+        password_complexity_ruleset: strictTextList(settings['password_complexity_ruleset']),
       },
       error: null,
     };
