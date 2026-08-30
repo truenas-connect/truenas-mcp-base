@@ -849,12 +849,18 @@ function diskFileAttributes(held: AttributesOf<'RAW'> | AttributesOf<'DISK'>): D
  * `dtype` itself is reported beside it either way, so a caller can tell a kind
  * that was not mapped from a device whose configuration could not be read at
  * all.
+ *
+ * Each arm states the kind it is building, which is what makes the allowlists
+ * separate to the compiler rather than only in the reading: returned into the
+ * bare union, a field belonging to another kind would satisfy that kind's
+ * member and compile, which is exactly the flattened row this is written to
+ * avoid.
  */
 function readAttributes(dtype: string, held: Record<string, unknown>): DeviceAttributes | null {
   switch (dtype) {
     case 'CDROM': {
       const cdrom = held as AttributesOf<'CDROM'>;
-      return { path: textOrNull(cdrom.path) };
+      return { path: textOrNull(cdrom.path) } satisfies CdromAttributes;
     }
     case 'DISPLAY': {
       const display = held as AttributesOf<'DISPLAY'>;
@@ -865,7 +871,7 @@ function readAttributes(dtype: string, held: Record<string, unknown>): DeviceAtt
         web_port: numberOrNull(display.web_port),
         web: booleanOrNull(display.web),
         resolution: textOrNull(display.resolution),
-      };
+      } satisfies DisplayAttributes;
     }
     case 'NIC': {
       const nic = held as AttributesOf<'NIC'>;
@@ -874,11 +880,11 @@ function readAttributes(dtype: string, held: Record<string, unknown>): DeviceAtt
         nic_attach: textOrNull(nic.nic_attach),
         mac: textOrNull(nic.mac),
         trust_guest_rx_filters: booleanOrNull(nic.trust_guest_rx_filters),
-      };
+      } satisfies NicAttributes;
     }
     case 'PCI': {
       const pci = held as AttributesOf<'PCI'>;
-      return { pptdev: textOrNull(pci.pptdev) };
+      return { pptdev: textOrNull(pci.pptdev) } satisfies PciAttributes;
     }
     case 'RAW': {
       const raw = held as AttributesOf<'RAW'>;
@@ -888,7 +894,7 @@ function readAttributes(dtype: string, held: Record<string, unknown>): DeviceAtt
         exists: booleanOrNull(raw.exists),
         boot: booleanOrNull(raw.boot),
         size: numberOrNull(raw.size),
-      };
+      } satisfies RawAttributes;
     }
     case 'DISK': {
       const disk = held as AttributesOf<'DISK'>;
@@ -898,7 +904,7 @@ function readAttributes(dtype: string, held: Record<string, unknown>): DeviceAtt
         create_zvol: booleanOrNull(disk.create_zvol),
         zvol_name: textOrNull(disk.zvol_name),
         zvol_volsize: numberOrNull(disk.zvol_volsize),
-      };
+      } satisfies DiskAttributes;
     }
     case 'USB': {
       const usb = held as AttributesOf<'USB'>;
@@ -911,7 +917,7 @@ function readAttributes(dtype: string, held: Record<string, unknown>): DeviceAtt
         device: textOrNull(usb.device),
         vendor_id: textOrNull(identifiers['vendor_id']),
         product_id: textOrNull(identifiers['product_id']),
-      };
+      } satisfies UsbAttributes;
     }
     default:
       return null;
@@ -947,6 +953,14 @@ function readDevice(entry: unknown): VmDeviceRow {
     attributes: dtype === null ? null : readAttributes(dtype, held),
   };
 }
+
+/**
+ * What every failure of this read is named as, so that a rejection and an
+ * answer of the wrong shape reach the caller in the same words. Both are the
+ * device list not having been read, and a message that says so only in one of
+ * the two cases leaves the other looking like a fault somewhere else.
+ */
+const DEVICES_UNREAD = 'The virtual machine devices could not be listed: ';
 
 /** What a read that answered with something other than a list is reported as. */
 const NOT_A_DEVICE_LIST = 'the system answered with something other than a list of devices';
@@ -1011,14 +1025,15 @@ export const vmDevices: ReadOnlyTool = {
     'because a shorter list would say the machine does not have that device, ' +
     'which is exactly the wrong answer to give about a VM that will not start. ' +
     'Every field is null where the system reported no value this tool could ' +
-    'read. FOR THE FIELDS THIS API DECLARES NULLABLE — a NIC\'s `nic_attach` ' +
-    "and `mac`, a disk's `path` and `serial`, a RAW device's `size`, both " +
-    'sector sizes — NULL IS ALSO WHAT THE DEVICE ITSELF RECORDS WHEN NOTHING ' +
-    'IS CONFIGURED, and THIS TOOL DOES NOT SEPARATE THE TWO: a null ' +
-    '`nic_attach` is a NIC attached to no interface, or one whose attachment ' +
-    'could not be read, and nothing here says which. The fields the API ' +
-    'declares non-nullable — `pptdev`, a `CDROM` `path`, a `dtype` — carry ' +
-    'null only for the second reason. AN ' +
+    'read, AND FOR NEARLY ALL OF THEM THAT IS ALSO WHAT THE DEVICE ITSELF ' +
+    'RECORDS WHEN NOTHING IS CONFIGURED — this API declares almost every field ' +
+    'of every kind optional or nullable — SO THIS TOOL DOES NOT SEPARATE THE ' +
+    'TWO: a null `nic_attach` is a NIC attached to no interface, or one whose ' +
+    'attachment could not be read, and nothing here says which. FOUR FIELDS ' +
+    'ARE THE EXCEPTION, because the API declares them present and non-null on ' +
+    'their kind: `dtype`, a `CDROM` `path`, a `PCI` `pptdev` and a `RAW` ' +
+    '`path`. A null in one of those is this tool failing to read the value, ' +
+    'never the device recording none. AN ' +
     'EMPTY `devices` LIST IS A SYSTEM WITH NO LIBVIRT-BACKED VM DEVICES AT ' +
     'ALL, which includes a system with no libvirt-backed VMs. A machine ' +
     '`vms_list` reports with `source` `vm` AND NO ROW HERE HAS NO DEVICES ' +
@@ -1043,16 +1058,14 @@ export const vmDevices: ReadOnlyTool = {
       // answer to preserve, and an empty `devices` list means something
       // definite — no VM on this system has any device attached — that a read
       // which never happened has not established.
-      throw new Error(`The virtual machine devices could not be listed: ${errorText(reason)}`, {
-        cause: reason,
-      });
+      throw new Error(`${DEVICES_UNREAD}${errorText(reason)}`, { cause: reason });
     }
     // `query` types its answer as a list of rows, and that is a claim about
     // what the middleware sends rather than the value received: the call
     // directory declares this method as answering a union that also admits a
     // bare row and a count. Checked here so a non-list is that message rather
     // than a `.map` throwing out of the handler.
-    if (!Array.isArray(rows)) throw new Error(NOT_A_DEVICE_LIST);
+    if (!Array.isArray(rows)) throw new Error(`${DEVICES_UNREAD}${NOT_A_DEVICE_LIST}`);
     return { devices: rows.map(readDevice) };
   },
 };

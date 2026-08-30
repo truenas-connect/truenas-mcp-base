@@ -823,7 +823,8 @@ describe('vm_devices', () => {
     // admits a bare row and a count, so this is a shape the client's own types
     // say the middleware has.
     await expect(vmDevices.handler(fakeSystem({ ['vm.device.query']: 3 }).ctx, {})).rejects.toThrow(
-      'something other than a list of devices',
+      'The virtual machine devices could not be listed: the system answered with something ' +
+        'other than a list of devices',
     );
   });
 
