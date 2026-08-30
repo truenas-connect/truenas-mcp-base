@@ -177,9 +177,13 @@ export const appEngineStatus: ReadOnlyTool = {
     'ANYTHING FROM SEVERAL STOPPED APPLICATIONS. `running` is the answer: TRUE ' +
     'where the system reported a status meaning applications can run, FALSE ' +
     'WHERE IT REPORTED ONE MEANING THEY CANNOT — which is a positive finding, ' +
-    'the engine is down — and NULL WHERE NOTHING WAS ESTABLISHED, either ' +
-    'because the read failed or because the system used a status word this ' +
-    'catalog does not know. A NULL `running` IS NEVER TO BE READ AS THE FALSE ' +
+    'the engine is down — and NULL WHERE NOTHING WAS ESTABLISHED, which is any ' +
+    'of three: the read failed, the system used a status word this catalog does ' +
+    'not know, or it reported no status this tool could read at all. THOSE LAST ' +
+    'TWO BOTH ANSWER WITH `unavailable` NULL, since the engine was read and only ' +
+    'its status was not understood; they are told apart by `status`, which ' +
+    'carries the unknown word in the second case and is null in the third. ' +
+    'A NULL `running` IS NEVER TO BE READ AS THE FALSE ' +
     'ONE. `status` is the system\'s own word, passed through as it spelled it: ' +
     'RUNNING means the engine is up, STOPPED and FAILED mean it is not, ' +
     'PENDING, INITIALIZING and STOPPING are transient, and UNCONFIGURED means ' +
@@ -389,9 +393,13 @@ export const appsUpdateSummary: ReadOnlyTool = {
     'application rather than of its TrueNAS packaging, and the two vocabularies ' +
     'are not comparable: compare a human version only with another human ' +
     'version, and a plain version only with another plain version. Every field ' +
-    'is null where the system reported no value this tool could read, and every ' +
-    'field but the two installed ones is null on an entry whose ' +
-    '`unavailable` is non-null. ' +
+    'is null where the system reported no value this tool could read. ON AN ' +
+    'ENTRY WHOSE `unavailable` IS NON-NULL, the four version fields above are ' +
+    'ALL NULL and the three that came from the LISTING — `app`, ' +
+    '`installed_version` and `installed_human_version` — still carry whatever ' +
+    'the listing reported, because that read did not fail. A null among those ' +
+    'three is the listing having reported no value, not the summary having ' +
+    'failed. ' +
     'THE RELEASE NOTES ARE NOT REPORTED. The middleware offers a changelog and ' +
     'it is deliberately dropped: it is unbounded upstream prose returned once ' +
     'per application, and a cap on it could drop the very line naming a ' +
@@ -414,10 +422,17 @@ export const appsUpdateSummary: ReadOnlyTool = {
     try {
       const rows = await firstValueFrom(system.client.api.query('app.query'));
       if (!Array.isArray(rows)) return { unavailable: NOT_A_LIST, entries: null };
-      // Chosen inside the `try` with the read that produced them: a row the
-      // system sent in a shape this cannot walk at all is the LISTING being
-      // unreadable, which is an answer, rather than an exception out of a tool
-      // that promises never to throw.
+      // Chosen inside the `try` with the read that produced them, so a row that
+      // cannot be reached into at all — a null or an undefined in the list — is
+      // the LISTING being unreadable, which is an answer, rather than an
+      // exception out of a tool that promises never to throw.
+      //
+      // That is narrower than "any row this cannot read". A string or a number
+      // IS reached into successfully and answers `undefined` to every field, so
+      // it becomes an entry saying the system did not report whether an update
+      // is waiting for it. That is the direction rule again and it is the
+      // intended answer: the system listed something, and dropping it would say
+      // one fewer application has an update waiting than was established.
       candidates = rows.flatMap((row) => {
         const candidate = candidateOf(row);
         return candidate === null ? [] : [candidate];
