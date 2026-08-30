@@ -6,7 +6,7 @@ import { iscsiList, nvmeofList } from '@/tools/block';
 import { bootPoolStatus } from '@/tools/boot';
 import { certificatesList } from '@/tools/certificates';
 import { cloudCredentialsList } from '@/tools/credentials';
-import { disksList } from '@/tools/disks';
+import { disksList, disksTemperature } from '@/tools/disks';
 import { fleetComplianceReport, fleetHealthRollup, haStatus } from '@/tools/fleet';
 import { networkConfig, networkInterfaces } from '@/tools/network';
 import { nfsClients } from '@/tools/nfs';
@@ -40,7 +40,7 @@ import {
 } from '@/tools/tasks';
 import { vmDevices, vmLogs, vmsList } from '@/tools/vms';
 
-/** The sketch's catalog: forty-eight read-only tools plus three mutating tools. */
+/** The sketch's catalog: forty-nine read-only tools plus three mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -57,6 +57,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(listDatasets);
   catalog.register(quotaReport);
   catalog.register(disksList);
+  catalog.register(disksTemperature);
   catalog.register(appsList);
   catalog.register(appEngineStatus);
   catalog.register(appsUpdateSummary);
@@ -115,6 +116,7 @@ export {
   createSnapshot,
   directoryServicesStatus,
   disksList,
+  disksTemperature,
   fleetComplianceReport,
   fleetHealthRollup,
   haStatus,

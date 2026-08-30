@@ -91,6 +91,7 @@ export {
   listDatasets,
   quotaReport,
   disksList,
+  disksTemperature,
   appsList,
   appEngineStatus,
   appsUpdateSummary,

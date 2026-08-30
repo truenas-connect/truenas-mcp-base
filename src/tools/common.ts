@@ -112,6 +112,37 @@ export function strictTextList(value: unknown): string[] | null {
   return names;
 }
 
+/**
+ * The keys of a record whose values a tool does not report, by name and never
+ * by value.
+ *
+ * `reported` IS THE KEYS THAT ACTUALLY PRODUCED A VALUE, NOT THE ALLOWLIST, and
+ * that is the whole of what makes such a list say what it claims to. A key a
+ * tool looks for whose value a guard rejected has not been reported either, and
+ * it belongs here for exactly the reason a key nobody looked for does: the
+ * caller is left with a null field, and this list is the only thing that says
+ * the record held something under that name. Filtering by the allowlist instead
+ * would answer "every key is reported" while a named field beside it was null —
+ * the one reading this list exists to prevent.
+ *
+ * A key name is not a value: forwarding the record would put a field a later
+ * TrueNAS release adds into a tool result unannounced, which is what the
+ * allowlist convention exists to stop, while naming the keys tells a caller
+ * what was there without saying what it said. That is the whole of what makes
+ * an unconfirmed allowlist checkable from the outside (#98).
+ *
+ * Sorted so two systems reporting the same keys in a different order answer
+ * identically.
+ */
+export function unreportedKeys(
+  record: Record<string, unknown>,
+  reported: readonly string[],
+): string[] {
+  return Object.keys(record)
+    .filter((key) => !reported.includes(key))
+    .sort();
+}
+
 /** What a failure carrying no text of its own is reported as. */
 export const NO_REASON = 'the system reported no reason';
 
@@ -169,13 +200,13 @@ export interface MiddlewareDate {
 }
 
 /**
- * A caller's requested row limit, bounded into what a listing will actually ask
- * the middleware for.
+ * A caller's requested bound — a row limit, a number of days — brought into
+ * what a read will actually ask the middleware for.
  *
  * `fallback` and `max` are the calling family's own policy and are passed in —
  * what is shared is the bounding, not the numbers. Rounded down because a
  * fractional limit reaches the middleware as one, and floored at 1 because a
- * limit of zero or less would return nothing while reporting the system as
+ * bound of zero or less would return nothing while reporting the system as
  * holding more — true, and not an answer.
  */
 export function effectiveLimit(raw: unknown, fallback: number, max: number): number {
