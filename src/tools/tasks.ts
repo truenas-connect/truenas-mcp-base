@@ -1437,11 +1437,15 @@ function describeTask(spec: TaskKind, row: Record<string, unknown>, id: number):
 }
 
 /**
- * The six kinds, in the order their listing tools are registered in.
+ * The six kinds, in the order the `kind` enum advertises them: the three with a
+ * listing tool of their own first, then the three `automated_tasks_list` covers
+ * in the order its sections are returned in. It is not the order
+ * `createDefaultCatalog` registers those tools in, and nothing depends on
+ * either — the enum is a set, and the order is only what a caller reads.
  *
- * `cronjob.update`, `initshutdownscript.update` and the four below it are all
- * on `DefaultApiDirectory` — checked there rather than on a later directory,
- * since that is the surface these tools are written against (#91).
+ * Every one of the six update methods is on `DefaultApiDirectory`, checked
+ * there rather than on a later directory, since that is the surface these tools
+ * are written against (#91).
  */
 const TASK_KINDS: TaskKind[] = [
   {
