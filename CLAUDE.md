@@ -266,10 +266,14 @@ file a reviewer of that tool will open.
 Two things that rule does not decide on its own:
 
 - **A module whose spec would exceed 1,500 lines splits by tool, not by
-  bin-packing.** `reporting.ts` is the only one: its five blocks come to 2,405
+  bin-packing.** `reporting.ts` was the first: its five blocks come to 2,405
   lines, so each takes a spec named for the tool — `reporting-utilisation.spec.ts`,
-  `system-health-report.spec.ts`, and so on. Every filename then still says
-  exactly what is in it, which a `reporting-2.spec.ts` would not.
+  `system-health-report.spec.ts`, and so on. `tasks.ts` split the same way when
+  `automated_tasks_list` (#97) would have pushed `tasks.spec.ts` past the line,
+  so `automated-tasks-list.spec.ts` is that tool's and `tasks.spec.ts` keeps the
+  other three. A split takes the tools it has to and leaves the rest where they
+  are; every filename then still says exactly what is in it, which a
+  `reporting-2.spec.ts` would not.
 - **The catalog-wide test is not any tool's.** The exact-list assertion over
   `createDefaultCatalog()` is about `src/tools/index.ts`, so it lives in
   `index.spec.ts` under the same rule as everything else. Registering a tool
@@ -360,6 +364,71 @@ to be converted.
 `retention_days` predates this and is not being renamed here — it is on a
 public barrel export and out of this ticket's scope. Treat it as the shape to
 check rather than the shape to copy.
+
+### One tool with four sections, where the defect was the missing category (#97)
+
+`automated_tasks_list` reads `cronjob.query`, `rsynctask.query`,
+`cloud_backup.query` and `initshutdownscript.query` and returns **one result with
+four sections**, where every sibling in the tasks family is one tool per task
+type. The open question the ticket left was one tool or four, and what decides it
+is the defect rather than the response size.
+
+What was wrong before was not that four listings were missing. It was that "what
+runs on this system without anyone asking" got a **confident answer with whole
+categories silently absent from it** — nothing in a `cloudsync_tasks_list`
+response says that cloud *backup* is a different engine that was never looked at.
+Four separate tools reproduce that one level down: a caller that reaches three of
+them still gets an answer with nothing in it saying what the fourth would have
+added. Four sections in one response, each carrying its own `unavailable`, is the
+shape where the gap is **in** the answer.
+
+**Ask which of those two a new multi-read tool is.** A tool whose subject is a
+list of one kind of thing is one tool per kind, as `snapshot_tasks_list` and
+`cloudsync_tasks_list` are. A tool whose subject is *completeness across kinds*
+has to return the kinds together, because the missing kind is the finding.
+
+Three things follow, and the first is the one a later tool is most likely to get
+wrong:
+
+- **The name may not promise what one section cannot deliver.** It is
+  `automated_tasks_list` and not `scheduled_tasks_list` because an init/shutdown
+  script is not scheduled — it runs at a point in the system's lifecycle, carries
+  no cron fields, and reports no `schedule` key at all rather than a null one. A
+  null there would read as a schedule that could not be read. This is
+  `storage_scrub_history`'s review finding — a tool *name* promising more than
+  the data holds — avoided in advance.
+- **The section seam is `boot.ts`'s, and it is now the shape for any tool over
+  independent reads.** Each section is `{ unavailable, entries }`; `entries` is
+  null whenever `unavailable` is non-null and `[]` where the system listed none,
+  and a read answering with something that is not a list is that section being
+  unreadable rather than the system holding none of that type. An unreadable
+  *entry* inside a readable list is kept as a row of nulls, per the direction rule
+  in #93: dropping it would say the system runs one fewer command on its own,
+  which is the claim this tool must not make without having established it.
+- **Naming the fields one by one is a credential boundary here, not a
+  convention.** A `cloud_backup` row carries `password` — the passphrase the
+  backup repository is encrypted with, declared a plain `string` — beside a
+  credential whose `provider` holds the access key, and an rsync task's
+  `ssh_credentials.attributes` holds an SSH **private key**. A row mapped by
+  trimming would have put all three in a tool result, and tool results are
+  recorded verbatim in the audit trail (S3.3). Both credentials are read by `id`
+  and `name` and no further, as a cloud sync task's already is.
+
+The one thing this tool *does* pass through unredacted is a cron job's `command`
+and an init/shutdown entry's, which can contain a credential an operator inlined.
+That is the operator's own text rather than a secret the repository was asked to
+hold, and the catalog's "no secrets as arguments" rule in `catalog/tool.ts`
+concerns arguments rather than response data. The description says so instead.
+The one place this repository *does* treat response data as credential-shaped is
+the minted download URL in #72, which is a string this code produces.
+
+**The source stays in `tasks.ts` and only the spec is a new file.** The cron
+rendering (`describeSchedule` and the helpers under it) and the last-run reading
+(`lastRunState`, `jobFinishedAt`, `jobError`) are this family's own vocabulary,
+not `common.ts`'s, and re-deriving a second opinion about what a cron expression
+means was the failure mode most worth avoiding — so the tool is written beside
+them and calls them in place. `tasks.spec.ts` would have passed 1,500 lines, so
+the tests are `automated-tasks-list.spec.ts` under the split rule in #87.
 
 ## Conventions
 

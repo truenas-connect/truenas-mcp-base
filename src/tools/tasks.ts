@@ -1,7 +1,15 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool } from '@/catalog/tool';
-import { MAX_TIME_MS, MiddlewareDate } from '@/tools/common';
+import {
+  booleanOrNull,
+  errorText,
+  MAX_TIME_MS,
+  MiddlewareDate,
+  numberOrNull,
+  recordOrNull,
+  textOrNull,
+} from '@/tools/common';
 
 /**
  * Tasks family: the work a system does to itself on a schedule, with nobody
@@ -18,11 +26,17 @@ import { MAX_TIME_MS, MiddlewareDate } from '@/tools/common';
  * the system is the one a cloud sync task made — and a task that stopped
  * succeeding announces itself nowhere until someone needs the copy.
  *
- * `tasks_recent_runs` comes at all of it from the other end. The two above list
- * what is *arranged*, one kind of task at a time; that one lists what actually
- * *ran*, of every kind at once — scrubs, replication, cloud sync, app upgrades,
- * updates — because every long-running operation on TrueNAS is a job and they
- * all land in the same place.
+ * `automated_tasks_list` covers the four remaining kinds at once — cron jobs,
+ * rsync tasks, cloud backup tasks and init/shutdown scripts. Those two above
+ * are two of six, so before it "what runs on this system without anyone asking"
+ * had a confident and incomplete answer, with nothing in the response saying
+ * which categories were never looked at.
+ *
+ * `tasks_recent_runs` comes at all of it from the other end. The three above
+ * list what is *arranged*; that one lists what actually *ran*, of every kind at
+ * once — scrubs, replication, cloud sync, app upgrades, updates — because every
+ * long-running operation on TrueNAS is a job and they all land in the same
+ * place.
  */
 
 /**
@@ -588,6 +602,426 @@ export const cloudsyncTasksList: ReadOnlyTool = {
 };
 
 /**
+ * One section read, or the reason it could not be — the per-family attempt pair
+ * `boot.ts`, `system.ts` and `fleet.ts` each keep, generic over a list of this
+ * family's own rows and no further. It stays in this file rather than moving to
+ * `common.ts`: what the files holding one of these share is the shape, not the
+ * function, and generalising over the failure type would couple every family to
+ * one signature. See the decision in `CLAUDE.md`.
+ */
+interface Attempt<T> {
+  value: T | null;
+  error: string | null;
+}
+
+/**
+ * One task type's rows, with a failure named rather than thrown.
+ *
+ * `automated_tasks_list` reads four unrelated middleware methods, and a system
+ * that refuses one of them — a role that cannot reach it, a release that does
+ * not carry it — must still answer for the other three. So each read is a
+ * section carrying its own reason, and none of them can fail the tool.
+ *
+ * An answer that is not a list is reported as the section being unreadable
+ * rather than as the system holding none of that task type. Those are opposite
+ * answers to the question this tool exists for: "nothing is arranged here" and
+ * "nothing was established about what is arranged here".
+ *
+ * The read is a thunk rather than a promise so that a verb throwing
+ * synchronously is caught here too, alongside one that rejects.
+ */
+async function readTasks<T>(
+  read: () => Promise<unknown>,
+  noun: string,
+  map: (row: unknown) => T,
+): Promise<Attempt<T[]>> {
+  try {
+    const rows = await read();
+    if (!Array.isArray(rows)) {
+      return { value: null, error: `the system did not answer with a list of ${noun}` };
+    }
+    return { value: rows.map(map), error: null };
+  } catch (reason) {
+    return { value: null, error: errorText(reason) };
+  }
+}
+
+/**
+ * The fields of a row read through guards, or an empty record where the system
+ * sent something that is not a row at all.
+ *
+ * An unreadable entry is KEPT, as a row of nulls, rather than dropped — the
+ * reading `boot.ts` gives its environments, and for the same reason one step
+ * sharper here. A listing one entry shorter says the system runs one fewer
+ * command on its own, which is a claim about the system rather than about this
+ * tool, and it runs towards the one answer this tool must never state without
+ * having established it.
+ */
+function rowFields(row: unknown): Record<string, unknown> {
+  return recordOrNull(row) ?? {};
+}
+
+/** The five cron fields of a row's schedule, or null where it carries none. */
+function scheduleOf(row: Record<string, unknown>): CronFields | null {
+  const cron = cronOf(row['schedule']);
+  return cron === null ? null : cronFieldsOf(cron);
+}
+
+/** One cron job as this tool reports it. */
+interface CronJobRow {
+  id: number | null;
+  description: string | null;
+  command: string | null;
+  user: string | null;
+  enabled: boolean | null;
+  schedule: CronFields | null;
+  schedule_description: string | null;
+}
+
+/**
+ * One cron job: a shell command the system runs on a schedule, as a user.
+ *
+ * `command` and `user` together are the sharpest thing this tool reports — a
+ * cron job running arbitrary commands as root is a fact an operator wants
+ * surfaced, and neither is a secret this repository is handing over. A command
+ * string can nonetheless CONTAIN one, because it is whatever the operator
+ * typed; it is passed through rather than redacted, and the description says
+ * so. The rule it is measured against is the catalog's own, which concerns
+ * secrets as tool ARGUMENTS. The one place this repository does treat response
+ * data as credential-shaped is a minted download URL, which is a string this
+ * code produces rather than one an operator supplied — see `CLAUDE.md`.
+ *
+ * `stdout` and `stderr` are on the row and are not reported: they switch
+ * whether the job's output is discarded or mailed, the client declares them as
+ * bare booleans with no statement of which way round that is, and a field named
+ * for a meaning this tool cannot state exactly is worse than an absent one.
+ */
+function mapCronJob(row: unknown): CronJobRow {
+  const held = rowFields(row);
+  const schedule = scheduleOf(held);
+  return {
+    id: numberOrNull(held['id']),
+    description: textOrNull(held['description']),
+    command: textOrNull(held['command']),
+    user: textOrNull(held['user']),
+    enabled: booleanOrNull(held['enabled']),
+    schedule,
+    // Rendered from the normalized fields rather than from the row, so that
+    // what is described and what is reported cannot be two different readings
+    // of the same schedule — as in the two tools above.
+    schedule_description: schedule === null ? null : describeSchedule(schedule),
+  };
+}
+
+/** One rsync task as this tool reports it. */
+interface RsyncTaskRow {
+  id: number | null;
+  description: string | null;
+  path: string | null;
+  user: string | null;
+  direction: string | null;
+  mode: string | null;
+  remote_host: string | null;
+  remote_port: number | null;
+  remote_module: string | null;
+  remote_path: string | null;
+  ssh_credential_id: number | null;
+  ssh_credential_name: string | null;
+  enabled: boolean | null;
+  schedule: CronFields | null;
+  schedule_description: string | null;
+  state: string | null;
+  finished_at: string | null;
+  error: string | null;
+}
+
+/**
+ * One rsync task: a scheduled copy between this system and a remote one.
+ *
+ * The SSH credential is read by id and name and no further, exactly as a cloud
+ * sync task's is. Its `attributes` hold an SSH PRIVATE KEY, so reading anything
+ * else off it would put a secret in a tool result — and tool results are
+ * recorded verbatim in the audit trail.
+ */
+function mapRsyncTask(row: unknown): RsyncTaskRow {
+  const held = rowFields(row);
+  const schedule = scheduleOf(held);
+  // Both derived from the row's job record rather than from each other, and the
+  // state reported is then passed to `jobFinishedAt` — so whether the recorded
+  // time counts as a finish time is decided from the state the caller is given.
+  const run = lastRunOf(held['job']);
+  const reported = lastRunState(held['job']);
+  return {
+    id: numberOrNull(held['id']),
+    // The middleware names this one `desc` where a cloud sync task's is
+    // `description`; it is reported under the sibling name so that one field
+    // means one thing across the four sections.
+    description: textOrNull(held['desc']),
+    path: textOrNull(held['path']),
+    user: textOrNull(held['user']),
+    direction: textOrNull(held['direction']),
+    mode: textOrNull(held['mode']),
+    remote_host: textOrNull(held['remotehost']),
+    remote_port: numberOrNull(held['remoteport']),
+    remote_module: textOrNull(held['remotemodule']),
+    remote_path: textOrNull(held['remotepath']),
+    ssh_credential_id: credentialId(held['ssh_credentials']),
+    ssh_credential_name: stringField(held['ssh_credentials'], 'name'),
+    enabled: booleanOrNull(held['enabled']),
+    schedule,
+    schedule_description: schedule === null ? null : describeSchedule(schedule),
+    state: reported,
+    finished_at: jobFinishedAt(run, reported),
+    error: jobError(run),
+  };
+}
+
+/** One cloud backup task as this tool reports it. */
+interface CloudBackupRow {
+  id: number | null;
+  description: string | null;
+  path: string | null;
+  bucket: string | null;
+  folder: string | null;
+  credential_id: number | null;
+  credential_name: string | null;
+  keep_last: number | null;
+  enabled: boolean | null;
+  schedule: CronFields | null;
+  schedule_description: string | null;
+  state: string | null;
+  finished_at: string | null;
+  error: string | null;
+}
+
+/**
+ * One cloud backup task: a different backup engine from cloud sync, with its
+ * own tasks and its own schedule.
+ *
+ * A cloud backup row carries `password` — the passphrase the backup repository
+ * itself is encrypted with, declared a plain string — beside the stored
+ * credential whose `provider` holds the access key. NEITHER IS READ HERE, and
+ * naming the fields one by one is what keeps it that way: a row mapped by
+ * trimming would have put both in a tool result, and tool results are recorded
+ * verbatim in the audit trail. `pre_script` and `post_script` are left out
+ * under the same rule for the same reason.
+ */
+function mapCloudBackup(row: unknown): CloudBackupRow {
+  const held = rowFields(row);
+  const schedule = scheduleOf(held);
+  const run = lastRunOf(held['job']);
+  const reported = lastRunState(held['job']);
+  return {
+    id: numberOrNull(held['id']),
+    description: textOrNull(held['description']),
+    path: textOrNull(held['path']),
+    // Named rather than passed through: `attributes` is an open record whose
+    // contents differ per provider, as in `cloudsync_tasks_list`.
+    bucket: stringField(held['attributes'], 'bucket'),
+    folder: stringField(held['attributes'], 'folder'),
+    credential_id: credentialId(held['credentials']),
+    credential_name: stringField(held['credentials'], 'name'),
+    keep_last: numberOrNull(held['keep_last']),
+    enabled: booleanOrNull(held['enabled']),
+    schedule,
+    schedule_description: schedule === null ? null : describeSchedule(schedule),
+    state: reported,
+    finished_at: jobFinishedAt(run, reported),
+    error: jobError(run),
+  };
+}
+
+/** One init/shutdown script as this tool reports it. */
+interface InitShutdownScriptRow {
+  id: number | null;
+  comment: string | null;
+  type: string | null;
+  command: string | null;
+  script: string | null;
+  when: string | null;
+  enabled: boolean | null;
+  timeout_seconds: number | null;
+}
+
+/**
+ * One init/shutdown script: work the system runs at a POINT IN ITS LIFECYCLE
+ * rather than at a time of day.
+ *
+ * It carries no `schedule` field and none is invented for it. A cron rendering
+ * here would be this tool's own fiction about when the work happens, and a
+ * `schedule: null` beside the three sections that do carry one would read as a
+ * script whose schedule could not be read rather than as one that has none by
+ * construction.
+ */
+function mapInitShutdownScript(row: unknown): InitShutdownScriptRow {
+  const held = rowFields(row);
+  return {
+    id: numberOrNull(held['id']),
+    // The middleware's own name for the free-text label on these; there is no
+    // `description` on the row.
+    comment: textOrNull(held['comment']),
+    type: textOrNull(held['type']),
+    command: textOrNull(held['command']),
+    script: textOrNull(held['script']),
+    when: textOrNull(held['when']),
+    enabled: booleanOrNull(held['enabled']),
+    timeout_seconds: numberOrNull(held['timeout']),
+  };
+}
+
+/**
+ * The four remaining kinds of work a TrueNAS system starts on its own.
+ *
+ * ONE TOOL RATHER THAN FOUR, and the reason is the defect being fixed rather
+ * than the size of the response. What was wrong before was not that four
+ * listings were missing; it was that "what runs on this system without anyone
+ * asking" got a confident answer with whole categories silently absent from it.
+ * Four separate tools reproduce that at a smaller scale — a caller that reaches
+ * three of them still gets an answer with nothing in it saying what the fourth
+ * would have added. Four sections in one response, each carrying its own
+ * `unavailable`, is the shape where the gap is IN the answer.
+ *
+ * It is named `automated_tasks_list` and not `scheduled_…` because one of the
+ * four is not scheduled: an init/shutdown script runs at a point in the
+ * system's lifecycle. A name promising a schedule for a section that has none
+ * is the failure `storage_scrub_history` was reviewed for, in advance.
+ */
+export const automatedTasksList: ReadOnlyTool = {
+  name: 'automated_tasks_list',
+  description:
+    'Every cron job, rsync task, cloud backup task and init/shutdown script on ' +
+    'the system — the four remaining kinds of work a TrueNAS system starts on ' +
+    'its own. THIS TOOL DOES NOT LIST PERIODIC SNAPSHOT TASKS OR CLOUD SYNC ' +
+    'TASKS: those are `snapshot_tasks_list` and `cloudsync_tasks_list`, and an ' +
+    'answer here says nothing about either. CLOUD BACKUP IS A DIFFERENT ENGINE ' +
+    'FROM CLOUD SYNC, with its own tasks and its own schedule, so ' +
+    '`cloud_backup_tasks` here and `cloudsync_tasks_list` are two separate ' +
+    'sets and neither includes the other. `tasks_recent_runs` answers the ' +
+    'other half: this lists what is ARRANGED, that lists what actually RAN. ' +
+    'The result has FOUR SECTIONS — `cron_jobs`, `rsync_tasks`, ' +
+    '`cloud_backup_tasks` and `init_shutdown_scripts` — which come from ' +
+    'SEPARATE READS AND CAN FAIL INDEPENDENTLY. Each carries `unavailable`: ' +
+    'null where that section was read, and otherwise what the system said ' +
+    'about the failure — and then `entries` IS NULL BECAUSE THAT TASK TYPE WAS ' +
+    'NEVER LISTED, not because the system holds none of them. An EMPTY ' +
+    '`entries` is the opposite answer: the system listed that task type and ' +
+    'there were none. A failure in one section never empties or falsifies ' +
+    'another. Across every section, `id` is the numeric identity the ' +
+    'middleware holds the task under, `enabled` is whether it is switched on, ' +
+    'and a DISABLED TASK IS STILL LISTED and reported `enabled: false` rather ' +
+    'than omitted, because a task nobody switched back on is exactly the one ' +
+    'worth finding. Any field is null where the system reported no value this ' +
+    'tool could read, and a null `enabled` is neither on nor off. AN ENTRY ' +
+    'WHOSE FIELDS ARE ALL NULL IS STILL A TASK THE SYSTEM LISTED: it is kept ' +
+    'rather than dropped, so the number of entries stays true. ' +
+    'In `cron_jobs`: `command` is the shell command the system runs and `user` ' +
+    'the account it runs it as — a job running arbitrary commands as root is ' +
+    'visible here and nowhere else in this catalog. `command` IS WHATEVER THE ' +
+    'OPERATOR TYPED INTO IT and is passed through unchanged, so it may contain ' +
+    'a password, key or token someone inlined; it is the operator\'s own text ' +
+    'rather than a secret this system was asked to hold, and it is not ' +
+    'redacted. `description` is the name the job was given. Whether the job\'s ' +
+    'output is discarded or mailed is NOT reported. ' +
+    'In `rsync_tasks`: `path` is the local end and `direction` is `PUSH`, ' +
+    'copying from this system out to the remote, or `PULL`, copying onto it. ' +
+    '`mode` is `SSH` or `MODULE`, which is what says whether `remote_host`, ' +
+    '`remote_port` and `remote_path` or `remote_module` describe the far end; ' +
+    'the fields that do not apply to a task\'s mode are null, and that null is ' +
+    'not a failure to read them. `ssh_credential_id` and `ssh_credential_name` ' +
+    'identify the stored SSH credential and are the ONLY account of it: no ' +
+    'private key or passphrase appears anywhere in this result. `description` ' +
+    'is the name the task was given. ' +
+    'In `cloud_backup_tasks`: `path` is the local end, `bucket` and `folder` ' +
+    'the remote one, and `bucket` is null on a provider that has no buckets. ' +
+    '`credential_id` and `credential_name` identify the stored cloud ' +
+    'credential and are the ONLY account of it. THE PASSPHRASE THE BACKUP ' +
+    'REPOSITORY IS ENCRYPTED WITH IS NOT RETURNED, and neither are the access ' +
+    'key, token or password inside the credential, or the scripts the task ' +
+    'runs before and after itself. `keep_last` is how many backup snapshots ' +
+    'the task retains. ' +
+    'In `cron_jobs`, `rsync_tasks` and `cloud_backup_tasks`, `schedule` ' +
+    'carries the cron fields as the system holds them: `minute`, `hour`, `dom` ' +
+    '(day of the month), `month` and `dow` (day of the week). Each field is ' +
+    'null where the system reported no value, and `schedule` itself is null ' +
+    'where the task carries no readable schedule at all. None of these three ' +
+    'has a daily window, unlike a periodic snapshot task, so none is reported. ' +
+    '`schedule_description` restates those fields in words — `at 02:00, every ' +
+    'day`, or `every 4 hours at :00, on Monday and Thursday`. It is null where ' +
+    'the schedule is in a shape this tool does not render in words, and a null ' +
+    'there says nothing about the task: it is a limit of this tool rather than ' +
+    'a task without a schedule, and `schedule` is the exact account of when ' +
+    'the task runs either way. ' +
+    'In `rsync_tasks` and `cloud_backup_tasks` only, `state` is the state the ' +
+    'system recorded for the LAST RUN. `SUCCESS`, `FINISHED`, `FAILED`, ' +
+    '`ERROR` and `ABORTED` describe a run that ended; `RUNNING`, `WAITING`, ' +
+    '`PENDING`, `HOLD` and `LOCKED` describe one that has not. `NEVER_RUN` is ' +
+    'a task the system holds no run record for at all, and null is a run ' +
+    'record this tool could not read — those two are different answers, and a ' +
+    'task in either has not been shown to be working. A state a later TrueNAS ' +
+    'release adds is passed through as the system spelled it, so `state` is ' +
+    'not limited to that list. `finished_at` is when the last run ended, as an ' +
+    'ISO 8601 UTC timestamp, reported only under the states that describe a ' +
+    'run that ended and null under every other state including `RUNNING`. ' +
+    '`error` is the text recorded with that run and is null where none was ' +
+    'recorded, so a task in `FAILED` with a null `error` failed for a reason ' +
+    'the system did not record; it has not succeeded. CRON JOBS AND ' +
+    'INIT/SHUTDOWN SCRIPTS CARRY NO RUN RECORD AT ALL — the middleware does ' +
+    'not run them as jobs — so those two sections report no `state`, ' +
+    '`finished_at` or `error`, and nothing here says whether a cron job has ' +
+    'ever succeeded. ' +
+    'In `init_shutdown_scripts`: THESE ARE NOT SCHEDULED AND CARRY NO ' +
+    'SCHEDULE. They run at a point in the system\'s lifecycle, which `when` ' +
+    'names — `PREINIT` and `POSTINIT` are two points during startup and ' +
+    '`SHUTDOWN` is on the way down — and no section field states a time of ' +
+    'day, because there is none to state. `type` is `COMMAND` or `SCRIPT` and ' +
+    'is what says which of `command` and `script` is the one in use: `command` ' +
+    'is a shell command inlined into the entry, carrying the same caveat as a ' +
+    'cron job\'s, and `script` is the PATH to a script file on the system, ' +
+    'whose CONTENTS ARE NOT READ OR RETURNED. The one that does not apply is ' +
+    'null. `comment` is the free-text label the entry was given. ' +
+    '`timeout_seconds` is how long the system waits for it before moving on. ' +
+    'This tool only reports. It does not create, edit, run, enable, disable or ' +
+    'delete any task, and it does not report the output of one.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }) {
+    // All four reads are issued before any is awaited, so none waits on
+    // another, and none can fail the tool. No filters and no options on any of
+    // them: a system holds tens of each at most, and every field read here is
+    // part of a row as it stands.
+    const [cronJobs, rsyncTasks, cloudBackups, scripts] = await Promise.all([
+      readTasks(
+        () => firstValueFrom(system.client.api.query('cronjob.query')),
+        'cron jobs',
+        mapCronJob,
+      ),
+      readTasks(
+        () => firstValueFrom(system.client.api.query('rsynctask.query')),
+        'rsync tasks',
+        mapRsyncTask,
+      ),
+      readTasks(
+        () => firstValueFrom(system.client.api.query('cloud_backup.query')),
+        'cloud backup tasks',
+        mapCloudBackup,
+      ),
+      readTasks(
+        () => firstValueFrom(system.client.api.query('initshutdownscript.query')),
+        'init/shutdown scripts',
+        mapInitShutdownScript,
+      ),
+    ]);
+    return {
+      cron_jobs: { unavailable: cronJobs.error, entries: cronJobs.value },
+      rsync_tasks: { unavailable: rsyncTasks.error, entries: rsyncTasks.value },
+      cloud_backup_tasks: { unavailable: cloudBackups.error, entries: cloudBackups.value },
+      init_shutdown_scripts: { unavailable: scripts.error, entries: scripts.value },
+    };
+  },
+};
+
+/**
  * How far back `tasks_recent_runs` looks when the caller bounds nothing.
  *
  * The middleware holds every job it has run since it last started, which on a
@@ -779,9 +1213,11 @@ export const tasksRecentRuns: ReadOnlyTool = {
     'was called with, its result, its credentials and its logs are NOT ' +
     'returned: arguments and credentials can hold passwords and keys, and no ' +
     'secret passes through this tool. This lists jobs, which are operations ' +
-    'the system ran; the schedules that start some of them are ' +
-    '`snapshot_tasks_list` and `cloudsync_tasks_list`, and a task that has ' +
-    'never run has no job here at all.',
+    'the system ran; what is arranged to start some of them is ' +
+    '`snapshot_tasks_list`, `cloudsync_tasks_list` and `automated_tasks_list`, ' +
+    'and a task that has never run has no job here at all. Note that a cron ' +
+    'job and an init/shutdown script are not run as jobs, so neither appears ' +
+    'here however often it has run.',
   inputSchema: {
     type: 'object',
     properties: {
