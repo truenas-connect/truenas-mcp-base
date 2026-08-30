@@ -126,4 +126,6 @@ export {
   fleetComplianceReport,
   fleetHealthRollup,
   createSnapshot,
+  alertsDismiss,
+  alertsRestore,
 } from '@/tools/index';

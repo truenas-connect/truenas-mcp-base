@@ -1,6 +1,6 @@
 import { ToolCatalog } from '@/catalog/catalog';
 import { directoryServicesStatus, usersList } from '@/tools/accounts';
-import { alertSettings, alertsList } from '@/tools/alerts';
+import { alertsDismiss, alertSettings, alertsList, alertsRestore } from '@/tools/alerts';
 import { appEngineStatus, appsList, appsUpdateSummary } from '@/tools/apps';
 import { iscsiList, nvmeofList } from '@/tools/block';
 import { bootPoolStatus } from '@/tools/boot';
@@ -40,7 +40,7 @@ import {
 } from '@/tools/tasks';
 import { vmDevices, vmLogs, vmsList } from '@/tools/vms';
 
-/** The sketch's catalog: forty-eight read-only tools plus one mutating tool. */
+/** The sketch's catalog: forty-eight read-only tools plus three mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -92,12 +92,16 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(fleetComplianceReport);
   catalog.register(fleetHealthRollup);
   catalog.register(createSnapshot);
+  catalog.register(alertsDismiss);
+  catalog.register(alertsRestore);
   return catalog;
 }
 
 export {
+  alertsDismiss,
   alertSettings,
   alertsList,
+  alertsRestore,
   appEngineStatus,
   appsList,
   appsUpdateSummary,

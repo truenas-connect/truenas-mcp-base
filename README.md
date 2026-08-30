@@ -31,6 +31,9 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `reporting_utilisation`, `reporting_disk_io`, `reporting_space_trends`,
   `reporting_app_vm_usage`, `services_status`, `ha_status`,
   `system_health_report`, `fleet_compliance_report`, `fleet_health_rollup`.
+  Mutating family, all of them two-phase plan/confirm and all
+  `destructiveness: 'reversible'`: `snapshots_create`, `alerts_dismiss`,
+  `alerts_restore`.
 - **System registry** — 1..N named systems, each owning its own
   `@truenas/api-client` instance and credentials; `systems` selector
   (name / list / `all`, defaulting when one system is registered).
@@ -39,7 +42,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
 - **Plan/confirm** — mutating tools are two-phase: phase one returns a plan
   (the exact API calls to be made), phase two executes only with a single-use,
   expiring confirmation token bound to the plan's tool + arguments + targets.
-  Exercised end to end by `snapshots_create`.
+  Exercised end to end by `snapshots_create`, `alerts_dismiss` and
+  `alerts_restore`.
 - **Bounded file content** — an optional `SystemHandle.files` reader giving a
   tool the last N lines of a path on one system, over `core.download` and an
   adapter-supplied `ContentFetcher`. The line and byte bounds are enforced on
