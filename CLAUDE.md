@@ -451,8 +451,9 @@ the grouping before writing one.
 ### An unconfirmed allowlist over an open record names the keys it did not read (#98)
 
 `nfs_clients` reads `nfs.get_nfs4_clients`, whose row is `{ id, info, states }`
-with both of the last two typed `Record<string, unknown>` — the client declares
-that a record is there and says nothing whatever about what is in it. The
+with `info` typed `Record<string, unknown>` and `states` a list of them — the
+client declares that the records are there and says nothing whatever about what
+is in either, which is a shape and not a content. The
 allowlist convention still applies and the record must not be forwarded, so the
 tool has to name keys; but no live system was available to read the real ones
 off, so the names in `INFO_KEYS` are taken from what the Linux NFS server

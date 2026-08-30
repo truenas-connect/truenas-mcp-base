@@ -77,6 +77,11 @@ describe('nfs_clients', () => {
       expect(result['nfsv3']).toEqual([{ ip: '10.0.0.4', export: null }]);
     });
 
+    it('keeps a row that is not an object at all, with both fields null', async () => {
+      const result = await read({ [V3]: ['10.0.0.4'], [V4]: [] });
+      expect(result['nfsv3']).toEqual([{ ip: null, export: null }]);
+    });
+
     it('carries no field the tool does not name', async () => {
       const result = await read({
         [V3]: [{ ip: '10.0.0.4', export: '/mnt/tank/ledger', protocol_version: 3 }],
@@ -264,6 +269,25 @@ describe('nfs_clients', () => {
           { source: 'nfsv4', error: 'v4 failed' },
         ],
       });
+    });
+
+    it('nulls a version that answered with something other than a list, and names it', async () => {
+      // The client declares both calls as answering a union that includes a
+      // bare row and a count. Mapping over one of those would throw out of the
+      // handler and take the other version's answer with it.
+      const result = await read({ [V3]: 4, [V4]: [] });
+      expect(result['nfsv3']).toBeNull();
+      expect(result['nfsv4']).toEqual([]);
+      expect(result['failures']).toEqual([
+        { source: 'nfsv3', error: 'the system answered with something other than a list of clients' },
+      ]);
+    });
+
+    it('nulls an NFSv4 answer that is not a list without disturbing NFSv3', async () => {
+      const result = await read({ [V3]: [{ ip: '10.0.0.4', export: '/x' }], [V4]: { id: 'c' } });
+      expect(result['nfsv3']).toEqual([{ ip: '10.0.0.4', export: '/x' }]);
+      expect(result['nfsv4']).toBeNull();
+      expect((result['failures'] as Result[])[0]['source']).toBe('nfsv4');
     });
 
     it('reports a failure that said nothing as a failure rather than as empty text', async () => {

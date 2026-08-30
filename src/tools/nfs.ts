@@ -62,19 +62,33 @@ interface Failure {
 
 /** A read that produced rows, or the failure that stopped it. */
 interface Attempt<T> {
-  value: T | null;
+  value: T[] | null;
   failure: Failure | null;
 }
+
+/** What a read that answered with something other than a list is reported as. */
+const NOT_A_LIST = 'the system answered with something other than a list of clients';
 
 /**
  * One read, with a failure caught and named rather than thrown.
  *
  * The read is passed as a thunk so the call is made inside the `try`, which
  * keeps this correct for a read that throws before it returns a promise at all.
+ *
+ * A rejection is not the only way a read can fail to produce clients: the
+ * client's own types declare both of these calls as answering a union that
+ * includes a bare row and a count, and a declared type is a claim about what the
+ * middleware sends rather than the value received. So an answer that is not a
+ * list is caught here and reported exactly like a rejection — the alternative is
+ * a `.map` throwing out of the handler, which would take THE OTHER VERSION'S
+ * ANSWER DOWN WITH IT and is the one thing the two reads being independent is
+ * meant to prevent.
  */
-async function attempt<T>(source: Source, read: () => Promise<T>): Promise<Attempt<T>> {
+async function readClients<T>(source: Source, read: () => Promise<T[]>): Promise<Attempt<T>> {
   try {
-    return { value: await read(), failure: null };
+    const rows: unknown = await read();
+    if (!Array.isArray(rows)) return { value: null, failure: { source, error: NOT_A_LIST } };
+    return { value: rows as T[], failure: null };
   } catch (reason) {
     return { value: null, failure: { source, error: errorText(reason) } };
   }
@@ -90,23 +104,33 @@ async function attempt<T>(source: Source, read: () => Promise<T>): Promise<Attem
  * which a caller acting on one export needs on its own.
  *
  * Both fields are declared `string` and required by the client, and both are
- * read through a guard anyway: a declared type is a claim about what the
- * middleware sends, not the value received. Neither field is dropped when the
- * other is unreadable, because a row leaving this list entirely would shorten
- * it towards "nobody has this mounted", which is more than the read
- * established (#93).
+ * read through a guard anyway — as is the row itself, which is why this reads
+ * an `unknown` rather than the declared entity: a declared type is a claim
+ * about what the middleware sends, not the value received, and a row that is
+ * not an object at all would otherwise throw on the first field and take the
+ * NFSv4 answer with it. Neither field is dropped when the other is unreadable,
+ * because a row leaving this list entirely would shorten it towards "nobody has
+ * this mounted", which is more than the read established (#93).
  */
 interface Nfsv3Client {
   ip: string | null;
   export: string | null;
 }
 
+/** One NFSv3 row, read through the same guards its NFSv4 sibling uses. */
+function readNfsv3Client(client: unknown): Nfsv3Client {
+  const record = recordOrNull(client) ?? {};
+  return { ip: textOrNull(record['ip']), export: textOrNull(record['export']) };
+}
+
 /**
  * One NFSv4 client the server has registered, and what it is holding.
  *
- * `id` is the server's own identifier for the client and is the only field the
- * client's types declare. Everything below it is read out of the two open
- * records — see `INFO_KEYS` for why the key names are the risk in this file.
+ * `id` is the server's own identifier for the client, and is the only field
+ * whose CONTENT the client's types describe: `info` and `states` are declared
+ * too, as a record of unknown content and a list of them, which says a shape
+ * and nothing about what is inside. Everything below `id` is read out of those
+ * two — see `INFO_KEYS` for why the key names are the risk in this file.
  */
 interface Nfsv4Client {
   id: string | null;
@@ -253,8 +277,10 @@ export const nfsClients: ReadOnlyTool = {
     'the system reported no value this tool could read; such a row is still ' +
     'listed rather than dropped, because a shorter list would say the mount is ' +
     'not there. `nfsv4` is the registered clients, which the server does track. ' +
-    '`id` is the identifier the server knows the client by. `address` is where ' +
-    'it connects from and `status` the word the server used for its state, ' +
+    '`id` is the identifier the server knows the client by, and is null where ' +
+    'the system reported none this tool could read — a row whose `id` is null ' +
+    'is a client the server did not name, not one with no identity. `address` ' +
+    'is where it connects from and `status` the word the server used, ' +
     'reported verbatim — THE SET OF WORDS IS NOT CLOSED and one not recognised ' +
     'means the server said something this tool has no reading of. ' +
     '`seconds_from_last_renew` is how long ago the client last renewed its ' +
@@ -265,7 +291,11 @@ export const nfsClients: ReadOnlyTool = {
     '`state_count` of 0 is a client that is registered and holding nothing ' +
     'open, which is a different answer from the client not being listed; a ' +
     'non-zero `state_count` beside an empty `state_types` is state this tool ' +
-    'could not name rather than state of no kind. THE NFSv4 FIELD NAMES ABOVE ' +
+    'could not name rather than state of no kind. BOTH ARE NULL, RATHER THAN 0 ' +
+    'AND EMPTY, where the system reported the state list as something other ' +
+    'than a list: that is a client whose open state was not read at all, and ' +
+    'reading it as one holding nothing open is the one wrong answer here. THE ' +
+    'NFSv4 FIELD NAMES ABOVE ' +
     'ARE READ OUT OF TWO OPEN RECORDS AND ARE UNCONFIRMED. The client library ' +
     'types `info` and `states` as records of unknown content, so the keys this ' +
     'tool looks for were taken from what the Linux NFS server publishes and ' +
@@ -280,8 +310,12 @@ export const nfsClients: ReadOnlyTool = {
     'read and every key it carried is reported. `nfsv3` AND `nfsv4` ARE NULL ' +
     'WHEN THAT VERSION COULD NOT BE READ and empty when it was read and no ' +
     'client was found — never the same answer. The two reads are independent, ' +
-    'so a failure of one does not stop the other answering, and `failures` ' +
-    'names each one that failed as `source` (`nfsv3` or `nfsv4`) and `error`. ' +
+    'so a failure of one does not stop the other answering — including a row ' +
+    'this tool could not read, which is reported with its fields null rather ' +
+    'than raised. `failures` names each read that did not produce a list of ' +
+    'clients, as `source` (`nfsv3` or `nfsv4`) and `error`: a read that was ' +
+    'rejected carries the reason the system gave, and one that answered with ' +
+    'something other than a list says so. ' +
     'ON A SYSTEM WITH THE NFS SERVICE STOPPED THIS TOOL ANSWERS RATHER THAN ' +
     'FAILING, but which answer it gives depends on the middleware and has not ' +
     'been confirmed: where the call is rejected, that list is null with the ' +
@@ -305,8 +339,8 @@ export const nfsClients: ReadOnlyTool = {
     // its NFSv4 clients and rejects the NFSv3 call has half an answer worth
     // returning — which is what `failures` names.
     const [v3, v4] = await Promise.all([
-      attempt('nfsv3', () => firstValueFrom(system.client.api.query('nfs.get_nfs3_clients'))),
-      attempt('nfsv4', () => firstValueFrom(system.client.api.query('nfs.get_nfs4_clients'))),
+      readClients('nfsv3', () => firstValueFrom(system.client.api.query('nfs.get_nfs3_clients'))),
+      readClients('nfsv4', () => firstValueFrom(system.client.api.query('nfs.get_nfs4_clients'))),
     ]);
 
     const failures: Failure[] = [];
@@ -314,15 +348,7 @@ export const nfsClients: ReadOnlyTool = {
     if (v4.failure !== null) failures.push(v4.failure);
 
     return {
-      nfsv3:
-        v3.value === null
-          ? null
-          : v3.value.map(
-              (client): Nfsv3Client => ({
-                ip: textOrNull(client.ip),
-                export: textOrNull(client.export),
-              }),
-            ),
+      nfsv3: v3.value === null ? null : v3.value.map(readNfsv3Client),
       nfsv4: v4.value === null ? null : v4.value.map(readNfsv4Client),
       failures,
     };
