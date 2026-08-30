@@ -3,6 +3,7 @@ import { directoryServicesStatus, usersList } from '@/tools/accounts';
 import { alertSettings, alertsList } from '@/tools/alerts';
 import { appsList } from '@/tools/apps';
 import { iscsiList, nvmeofList } from '@/tools/block';
+import { bootPoolStatus } from '@/tools/boot';
 import { certificatesList } from '@/tools/certificates';
 import { cloudCredentialsList } from '@/tools/credentials';
 import { disksList } from '@/tools/disks';
@@ -25,7 +26,7 @@ import { auditConfig, auditLogQuery, rebootInfo, systemInfo, updateStatus } from
 import { cloudsyncTasksList, snapshotTasksList, tasksRecentRuns } from '@/tools/tasks';
 import { vmLogs, vmsList } from '@/tools/vms';
 
-/** The sketch's catalog: forty read-only tools plus one mutating tool. */
+/** The sketch's catalog: forty-one read-only tools plus one mutating tool. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -36,6 +37,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(poolStatus);
   catalog.register(poolTopology);
   catalog.register(scrubHistory);
+  catalog.register(bootPoolStatus);
   catalog.register(listDatasets);
   catalog.register(quotaReport);
   catalog.register(disksList);
@@ -78,6 +80,7 @@ export {
   appsList,
   auditConfig,
   auditLogQuery,
+  bootPoolStatus,
   certificatesList,
   cloudCredentialsList,
   cloudsyncTasksList,

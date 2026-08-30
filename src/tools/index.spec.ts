@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the forty-one sketch tools', () => {
+  it('registers the forty-two sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -13,6 +13,7 @@ describe('createDefaultCatalog', () => {
       'storage_pool_status',
       'storage_pool_topology',
       'storage_scrub_history',
+      'boot_pool_status',
       'storage_list_datasets',
       'datasets_quota_report',
       'disks_list',
@@ -244,6 +245,12 @@ describe('createDefaultCatalog', () => {
   it('advertises system_reboot_info to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
       'system_reboot_info',
+    );
+  });
+
+  it('advertises boot_pool_status to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'boot_pool_status',
     );
   });
 });
