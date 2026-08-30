@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the fifty-one sketch tools', () => {
+  it('registers the fifty-two sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -19,6 +19,7 @@ describe('createDefaultCatalog', () => {
       'storage_list_datasets',
       'datasets_quota_report',
       'disks_list',
+      'disks_temperature',
       'apps_list',
       'app_engine_status',
       'apps_update_summary',
@@ -151,6 +152,12 @@ describe('createDefaultCatalog', () => {
 
   it('advertises disks_list to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('disks_list');
+  });
+
+  it('advertises disks_temperature to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'disks_temperature',
+    );
   });
 
   it('advertises vms_list to a read-only credential', () => {

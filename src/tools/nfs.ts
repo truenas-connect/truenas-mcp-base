@@ -1,7 +1,13 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool } from '@/catalog/tool';
-import { errorText, numberOrNull, recordOrNull, textOrNull } from '@/tools/common';
+import {
+  errorText,
+  numberOrNull,
+  recordOrNull,
+  textOrNull,
+  unreportedKeys,
+} from '@/tools/common';
 
 /**
  * NFS family: who is reaching the system over NFS right now.
@@ -177,39 +183,6 @@ const INFO_KEYS = {
 
 /** The one key of a state entry this tool reads, held for the same two uses. */
 const STATE_TYPE_KEY = 'type';
-
-/**
- * The keys of a record whose values this tool does not report, by name and
- * never by value.
- *
- * `reported` IS THE KEYS THAT ACTUALLY PRODUCED A VALUE, NOT THE ALLOWLIST, and
- * that is the whole of what makes this list say what it claims to. A key this
- * tool looks for whose value a guard rejected has not been reported either, and
- * it belongs here for exactly the reason a key nobody looked for does: the
- * caller is left with a null field, and this list is the only thing that says
- * the record held something under that name. Filtering by the allowlist instead
- * would answer "every key is reported" while a named field beside it was null —
- * the one reading this list exists to prevent.
- *
- * That case is not the unlikely one. `info` is published per client as a text
- * file, so a middleware that parses it without coercing sends every value as a
- * string, and a right key carrying an unexpected type is the likelier of the
- * two ways this file's guess at the key names can be wrong.
- *
- * A key name is not a value: forwarding the record would put a field a later
- * TrueNAS release adds into a tool result unannounced, which is what the
- * allowlist convention exists to stop, while naming the keys tells a caller
- * what was there without saying what it said. That is the whole of what makes
- * an unconfirmed allowlist checkable from the outside.
- *
- * Sorted so two systems reporting the same keys in a different order answer
- * identically.
- */
-function unreportedKeys(record: Record<string, unknown>, reported: readonly string[]): string[] {
-  return Object.keys(record)
-    .filter((key) => !reported.includes(key))
-    .sort();
-}
 
 /**
  * The `states` half of one client: how much state it holds, of what kinds, and

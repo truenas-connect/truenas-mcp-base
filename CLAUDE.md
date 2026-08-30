@@ -773,6 +773,64 @@ fields, and a method whose parameter is the first of them. The description state
 the rule the surface supports — `uuid` is what these tools take, read it from the
 system being targeted — rather than an account of why the two differ.
 
+### A physical side effect that could not be established is stated, not settled (#120)
+
+`disks_temperature` reads a disk's current temperature off the device, and
+whether that read WAKES A SPUN-DOWN DISK could not be established here: nothing
+in the client says, and no live system was available to watch. The tool's
+description says exactly that — not "this does not wake disks", which is a
+description promising more than the read delivers, and not the reverse either,
+which would be the same defect pointing the other way. It names the consequence
+(a caller with disks deliberately parked should name the ones it wants) and
+leaves the judgement with the caller.
+
+**The unbounded default was kept, deliberately.** No `disks` argument still
+means every disk, because the ticket's scope names that default and the risk is
+unestablished rather than established — narrowing the default would be acting on
+the guess this decision refuses to make. If a live system ever settles it, the
+default is the thing to revisit and the description is the thing to correct.
+
+**This is the #102 rule about a field's MEANING, applied to a call's EFFECT.**
+Reporting a guessed meaning is worse than omitting the field because a caller
+cannot tell a reading from a guess; asserting a guessed side effect is worse
+than saying nothing for the same reason, and worse still, because a caller acts
+on "safe to call" in a way it never acts on a null.
+
+### One read, two possible value shapes, and neither forwarded (#120)
+
+`disk.temperatures` is declared `Record<string, unknown>` — once, in the oldest
+directory, with no later one narrowing it — so the client says a record is there
+and nothing about what its values are. The mapping reads BOTH shapes it could
+plausibly be: a bare number is the temperature itself, which is what a system
+carrying no thresholds is expected to answer with, and a record is read through
+an allowlist of key names. **Handling two shapes is not defensive breadth here;
+it is the same move `system_general_config`'s `ui_certificate` reduction makes
+(#102)** — where a payload can arrive in more than one shape, a reading that both
+shapes satisfy is worth more than a guard written to one of them.
+
+**The `_celsius` suffixes are carried on #96's second ground, the domain rather
+than the payload.** The API declares no unit for any of these numbers, exactly as
+it declares none for `min_password_age`; the difference is that SMART and ATA
+define a drive temperature in degrees Celsius and nothing else is an ordinary
+answer for one, where days and seconds are both ordinary answers for a password
+age. That is the same ground the boot pool's `size_bytes` stands on — a bare ZFS
+`size` could not be counted in anything but bytes.
+
+The key names inside the record are unconfirmed and get #98's treatment:
+`unreported_fields` names every key an entry actually carried whose value is not
+reported, built from the keys that produced a value. The one thing that shape
+costs is a third meaning for a null: `unreported_fields` is null both where the
+entry was a bare number and where there was no entry at all, so
+`temperature_reported` is what separates them and the description says so.
+
+**Three ways a temperature can be missing, and only two of them are separable.**
+Not mentioned at all (`temperature_reported` false), mentioned with no readable
+value (true, null temperature), and the whole read failing (`disks` null,
+`unavailable` set). The SSD that publishes no temperature and the disk that was
+asleep both land in the middle case and are NOT distinguishable from this
+payload — which the description states outright rather than leaving a caller to
+infer a cold disk.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
