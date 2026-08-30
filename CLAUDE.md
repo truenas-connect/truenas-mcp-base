@@ -645,6 +645,19 @@ detail lives. Note that `recordOrNull` alone cannot do that reduction: it answer
 null both for the explicit null that means "no certificate" and for a payload
 that could not be read, and those are different answers.
 
+**Reducing a field to a fact is also what lets it survive the shape changing,
+and that is worth reaching for deliberately.** `ui_certificate` is an embedded
+record on `DefaultApiDirectory` and a certificate ID — a bare `number` — on a
+later directory in the same client. `certificateConfigured` reads BOTH as
+"configured", because at the resolution this tool reports the two payloads say
+the same thing; a guard written to the pinned shape alone would have answered
+"could not be read" for every system on the newer release, which is the reading
+that means the opposite of the truth. #91 says a declared type is a claim about
+what arrives rather than the value received — the version skew behind it is
+readable in the client, and **where two directories declare one field
+differently, a reduction that both shapes satisfy is worth more than a guard
+that matches the pinned one exactly.**
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

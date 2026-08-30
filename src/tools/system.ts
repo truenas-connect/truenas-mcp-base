@@ -858,18 +858,30 @@ export const rebootInfo: ReadOnlyTool = {
 /**
  * Whether the web UI has a certificate configured, and nothing else about it.
  *
- * `ui_certificate` arrives as an open record or an explicit null, and the record
- * is not forwarded: `certificates_list` is the tool for certificate detail, and
- * a record passed through would carry whatever a later TrueNAS release puts in
- * it. What is left is the one fact this tool is in a position to state.
+ * The record is not forwarded: `certificates_list` is the tool for certificate
+ * detail, and a record passed through would carry whatever a later TrueNAS
+ * release puts in it. What is left is the one fact this tool is in a position to
+ * state.
  *
- * `recordOrNull` alone would answer null for both of the cases that matter, so
- * the explicit null is read first: a system that reported NO certificate has
- * said something, and it must not read as a system this tool could not
- * understand.
+ * TWO SHAPES ARE READ AS "CONFIGURED", AND THAT IS THE #91 DECISION RATHER THAN
+ * DEFENSIVENESS. The pinned surface — `DefaultApiDirectory`, the client's oldest
+ * — declares `ui_certificate` as an embedded record; a later directory in the
+ * same client declares it `number | null`, the certificate's id, beside a
+ * `ui_certificate_name`. So a system on a newer release sends a NUMBER for a web
+ * UI that does have a certificate, and reading only the record shape would
+ * answer null — "this could not be read" — for exactly the systems where the
+ * answer is yes. Both shapes say the same thing at this resolution, which is why
+ * this field is a boolean and not the certificate.
+ *
+ * The explicit null is read FIRST, before either shape: a system that reported
+ * NO certificate has said something, and `recordOrNull` alone would collapse it
+ * into the same null as a payload this tool could not understand.
  */
 function certificateConfigured(value: unknown): boolean | null {
   if (value === null) return false;
+  // The newer surface's certificate id. A non-finite number is not an id and
+  // falls through to the record reading, which answers null for it.
+  if (numberOrNull(value) !== null) return true;
   return recordOrNull(value) === null ? null : true;
 }
 
@@ -877,15 +889,24 @@ function certificateConfigured(value: unknown): boolean | null {
  * The timezone the rest of the catalog's times are relative to, with the web UI
  * and console settings that arrive beside it.
  *
- * The timezone is why this tool exists. `snapshot_tasks_list` and
- * `cloudsync_tasks_list` render cron schedules into English — "daily at 02:00" —
- * and those schedules run in the system's local time; `audit_log_query`,
- * `tasks_recent_runs`, `storage_scrub_history` and `snapshots_list` all report
- * times. Nothing in the catalog said what frame any of it sat in, so a user in a
- * different timezone from their NAS was told the wrong thing with full
- * confidence. One tool reporting the frame once is the deliverable; restating it
- * inside every tool that reports a time is a separate change and is not made
- * here.
+ * The timezone is why this tool exists, and it lands on the catalog's two kinds
+ * of time differently:
+ *
+ * - **A rendered SCHEDULE is already in this timezone.** `snapshot_tasks_list`
+ *   and `cloudsync_tasks_list` turn a cron expression into English — "daily at
+ *   02:00" — and the system runs it at 02:00 LOCAL. Nothing in either tool says
+ *   which local, so an assistant reporting it to a user in another timezone was
+ *   off by the offset and confident.
+ * - **A reported INSTANT is not.** `audit_log_query`, `tasks_recent_runs` and
+ *   `snapshots_list` render ISO 8601 UTC, and `storage_scrub_history` passes the
+ *   middleware's own string through. Those need CONVERTING into this timezone
+ *   before anyone is told a wall-clock hour, which is the opposite operation.
+ *
+ * Getting the two the wrong way round is worse than not having the timezone at
+ * all, so the description states which is which rather than saying "the catalog
+ * reports local times". One tool reporting the frame once is the deliverable;
+ * restating it inside every tool that reports a time is a separate change and is
+ * not made here.
  *
  * THIS TOOL STATES NO VERDICT, per the #47 decision in `CLAUDE.md` and for the
  * same reason `security_config` states none: a TLS protocol list is a fact, and
@@ -914,18 +935,25 @@ export const systemGeneralConfig: ReadOnlyTool = {
   description:
     "A TrueNAS system's general settings: its TIMEZONE, the web UI's network " +
     'and TLS configuration, and its console keyboard map. ' +
-    '`timezone` IS THE FIELD THIS TOOL EXISTS FOR AND IS THE FRAME EVERY OTHER ' +
-    "TOOL'S LOCAL TIMES AND SCHEDULES SIT IN. The schedules " +
+    '`timezone` IS THE FIELD THIS TOOL EXISTS FOR AND IS THE SYSTEM\'S LOCAL ' +
+    'TIME ZONE. It is the name the system holds, such as `America/Los_Angeles` ' +
+    'or `UTC`. NO OTHER TOOL IN THIS CATALOG REPORTS IT, so read it here before ' +
+    'telling anyone when something runs or when something happened — otherwise ' +
+    'a user in a different timezone from their NAS is told the wrong hour with ' +
+    'full confidence. ' +
+    'IT APPLIES TO THE CATALOG\'S TWO KINDS OF TIME IN OPPOSITE DIRECTIONS, AND ' +
+    'GETTING THAT ROUND THE WRONG WAY IS WORSE THAN NOT READING IT AT ALL. ' +
+    'A RENDERED SCHEDULE IS ALREADY IN THIS ZONE: the cron schedules ' +
     '`snapshot_tasks_list` and `cloudsync_tasks_list` render into English — ' +
-    '"daily at 02:00" — run in this timezone, and so do the local times ' +
-    '`audit_log_query`, `tasks_recent_runs`, `storage_scrub_history` and ' +
-    '`snapshots_list` report. NONE OF THOSE TOOLS REPEATS THE TIMEZONE, so read ' +
-    'it here before telling anyone when something runs or when something ' +
-    'happened — a user in a different timezone from their NAS is otherwise told ' +
-    'the wrong hour with full confidence. It is the name the system holds, such ' +
-    'as `America/Los_Angeles` or `UTC`, and it is null where the system ' +
-    'reported no timezone this tool could read — which is NOT UTC, and must not ' +
-    'be treated as UTC. ' +
+    '"daily at 02:00" — run at that hour LOCAL to the system, so name this zone ' +
+    'when repeating one and do NOT convert it. A REPORTED INSTANT IS NOT: ' +
+    '`audit_log_query`, `tasks_recent_runs` and `snapshots_list` report ISO ' +
+    '8601 UTC timestamps, and `storage_scrub_history` passes through the time ' +
+    'the system itself wrote, so CONVERT those INTO this zone before stating a ' +
+    'wall-clock time. ' +
+    '`timezone` is null where the system reported no timezone this tool could ' +
+    'read — which is NOT UTC, and must not be treated as UTC; say the zone is ' +
+    'unknown instead of assuming one. ' +
     '`keyboard_map` is the keyboard layout the system is configured with, as ' +
     'the system spells it, and is null where it reported none this tool could ' +
     'read. ' +
@@ -962,13 +990,18 @@ export const systemGeneralConfig: ReadOnlyTool = {
     'that is `certificates_list` — and a true says only that one is configured, ' +
     'never that it is valid, trusted or unexpired. ' +
     '`usage_collection` and `usage_collection_is_set` ARE READ TOGETHER OR NOT ' +
-    'AT ALL. `usage_collection` is whether anonymous usage statistics are sent ' +
-    'to iXsystems, and `usage_collection_is_set` is whether anyone has actually ' +
-    'chosen: a false `usage_collection` beside a false `usage_collection_is_set` ' +
-    'is a system nobody has answered the question on, which is a different ' +
-    "state from an administrator having switched it off, and it is the second " +
-    'field that tells them apart. Each is null where the system reported no ' +
-    'value this tool could read. ' +
+    'AT ALL, and neither is to be reported without the other. ' +
+    '`usage_collection` is whether anonymous usage statistics are sent to ' +
+    'iXsystems, and `usage_collection_is_set` is WHETHER ANYONE EVER CHOSE. A ' +
+    'true `usage_collection_is_set` is an administrator having answered the ' +
+    'question, so `usage_collection` beside it is a decision; a false one is a ' +
+    'system running on whatever the default is, and `usage_collection` beside ' +
+    'THAT is not a choice anyone made and must not be reported as one. Each is ' +
+    'null where the system reported no value this tool could read, and that ' +
+    'covers the explicit null the payload uses as well as a value of another ' +
+    'type — those collapse to one answer here, "not established", because ' +
+    '`usage_collection_is_set` is what carries the distinction they were ' +
+    'keeping. ' +
     'EVERY FIELD ABOVE IS NULL WHERE THE SYSTEM REPORTED NO VALUE THIS TOOL ' +
     'COULD READ, and a null is never a zero, never a false and never an empty ' +
     'list — it is "this was not established". FOR THE FOUR LISTS ' +
@@ -1017,7 +1050,7 @@ export const systemGeneralConfig: ReadOnlyTool = {
       ui_port: numberOrNull(settings['ui_port']),
       ui_https_port: numberOrNull(settings['ui_httpsport']),
       ui_https_redirect: booleanOrNull(settings['ui_httpsredirect']),
-      // `strictTextList` for all three lists rather than `textList`: a dropped
+      // `strictTextList` for all four lists rather than `textList`: a dropped
       // entry here would be a claim in each case. A protocol list one entry
       // shorter hides the old TLS version this field is read for; an address
       // list one entry shorter understates what the web UI listens on; an

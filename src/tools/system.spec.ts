@@ -937,15 +937,20 @@ describe('system_general_config', () => {
     });
   });
 
-  it('says in its description that the timezone is the frame for the catalog', async () => {
-    // The sentence that makes an LLM reach for this before it renders a
-    // schedule or a local timestamp from any other tool.
+  it('says in its description which way the timezone applies to each kind of time', async () => {
+    // The two are opposite operations, and telling a caller "the catalog
+    // reports local times" would make it convert the UTC ones a second time.
     expect(systemGeneralConfig.description).toContain(
-      '`timezone` IS THE FIELD THIS TOOL EXISTS FOR AND IS THE FRAME EVERY OTHER ' +
-        "TOOL'S LOCAL TIMES AND SCHEDULES SIT IN",
+      'A RENDERED SCHEDULE IS ALREADY IN THIS ZONE',
     );
+    expect(systemGeneralConfig.description).toContain('do NOT convert it');
+    expect(systemGeneralConfig.description).toContain('A REPORTED INSTANT IS NOT');
+    expect(systemGeneralConfig.description).toContain('CONVERT those INTO this zone');
+    // The schedule renderers on one side of that line and the instant
+    // reporters on the other, named so a caller can place a tool it is holding.
     expect(systemGeneralConfig.description).toContain('snapshot_tasks_list');
     expect(systemGeneralConfig.description).toContain('audit_log_query');
+    expect(systemGeneralConfig.description).toContain('storage_scrub_history');
   });
 
   it('nulls a timezone it could not read rather than falling back to UTC', async () => {
@@ -990,11 +995,21 @@ describe('system_general_config', () => {
     );
   });
 
+  it('reads the newer surface\'s certificate id as one being configured', async () => {
+    // A later directory in the same client declares `ui_certificate` as the
+    // certificate's id rather than an embedded record, so a system on that
+    // release sends a number for a web UI that DOES have one. Reading only the
+    // record shape would answer null — "could not be read" — for exactly those
+    // systems.
+    expect(await field({ ui_certificate: 1 }, 'ui_certificate_configured')).toBe(true);
+    expect(await field({ ui_certificate: 0 }, 'ui_certificate_configured')).toBe(true);
+  });
+
   it('keeps "no certificate" and "could not be read" apart', async () => {
     // `recordOrNull` alone would answer null for both, and only one of them is
     // something the system said.
     expect(await field({ ui_certificate: null }, 'ui_certificate_configured')).toBe(false);
-    for (const unreadable of [undefined, 'truenas_default', 7, []]) {
+    for (const unreadable of [undefined, 'truenas_default', [], Number.NaN]) {
       expect(await field({ ui_certificate: unreadable }, 'ui_certificate_configured')).toBeNull();
     }
   });
