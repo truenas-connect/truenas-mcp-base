@@ -221,8 +221,8 @@ field, so a release that does not add it still answers.
 
 Every tool file reads middleware payloads whose declared shape it does not take
 as given, so each needed the same narrowings — `textOrNull`, `numberOrNull`,
-`booleanOrNull`, `recordOrNull`, `textList` — and the same reading of a
-rejection, `errorText`. The pinned client left many of those payloads as
+`booleanOrNull`, `recordOrNull`, `textList`, `strictTextList` — and the same
+reading of a rejection, `errorText`. The pinned client left many of those payloads as
 `unknown` outright; 4.x declares nearly all of them, which changed what the
 compiler knows and not what a system sends (#91).
 Each file grew a private copy, on the stated ground that a tool file is read on
@@ -249,6 +249,16 @@ Where the line falls, since "shared" is not the same as "generic":
 - **`common.ts` is internal.** It is not a family, `createDefaultCatalog()` does
   not know about it, and it must not reach `src/index.ts` — an export there is
   a contract, and none of this is one.
+
+**The two list guards are a pair, and picking between them is the #93 decision
+rather than taste.** `textList` DROPS an entry it cannot read; `strictTextList`
+nulls the WHOLE list instead. Reach for the second wherever a shorter list would
+make a claim — a password ruleset one class shorter says the policy requires
+less, an audit scope one name shorter says a share is unaudited, a TLS protocol
+list one entry shorter hides the old version the field is read for — and for the
+first only where a shorter list understates a fact the tool itself asserts.
+`strictTextList` was promoted in #102, after `audit_config` and `security_config`
+had each grown their own identical copy of it and a third tool was about to.
 
 Reaching for a private copy of something already in `common.ts` is the thing to
 notice in review. The comment that used to justify each copy — *a tool file is
@@ -294,7 +304,8 @@ excluded there.
 
 ### An unreadable list entry is nulled or kept by which way it moves the summary (#93)
 
-`audit_config`'s `scopeNames` nulls its WHOLE list when one entry cannot be read;
+`audit_config`'s scope nulls its WHOLE list when one entry cannot be read — it
+reads through `strictTextList`, which is what that guard is for;
 `system_reboot_info`'s `rebootReasons` KEEPS such an entry, as a pair of nulls.
 Both are the null/empty/unreadable convention below, and they disagree because
 the convention alone does not decide this — what decides it is the direction the
@@ -607,6 +618,32 @@ method's union differing from an event's.
 The membership test is `Object.hasOwn` and not `in`, which walks the prototype:
 `'constructor'` is `in` every object literal and would have been read back as a
 boolean the field cannot hold.
+
+### A declared field whose meaning the surface does not state is left out (#102)
+
+`system_general_config` reads a payload the client declares in full — seventeen
+named fields, every one of them typed — and reports fourteen. `wizardshown` and
+`ds_auth` are booleans the pinned surface declares and documents nowhere, and
+they are omitted rather than passed through under a name this repository made up
+for them. **A declared type says what arrives, never what it means**, and the two
+are separate questions: #91 settled the first, and a field that survives it can
+still fail this one. Reporting a guessed meaning is worse than omitting the
+field, because a caller cannot tell a reading from a guess — the same argument
+`nfs_clients` makes about unconfirmed KEY NAMES (#98), one level up, about a
+confirmed key whose SEMANTICS are unconfirmed.
+
+The corollary is the cheap one to get wrong: **an omission a caller might notice
+is named in the description**, as `boot_pool_status` names the boot pool's scan
+record. This tool says outright that it does not report the setup wizard state or
+the directory-service authentication flag, so a later reader can tell a
+deliberate omission from a field nobody saw.
+
+`ui_certificate` is omitted differently and for the other reason: it is an open
+record, so it is REDUCED — to `ui_certificate_configured`, the one fact reading
+it establishes — rather than forwarded, and `certificates_list` is where the
+detail lives. Note that `recordOrNull` alone cannot do that reduction: it answers
+null both for the explicit null that means "no certificate" and for a payload
+that could not be read, and those are different answers.
 
 ## Conventions
 

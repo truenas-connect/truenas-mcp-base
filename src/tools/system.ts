@@ -5,9 +5,11 @@ import {
   MAX_TIME_MS,
   MiddlewareDate,
   NO_REASON,
+  booleanOrNull,
   errorText,
   numberOrNull,
   recordOrNull,
+  strictTextList,
   textOrNull,
 } from '@/tools/common';
 
@@ -594,27 +596,6 @@ export const auditLogQuery: ReadOnlyTool = {
 };
 
 /**
- * The things the system listed beside one service, as names — or null where it
- * listed something this tool cannot read as one.
- *
- * All-or-nothing rather than per-entry: an entry that could not be read is
- * dropped from a list only by making the whole list null, because a list
- * silently missing one share reads as a share that is not audited, which is the
- * opposite of what is known about it. The same reading `audit_log_query` applies
- * to a filter it could not check.
- */
-function scopeNames(value: unknown): string[] | null {
-  if (!Array.isArray(value)) return null;
-  const names: string[] = [];
-  for (const entry of value) {
-    const name = textOrNull(entry);
-    if (name === null) return null;
-    names.push(name);
-  }
-  return names;
-}
-
-/**
  * The services the system keeps audit configuration for, with what it listed
  * beside each — or null where it sent no service configuration this tool could
  * read.
@@ -635,9 +616,9 @@ function scopeNames(value: unknown): string[] | null {
  * the fields of the result.
  *
  * A name the system sent that this tool cannot read nulls the whole list, on
- * the same all-or-nothing reading {@link scopeNames} takes of a scope and for
- * the same reason: a list quietly one service shorter reads as a service the
- * system does not audit, which is more than the read established.
+ * the same all-or-nothing reading `strictTextList` takes of a scope and for the
+ * same reason: a list quietly one service shorter reads as a service the system
+ * does not audit, which is more than the read established.
  *
  * Sorted by name, because the middleware sends a keyed object and the order of
  * its keys means nothing; leaving it alone would make the result differ between
@@ -648,7 +629,10 @@ function configuredServices(value: unknown): { service: string; scope: string[] 
   if (services === null) return null;
   const names = Object.keys(services);
   if (names.some((name) => name.length === 0)) return null;
-  return names.sort().map((service) => ({ service, scope: scopeNames(services[service]) }));
+  // `strictTextList` rather than `textList`: a scope one name shorter reads as
+  // a share that is not audited, which is the opposite of what the read
+  // established, so an entry this tool cannot read nulls the whole scope.
+  return names.sort().map((service) => ({ service, scope: strictTextList(services[service]) }));
 }
 
 /**
@@ -756,8 +740,8 @@ interface RebootReason {
  * system having said nothing about it.
  *
  * An entry that could not be read is kept as a pair of nulls rather than
- * dropped, which is the opposite of the all-or-nothing reading
- * {@link scopeNames} takes and is the same argument arriving at the other
+ * dropped, which is the opposite of the all-or-nothing reading `strictTextList`
+ * takes of an audit scope and is the same argument arriving at the other
  * answer. There, a list one name shorter understates what is audited and the
  * whole list is nulled to say so. Here, a list one reason shorter runs towards
  * EMPTY — and empty is this tool's one positive finding, "nothing is pending".
@@ -867,6 +851,189 @@ export const rebootInfo: ReadOnlyTool = {
       reboot_required: reasons === null ? null : reasons.length > 0,
       reasons,
       boot_id: textOrNull(payload['boot_id']),
+    };
+  },
+};
+
+/**
+ * Whether the web UI has a certificate configured, and nothing else about it.
+ *
+ * `ui_certificate` arrives as an open record or an explicit null, and the record
+ * is not forwarded: `certificates_list` is the tool for certificate detail, and
+ * a record passed through would carry whatever a later TrueNAS release puts in
+ * it. What is left is the one fact this tool is in a position to state.
+ *
+ * `recordOrNull` alone would answer null for both of the cases that matter, so
+ * the explicit null is read first: a system that reported NO certificate has
+ * said something, and it must not read as a system this tool could not
+ * understand.
+ */
+function certificateConfigured(value: unknown): boolean | null {
+  if (value === null) return false;
+  return recordOrNull(value) === null ? null : true;
+}
+
+/**
+ * The timezone the rest of the catalog's times are relative to, with the web UI
+ * and console settings that arrive beside it.
+ *
+ * The timezone is why this tool exists. `snapshot_tasks_list` and
+ * `cloudsync_tasks_list` render cron schedules into English — "daily at 02:00" —
+ * and those schedules run in the system's local time; `audit_log_query`,
+ * `tasks_recent_runs`, `storage_scrub_history` and `snapshots_list` all report
+ * times. Nothing in the catalog said what frame any of it sat in, so a user in a
+ * different timezone from their NAS was told the wrong thing with full
+ * confidence. One tool reporting the frame once is the deliverable; restating it
+ * inside every tool that reports a time is a separate change and is not made
+ * here.
+ *
+ * THIS TOOL STATES NO VERDICT, per the #47 decision in `CLAUDE.md` and for the
+ * same reason `security_config` states none: a TLS protocol list is a fact, and
+ * whether accepting TLSv1 is acceptable is a claim against a standard that lives
+ * outside this repository. So `ui_https_protocols` is reported as the system
+ * spelled it and no field here scores it.
+ *
+ * Three fields of the payload are DELIBERATELY not reported, and each is a
+ * different reason:
+ *
+ * - **`id`** is a middleware row id and means nothing outside the middleware —
+ *   the same omission `security_config` makes.
+ * - **`ui_certificate`** is an open record, reduced to
+ *   {@link certificateConfigured} rather than forwarded.
+ * - **`wizardshown` and `ds_auth`** are read by nothing here. `wizardshown` is
+ *   the setup wizard's own bookkeeping and answers no question about the system;
+ *   `ds_auth` is a boolean whose meaning the pinned surface states nowhere, and
+ *   reporting a field whose meaning was guessed is worse than leaving it out —
+ *   a caller cannot tell a guess from a reading.
+ *
+ * `system.advanced.config` — serial console, syslog, GPU isolation — is a
+ * separate surface and is not read here.
+ */
+export const systemGeneralConfig: ReadOnlyTool = {
+  name: 'system_general_config',
+  description:
+    "A TrueNAS system's general settings: its TIMEZONE, the web UI's network " +
+    'and TLS configuration, and its console keyboard map. ' +
+    '`timezone` IS THE FIELD THIS TOOL EXISTS FOR AND IS THE FRAME EVERY OTHER ' +
+    "TOOL'S LOCAL TIMES AND SCHEDULES SIT IN. The schedules " +
+    '`snapshot_tasks_list` and `cloudsync_tasks_list` render into English — ' +
+    '"daily at 02:00" — run in this timezone, and so do the local times ' +
+    '`audit_log_query`, `tasks_recent_runs`, `storage_scrub_history` and ' +
+    '`snapshots_list` report. NONE OF THOSE TOOLS REPEATS THE TIMEZONE, so read ' +
+    'it here before telling anyone when something runs or when something ' +
+    'happened — a user in a different timezone from their NAS is otherwise told ' +
+    'the wrong hour with full confidence. It is the name the system holds, such ' +
+    'as `America/Los_Angeles` or `UTC`, and it is null where the system ' +
+    'reported no timezone this tool could read — which is NOT UTC, and must not ' +
+    'be treated as UTC. ' +
+    '`keyboard_map` is the keyboard layout the system is configured with, as ' +
+    'the system spells it, and is null where it reported none this tool could ' +
+    'read. ' +
+    'THE `ui_` FIELDS ARE THE WEB UI\'S OWN CONFIGURATION, not the network ' +
+    "settings of the system as a whole — that is `network_config` — and not any " +
+    'statement about what is reachable right now. `ui_port` is the port the web ' +
+    'UI is configured to serve plain HTTP on and `ui_https_port` the port it ' +
+    'serves HTTPS on; `ui_https_redirect` is whether a plain HTTP request is ' +
+    'redirected to HTTPS. `ui_addresses` and `ui_v6_addresses` are the IPv4 and ' +
+    'IPv6 addresses it is configured to listen on, passed through exactly as ' +
+    'the system spelled them and NOT interpreted here — a wildcard such as ' +
+    '`0.0.0.0` or `::` is returned as itself. `ui_allowlist` is what the system ' +
+    'listed as permitted to reach the web UI, again passed through as spelled. ' +
+    'AN EMPTY `ui_allowlist` IS THE SYSTEM NAMING NO ENTRIES AND IS NOT ' +
+    'EVIDENCE THE WEB UI IS RESTRICTED; whether an empty list means every ' +
+    'address may reach it is middleware behaviour this tool does not read and ' +
+    'does not state. `ui_x_frame_options` is the framing policy the web UI ' +
+    'sends, as the system spelled it — `SAMEORIGIN`, `DENY` or `ALLOW_ALL` are ' +
+    'the declared values and any other is passed through. `ui_console_messages` ' +
+    'is whether the web UI is configured to display the system console\'s ' +
+    'messages. ' +
+    '`ui_https_protocols` is the TLS protocol versions the web UI is configured ' +
+    'to accept, as the system spelled them; `TLSv1`, `TLSv1.1`, `TLSv1.2` and ' +
+    '`TLSv1.3` are the declared values and any other is passed through. THIS ' +
+    'TOOL STATES NO VERDICT ABOUT THAT LIST — there is no field here saying ' +
+    'whether the set is acceptable, safe or compliant, because that is a claim ' +
+    'against a standard that lives outside this system and nothing has told ' +
+    'this tool which one. The list is the fact; any pass/fail reading of it is ' +
+    'yours and must be stated as being against a named standard. ' +
+    '`ui_certificate_configured` is whether the system reported a certificate ' +
+    'for the web UI: true where it named one, false where it reported none, and ' +
+    'null where it reported something this tool could not read as either. WHICH ' +
+    'certificate, who issued it and when it expires are NOT reported here — ' +
+    'that is `certificates_list` — and a true says only that one is configured, ' +
+    'never that it is valid, trusted or unexpired. ' +
+    '`usage_collection` and `usage_collection_is_set` ARE READ TOGETHER OR NOT ' +
+    'AT ALL. `usage_collection` is whether anonymous usage statistics are sent ' +
+    'to iXsystems, and `usage_collection_is_set` is whether anyone has actually ' +
+    'chosen: a false `usage_collection` beside a false `usage_collection_is_set` ' +
+    'is a system nobody has answered the question on, which is a different ' +
+    "state from an administrator having switched it off, and it is the second " +
+    'field that tells them apart. Each is null where the system reported no ' +
+    'value this tool could read. ' +
+    'EVERY FIELD ABOVE IS NULL WHERE THE SYSTEM REPORTED NO VALUE THIS TOOL ' +
+    'COULD READ, and a null is never a zero, never a false and never an empty ' +
+    'list — it is "this was not established". FOR THE FOUR LISTS ' +
+    '(`ui_https_protocols`, `ui_addresses`, `ui_v6_addresses`, `ui_allowlist`) ' +
+    'an EMPTY list and a NULL are different answers: empty is the system ' +
+    'reporting the list and naming nothing in it, null is no list this tool ' +
+    'could read. EACH LIST IS NULLED WHOLE RATHER THAN SHORTENED if any one ' +
+    'entry cannot be read, so a list that comes back is complete — a protocol ' +
+    'list quietly one entry short would hide exactly the old TLS version worth ' +
+    'knowing about, and an address list one entry short would understate what ' +
+    'the web UI listens on. ' +
+    'This tool does NOT report the setup wizard state or the directory-service ' +
+    'authentication flag the same payload carries, and it does not read ' +
+    '`system.advanced.config` — the serial console, syslog and GPU isolation ' +
+    'settings, which NO TOOL IN THIS CATALOG reports. It does not enumerate the ' +
+    'valid choices for any of these settings: the timezone, keyboard-map and ' +
+    'country lists the middleware offers are form values, not facts about this ' +
+    'system, and none of them is returned here. THIS TOOL ONLY READS. It does ' +
+    'not change the timezone, any web UI setting, the keyboard map or the usage ' +
+    'collection preference, and it does not restart the web UI — those are ' +
+    '`system.general.update` and `system.general.ui_restart`, and neither is in ' +
+    'this catalog. General settings that could not be read at all are an error ' +
+    'naming what the system said, not a result of nulls.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }) {
+    const answer = await firstValueFrom(system.client.api.call('system.general.config'));
+    // Guarded rather than reached into, for the reason `audit_config` gives: a
+    // system answering with something that is not a configuration would
+    // otherwise throw naming a property, and the caller would see the name of a
+    // field rather than the read that failed.
+    const settings = recordOrNull(answer);
+    if (settings === null) {
+      throw new Error('system.general.config did not answer with a general configuration');
+    }
+    // Named one at a time, so a field a later TrueNAS release adds to the
+    // general configuration does not appear in this result without a change
+    // here. Every one is read through a guard even where the client declares it
+    // required, which is the #91 decision: a declared type is a claim about what
+    // the middleware sends and not the value received.
+    return {
+      // First, because it is the field the tool exists for.
+      timezone: textOrNull(settings['timezone']),
+      keyboard_map: textOrNull(settings['kbdmap']),
+      ui_port: numberOrNull(settings['ui_port']),
+      ui_https_port: numberOrNull(settings['ui_httpsport']),
+      ui_https_redirect: booleanOrNull(settings['ui_httpsredirect']),
+      // `strictTextList` for all three lists rather than `textList`: a dropped
+      // entry here would be a claim in each case. A protocol list one entry
+      // shorter hides the old TLS version this field is read for; an address
+      // list one entry shorter understates what the web UI listens on; an
+      // allowlist one entry shorter says an address may not reach it. The #93
+      // direction rule — drop towards a claim and you must null.
+      ui_https_protocols: strictTextList(settings['ui_httpsprotocols']),
+      ui_addresses: strictTextList(settings['ui_address']),
+      ui_v6_addresses: strictTextList(settings['ui_v6address']),
+      ui_allowlist: strictTextList(settings['ui_allowlist']),
+      ui_x_frame_options: textOrNull(settings['ui_x_frame_options']),
+      ui_console_messages: booleanOrNull(settings['ui_consolemsg']),
+      ui_certificate_configured: certificateConfigured(settings['ui_certificate']),
+      // Both or neither: the second field is the only thing separating "an
+      // administrator switched this off" from "nobody has ever been asked".
+      usage_collection: booleanOrNull(settings['usage_collection']),
+      usage_collection_is_set: booleanOrNull(settings['usage_collection_is_set']),
     };
   },
 };

@@ -84,6 +84,34 @@ export function textList(value: unknown): string[] | null {
   });
 }
 
+/**
+ * The names of a list field, all of them or none — null where the field was not
+ * a list at all, AND null where any one entry could not be read as a name.
+ *
+ * The all-or-nothing counterpart to {@link textList}, and which of the two a
+ * caller wants is decided by the direction a shorter list moves the answer, not
+ * by taste. `textList` drops what it cannot read, so the list it returns is
+ * shorter than the one the system sent and nothing says so; that is right where
+ * a shorter list understates a fact the tool asserts, and wrong where a shorter
+ * list makes a CLAIM — a ruleset one class shorter says the policy requires
+ * less, an audit scope one name shorter says a share is not audited, an
+ * allowlist one entry shorter says an address may not reach the system. Nulling
+ * the whole list refuses the claim instead of quietly making it.
+ *
+ * An EMPTY list is not the same answer and is returned as itself: the system
+ * reported the list and it names nothing.
+ */
+export function strictTextList(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const names: string[] = [];
+  for (const entry of value) {
+    const name = textOrNull(entry);
+    if (name === null) return null;
+    names.push(name);
+  }
+  return names;
+}
+
 /** What a failure carrying no text of its own is reported as. */
 export const NO_REASON = 'the system reported no reason';
 
