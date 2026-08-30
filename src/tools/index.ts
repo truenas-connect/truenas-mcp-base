@@ -35,12 +35,13 @@ import {
 import {
   automatedTasksList,
   cloudsyncTasksList,
+  scheduledTaskSetEnabled,
   snapshotTasksList,
   tasksRecentRuns,
 } from '@/tools/tasks';
 import { vmDevices, vmLogs, vmsList } from '@/tools/vms';
 
-/** The sketch's catalog: forty-nine read-only tools plus three mutating tools. */
+/** The sketch's catalog: forty-nine read-only tools plus four mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -95,6 +96,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(createSnapshot);
   catalog.register(alertsDismiss);
   catalog.register(alertsRestore);
+  catalog.register(scheduledTaskSetEnabled);
   return catalog;
 }
 
@@ -135,6 +137,7 @@ export {
   reportingDiskIo,
   reportingSpaceTrends,
   reportingUtilisation,
+  scheduledTaskSetEnabled,
   scrubHistory,
   securityConfig,
   servicesStatus,

@@ -129,4 +129,5 @@ export {
   createSnapshot,
   alertsDismiss,
   alertsRestore,
+  scheduledTaskSetEnabled,
 } from '@/tools/index';
