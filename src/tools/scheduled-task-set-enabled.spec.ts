@@ -240,7 +240,9 @@ describe('scheduled_task_set_enabled', () => {
       // Two steps because `execute` makes two calls. A plan naming only the
       // mutation would not be a true account of what runs.
       expect(steps.map((step) => step.method)).toEqual([spec.read, spec.update]);
-      expect(steps[0]).toMatchObject({ params: [[['id', '=', 3]]] });
+      // Two positional params, because `api.query(method, filters)` dispatches
+      // `[filters ?? [], options ?? {}]` — the plan names the call that runs.
+      expect(steps[0]).toMatchObject({ params: [[['id', '=', 3]], {}] });
       expect(steps[0].description).toMatch(/Changes nothing/);
     });
 

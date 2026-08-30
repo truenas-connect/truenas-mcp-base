@@ -1626,9 +1626,18 @@ function switchSentence(current: boolean | null, target: boolean): string {
   return `It is ${current ? 'enabled' : 'disabled'}, so this will ${target ? 'enable' : 'disable'} it.`;
 }
 
-/** The filter both `plan` and `execute` read the task with, as the method takes it. */
+/**
+ * The params the read step actually reaches the middleware with.
+ *
+ * The empty options object is not padding: `api.query(method, filters)`
+ * dispatches `[filters ?? [], options ?? {}]`, so the call carries two
+ * positional params whether or not the caller passed the second. A plan step
+ * naming only the filter would be showing the user a call one argument shorter
+ * than the one that runs — which is the same defect as a plan naming only the
+ * mutation, one level down.
+ */
 function readParams(id: number): unknown {
-  return [[['id', '=', id]]];
+  return [[['id', '=', id]], {}];
 }
 
 export const scheduledTaskSetEnabled: MutatingTool = {
