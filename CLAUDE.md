@@ -1051,6 +1051,19 @@ happened here twice. **Where a field's declared meaning and a tool's use of it
 come apart, fix the declaration** — the local comment then says which case the
 tool is, not what the field means.
 
+**The declaration was not the only place saying the old thing, and a rule is
+only fixed where every statement of it is.** `ToolCatalog.register`'s rejection
+message said the policy keeps irreversibly destructive *operations* out of the
+catalog, and `README.md` said it again in the same words — a guarantee broader
+than the check, which rejects a tool that COMPOSES such an operation and says
+nothing about one that triggers an operation an operator authored. Both now say
+the narrower true thing, and `AdvertisedTool.destructiveness` — the field an
+adapter actually reads, which had no doc comment at all — carries the pointer to
+`Destructiveness` and the warning not to read it alone. **When a redefinition
+lands, grep for the sentence it replaces**: the enforcement point, the advertised
+shape and the user-facing description each state a field's meaning
+independently, and a reader reaches whichever one is nearest.
+
 **The plan names one call, which is #119's distinction rather than a lapse.**
 `scheduled_task_set_enabled` names its read as a step because `execute` makes
 it; this tool reads only at plan time — to name the task, and to fail on an id

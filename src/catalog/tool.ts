@@ -52,10 +52,11 @@ export interface PlanStep {
  * question as what that operation does to the data it acts on.
  *
  * `irreversible` exists only so the catalog can reject it: per the
- * destructive-action policy, irreversibly destructive operations are absent
- * from the catalog by construction. So the two values are not a scale with a
- * safe end and a dangerous one; the second is a rejection, and every tool that
- * registers carries the first.
+ * destructive-action policy, a tool that COMPOSES an irreversibly destructive
+ * operation is absent from the catalog by construction. That is narrower than
+ * "nothing here can destroy data", and the difference is the paragraph below.
+ * So the two values are not a scale with a safe end and a dangerous one; the
+ * second is a rejection, and every tool that registers carries the first.
  *
  * What that leaves for a tool that TRIGGERS an operation someone else authored
  * is `reversible`, and the reason is the distinction above rather than a

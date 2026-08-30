@@ -11,6 +11,14 @@ export interface AdvertisedTool {
   description: string;
   inputSchema: Record<string, unknown>;
   mutating: boolean;
+  /**
+   * Present on a mutating tool, and — since the catalog rejects the other value
+   * — always `reversible`. {@link Destructiveness} states what that does and
+   * does not record: it is about the tool's OWN operation, never about the data
+   * that operation acts on. **An adapter deciding how loudly to warn must not
+   * read this field alone**; what an operation does to the data is in
+   * `description`, which is where a tool triggering one is required to state it.
+   */
   destructiveness?: Destructiveness;
 }
 
@@ -45,10 +53,18 @@ export class ToolCatalog {
     if (this.tools.has(tool.name)) {
       throw new Error(`Tool "${tool.name}" is already registered`);
     }
+    // What this rejects is a tool that COMPOSES an irreversibly destructive
+    // operation — one that chooses what is destroyed. It is not the wider
+    // promise that nothing in the catalog can trigger such an operation someone
+    // else authored: `cloudsync_run` registers as `reversible` and starts a task
+    // whose own `transfer_mode` may delete data for good. {@link Destructiveness}
+    // is where that distinction is stated; this check enforces one side of it,
+    // and the message says which so a reader does not take it for both.
     if (tool.mutating && tool.destructiveness === 'irreversible') {
       throw new Error(
-        `Tool "${tool.name}" is irreversibly destructive; the destructive-action ` +
-          'policy keeps such operations out of the catalog — direct users to the web UI',
+        `Tool "${tool.name}" composes an irreversibly destructive operation; the ` +
+          'destructive-action policy keeps such a tool out of the catalog — direct ' +
+          'users to the web UI',
       );
     }
     const properties = tool.inputSchema['properties'];
