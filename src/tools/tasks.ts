@@ -1981,10 +1981,21 @@ function syncParams(run: SyncRun): JobParams<ApiSurface, 'cloudsync.sync'> {
  *
  * The remote end is named because that is what makes the approval meaningful —
  * "run cloud sync task 4" says nothing about where the data is about to go. The
- * credential is named and nothing more: its `provider` holds the access key,
- * token or password, exactly as in the listing this borrows its terms from.
+ * credential is identified and nothing more: its `provider` holds the access
+ * key, token or password, exactly as in the listing this borrows its terms
+ * from.
+ *
+ * That listing identifies it TWO ways — `credential_name` and `credential_id` —
+ * and so does this, under those names, because {@link credentialId} exists for
+ * a reason this plan is subject to as well: the middleware also sends the
+ * id-only form, where there is no `name` to read. One label would then render
+ * as {@link NONE_REPORTED} for a task that named its credential perfectly well,
+ * which is a stated absence in the text a person approves rather than a field
+ * left out.
  */
 function describeCloudSyncTask(task: Record<string, unknown>, id: number): string {
+  const credentials = task['credentials'];
+  const credential = credentialId(credentials);
   const labelled: [string, string | null][] = [
     ['description', stringField(task, 'description')],
     ['path', stringField(task, 'path')],
@@ -1992,7 +2003,8 @@ function describeCloudSyncTask(task: Record<string, unknown>, id: number): strin
     ['transfer mode', stringField(task, 'transfer_mode')],
     ['remote bucket', stringField(task['attributes'], 'bucket')],
     ['remote folder', stringField(task['attributes'], 'folder')],
-    ['credential', stringField(task['credentials'], 'name')],
+    ['credential name', stringField(credentials, 'name')],
+    ['credential id', credential === null ? null : String(credential)],
   ];
   const named = labelled.map(
     ([name, value]) => `${name} ${value === null ? NONE_REPORTED : `"${value}"`}`,
@@ -2069,7 +2081,9 @@ export const cloudsyncRun: MutatingTool = {
     'CLOUD SYNC TASK HAS FAILS naming that id — so an approved plan is always ' +
     'about a task that existed when it was made. The plan names the task the ' +
     'way that listing does: its description, its local path, its direction, the ' +
-    'remote bucket and folder, and the stored credential by name. No key, ' +
+    'remote bucket and folder, and the stored credential by name and id — both, ' +
+    'as that listing reports them, since a task can name its credential by ' +
+    'either. No key, ' +
     'token or password appears in the plan or in the result. `dry_run` reports ' +
     'what the sync would do without moving any data, and DEFAULTS TO FALSE, so ' +
     'an omitted `dry_run` copies for real. A DRY RUN STILL STARTS A JOB AND ' +

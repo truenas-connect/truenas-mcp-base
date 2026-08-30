@@ -151,7 +151,8 @@ describe('cloudsync_run', () => {
       expect(description).toContain('transfer mode "COPY"');
       expect(description).toContain('remote bucket "nas-offsite"');
       expect(description).toContain('remote folder "/media"');
-      expect(description).toContain('credential "Backblaze B2"');
+      expect(description).toContain('credential name "Backblaze B2"');
+      expect(description).toContain('credential id "2"');
       expect(description).toContain('(id 4)');
     });
 
@@ -160,13 +161,25 @@ describe('cloudsync_run', () => {
       expect((await planStep(ctx, { id: 4 })).description).not.toContain('hunter2');
     });
 
+    it('identifies a credential sent in the id-only form the middleware also has', async () => {
+      // `credentials` is declared a whole record and also arrives as a bare id,
+      // which is why `credentialId` reads both. A plan reading only the name
+      // would say the system reported no credential for a task that reported
+      // one — a stated absence, in the text a person approves.
+      const { ctx } = jobSystem({ rows: [{ ...task, credentials: 2 }] });
+      const { description } = await planStep(ctx, { id: 4 });
+      expect(description).toContain('credential id "2"');
+      expect(description).toContain('credential name (the system reported none)');
+    });
+
     it('states that a field the system reported nothing for is exactly that', async () => {
       const { ctx } = jobSystem({ rows: [{ id: 4 }] });
       const { description } = await planStep(ctx, { id: 4 });
       expect(description).toContain('description (the system reported none)');
       expect(description).toContain('transfer mode (the system reported none)');
       expect(description).toContain('remote bucket (the system reported none)');
-      expect(description).toContain('credential (the system reported none)');
+      expect(description).toContain('credential name (the system reported none)');
+      expect(description).toContain('credential id (the system reported none)');
     });
 
     it('says a COPY deletes nothing, and which end is which', async () => {

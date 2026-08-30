@@ -1022,6 +1022,18 @@ catalog cannot read says so rather than defaulting to the harmless one — an
 approver told nothing about deletion reads the silence as "nothing is deleted",
 which is the one reading that costs data.
 
+**A plan identifies an entity every way the listing it borrows its terms from
+does.** A cloud sync task's `credentials` is declared a whole record and the
+middleware also sends the id-only form, which is why `credentialId` exists and
+why `cloudsync_tasks_list` reports `credential_id` beside `credential_name`. A
+plan reading only the name renders "credential (the system reported none)" for
+a task that named its credential perfectly well — **a reduced identification is
+not a shorter answer but a STATED ABSENCE**, and it is stated in the one text a
+person reads before approving. Both labels are carried, under the listing's own
+field names so the two accounts cannot be read as two facts. This is #93's
+direction rule reaching a plan: a field dropping towards a claim has to be
+refused, and "no credential" is a claim.
+
 **`destructiveness` is about the operation, not about the bytes, and it cannot
 say both.** A cloud sync run can be stopped; what it has already written or
 deleted is gone. The field is `reversible` because `irreversible` exists only so
