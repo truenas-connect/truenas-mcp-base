@@ -25,6 +25,7 @@ const task = {
   description: 'Nightly Backblaze',
   path: '/mnt/tank/media',
   direction: 'PUSH',
+  transfer_mode: 'COPY',
   enabled: true,
   attributes: { bucket: 'nas-offsite', folder: '/media' },
   // The provider is where the access key lives, and nothing may reach a plan
@@ -147,6 +148,7 @@ describe('cloudsync_run', () => {
       expect(description).toContain('description "Nightly Backblaze"');
       expect(description).toContain('path "/mnt/tank/media"');
       expect(description).toContain('direction "PUSH"');
+      expect(description).toContain('transfer mode "COPY"');
       expect(description).toContain('remote bucket "nas-offsite"');
       expect(description).toContain('remote folder "/media"');
       expect(description).toContain('credential "Backblaze B2"');
@@ -162,18 +164,70 @@ describe('cloudsync_run', () => {
       const { ctx } = jobSystem({ rows: [{ id: 4 }] });
       const { description } = await planStep(ctx, { id: 4 });
       expect(description).toContain('description (the system reported none)');
+      expect(description).toContain('transfer mode (the system reported none)');
       expect(description).toContain('remote bucket (the system reported none)');
       expect(description).toContain('credential (the system reported none)');
     });
 
-    it('says the sync copies data, and says a dry run does not', async () => {
+    it('says a COPY deletes nothing, and which end is which', async () => {
       const { ctx } = jobSystem();
-      expect((await planStep(ctx, { id: 4 })).description).toContain(
-        'This copies data between this system and the remote.',
+      const { description } = await planStep(ctx, { id: 4 });
+      expect(description).toContain(
+        'Transfer mode COPY: new and changed files are copied to the destination, and nothing ' +
+          'is deleted at either end.',
       );
+      expect(description).toContain(
+        'On a PUSH this system is the source and the remote the destination',
+      );
+      expect(description).toContain('This run does all of that for real.');
+    });
+
+    it('says outright that a SYNC deletes at the destination', async () => {
+      const { ctx } = jobSystem({ rows: [{ ...task, transfer_mode: 'SYNC' }] });
+      expect((await planStep(ctx, { id: 4 })).description).toContain(
+        'Transfer mode SYNC: the destination is made to match the source, so anything at the ' +
+          'destination that is not at the source IS DELETED.',
+      );
+    });
+
+    it('says outright that a MOVE deletes the source', async () => {
+      const { ctx } = jobSystem({ rows: [{ ...task, transfer_mode: 'MOVE' }] });
+      expect((await planStep(ctx, { id: 4 })).description).toContain(
+        'Transfer mode MOVE: files are copied to the destination and are then DELETED FROM THE ' +
+          'SOURCE.',
+      );
+    });
+
+    it.each([
+      ['a mode this tool does not know', 'REPLICATE', '"REPLICATE"'],
+      // `in` walks the prototype and would have found a function here.
+      ['a mode named after a prototype member', 'constructor', '"constructor"'],
+    ])('refuses to guess the effect of %s', async (_name, mode, quoted) => {
+      const { ctx } = jobSystem({ rows: [{ ...task, transfer_mode: mode }] });
+      expect((await planStep(ctx, { id: 4 })).description).toContain(
+        `Transfer mode ${quoted}: whether this run DELETES anything, at either end, is not ` +
+          'established here',
+      );
+    });
+
+    it('does not read an unreadable transfer mode as the harmless one', async () => {
+      const { ctx } = jobSystem({ rows: [{ ...task, transfer_mode: 7 }] });
+      const { description } = await planStep(ctx, { id: 4 });
+      expect(description).toContain(
+        'Transfer mode (the system reported none): whether this run DELETES anything',
+      );
+      expect(description).not.toContain('nothing is deleted at either end');
+    });
+
+    it('says a dry run transfers and deletes nothing', async () => {
+      const { ctx } = jobSystem({ rows: [{ ...task, transfer_mode: 'MOVE' }] });
       const dry = await planStep(ctx, { id: 4, dry_run: true });
-      expect(dry.description).toContain('A dry run moves no data, and still contacts the remote.');
       expect(dry.description).toContain('Dry-run the cloud sync task');
+      expect(dry.description).toContain(
+        'This is a dry run: it transfers and deletes nothing, and still contacts the remote.',
+      );
+      // The mode is still stated: what a dry run is a dry run OF is the point.
+      expect(dry.description).toContain('DELETED FROM THE SOURCE');
     });
 
     it('says the job is followed for a bounded time and then left running', async () => {

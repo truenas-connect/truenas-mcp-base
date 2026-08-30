@@ -1980,6 +1980,7 @@ function describeCloudSyncTask(task: Record<string, unknown>, id: number): strin
     ['description', stringField(task, 'description')],
     ['path', stringField(task, 'path')],
     ['direction', stringField(task, 'direction')],
+    ['transfer mode', stringField(task, 'transfer_mode')],
     ['remote bucket', stringField(task['attributes'], 'bucket')],
     ['remote folder', stringField(task['attributes'], 'folder')],
     ['credential', stringField(task['credentials'], 'name')],
@@ -1988,6 +1989,64 @@ function describeCloudSyncTask(task: Record<string, unknown>, id: number): strin
     ([name, value]) => `${name} ${value === null ? NONE_REPORTED : `"${value}"`}`,
   );
   return `the cloud sync task with ${named.join(', ')} (id ${id})`;
+}
+
+/**
+ * What each transfer mode does to the data, in the plan's own words.
+ *
+ * `transfer_mode` is declared REQUIRED on the pinned cloud sync entity and it
+ * decides whether the run deletes anything: `COPY` deletes nothing, `SYNC`
+ * makes the destination match the source and so removes whatever is not at the
+ * source, and `MOVE` removes the source once the copy has landed. A plan that
+ * said "this copies data" for all three would hide a deletion behind the word
+ * the tool's name uses — a plan is what a person approves, so that is the same
+ * defect as a description promising more than the normalization delivers,
+ * pointed the other way.
+ */
+const TRANSFER_MODE_EFFECT: Record<string, string> = {
+  COPY: 'new and changed files are copied to the destination, and nothing is deleted at either end.',
+  SYNC:
+    'the destination is made to match the source, so anything at the destination that is ' +
+    'not at the source IS DELETED.',
+  MOVE: 'files are copied to the destination and are then DELETED FROM THE SOURCE.',
+};
+
+/**
+ * Which end is which, since every sentence above is written in terms of source
+ * and destination.
+ *
+ * This is `cloudsync_tasks_list`'s own reading of `direction`, restated rather
+ * than re-derived — that tool's description already says `path` is the local
+ * end, the source on a `PUSH` and the destination on a `PULL`.
+ */
+const TRANSFER_ENDS =
+  'On a PUSH this system is the source and the remote the destination; on a PULL it is the ' +
+  'other way round.';
+
+/**
+ * The effect sentence for this task's mode, or the statement that the effect
+ * was not established.
+ *
+ * A mode this tool cannot read is said to be exactly that, and NOT defaulted to
+ * the harmless one: an approver told nothing about deletion would read the
+ * absence as "nothing is deleted", which is the one reading that costs data.
+ *
+ * `Object.hasOwn` rather than `in`, which walks the prototype — `'constructor'`
+ * is `in` every object literal and would come back as a function where a
+ * sentence is expected (#101).
+ */
+function transferModeSentence(task: Record<string, unknown>): string {
+  const mode = stringField(task, 'transfer_mode');
+  const effect =
+    mode !== null && Object.hasOwn(TRANSFER_MODE_EFFECT, mode)
+      ? TRANSFER_MODE_EFFECT[mode]
+      : undefined;
+  if (effect !== undefined) return `Transfer mode ${mode}: ${effect} ${TRANSFER_ENDS}`;
+  return (
+    `Transfer mode ${mode === null ? NONE_REPORTED : `"${mode}"`}: whether this run DELETES ` +
+    'anything, at either end, is not established here — read the task\'s transfer mode before ' +
+    'approving.'
+  );
 }
 
 export const cloudsyncRun: MutatingTool = {
@@ -2011,9 +2070,14 @@ export const cloudsyncRun: MutatingTool = {
     'minutes for a small delta, hours for a first upload — so this tool ' +
     'WATCHES THE JOB FOR AT MOST `watched_seconds` AND THEN RETURNS WHATEVER ' +
     'IT HAS, leaving the sync running. It never waits for the copy to finish. ' +
-    '`ended` is whether the job reached a state it will not move out of within ' +
-    'that time; `ended: false` IS A SYNC THAT IS STILL GOING and says nothing ' +
-    'about whether it will work. `succeeded` is the answer to "did it work": ' +
+    '`ended` is whether the job was established to have reached a state it will ' +
+    'not move out of. TRUE MEANS THE RUN IS OVER; FALSE IS THREE ANSWERS AND ' +
+    'NOT ONE — the sync is still going, or the job reported a state this tool ' +
+    'could not read, or no job was seen at all — and `state` and `job_id` are ' +
+    'what tell those apart: a state beside `ended: false` is a sync still ' +
+    'under way, a null `state` beside a `job_id` is a job whose state was ' +
+    'unreadable, and both null is a job this tool never saw. IN NONE OF THE ' +
+    'THREE HAS ANYTHING FAILED. `succeeded` is the answer to "did it work": ' +
     'true where the job ended in a state this catalog reads as success, false ' +
     'where it ended in any other state — including one added by a later ' +
     'TrueNAS release, so an unfamiliar terminal state is never read as a ' +
@@ -2038,11 +2102,16 @@ export const cloudsyncRun: MutatingTool = {
     'run against the task. `task_id` is the `id` that was asked for and ' +
     '`dry_run` what was actually sent. THIS TOOL CANNOT STOP A RUNNING SYNC, ' +
     'cannot change, create or delete a task, and cannot sync anything that is ' +
-    'not already a task on the system. Starting a sync is reversible in that ' +
-    'the run can be aborted from the TrueNAS UI, but THE DATA MOVEMENT ITSELF ' +
-    'IS NOT UNDONE by this or by anything here: a `PUSH` overwrites at the ' +
-    'remote and a `PULL` overwrites locally, according to the task\'s own ' +
-    'configuration, which this tool does not report and does not change.',
+    'not already a task on the system. WHAT THE RUN DOES TO THE DATA IS THE ' +
+    "TASK'S OWN `transfer_mode`, WHICH THE PLAN NAMES AND THIS TOOL DOES NOT " +
+    'CHANGE: `COPY` deletes nothing, `SYNC` makes the destination match the ' +
+    'source and so DELETES whatever at the destination is not at the source, ' +
+    'and `MOVE` DELETES THE SOURCE once the copy lands — with `direction` ' +
+    'saying which end is which, this system being the source on a `PUSH` and ' +
+    'the destination on a `PULL`. NOTHING HERE UNDOES ANY OF THAT. The run ' +
+    'itself can be stopped from the TrueNAS UI, which is all this tool\'s ' +
+    "`destructiveness` records; the bytes it has already written or deleted " +
+    'stay written or deleted.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -2065,6 +2134,13 @@ export const cloudsyncRun: MutatingTool = {
   },
   requiredRole: Role.Full,
   mutating: true,
+  // `reversible` is a claim about the OPERATION — the run can be stopped — and
+  // not about the bytes, which a `SYNC` or a `MOVE` deletes for good. The two
+  // are not the same and this field cannot say both: `irreversible` exists only
+  // so the catalog can REJECT it (`catalog/tool.ts`), so marking it that way
+  // would remove the tool rather than describe it more honestly. The honest
+  // account of what the run does to the data is in the description above and in
+  // the plan, which is where a person reads it.
   destructiveness: 'reversible',
   normalizeArgs(rawArgs) {
     const run = parseRun(rawArgs);
@@ -2091,10 +2167,11 @@ export const cloudsyncRun: MutatingTool = {
         params: syncParams(run),
         description:
           `${run.dryRun ? 'Dry-run' : 'Run'} ${describeCloudSyncTask(task, run.id)} now. ` +
+          `${transferModeSentence(task)} ` +
           `${
             run.dryRun
-              ? 'A dry run moves no data, and still contacts the remote.'
-              : 'This copies data between this system and the remote.'
+              ? 'This is a dry run: it transfers and deletes nothing, and still contacts the remote.'
+              : 'This run does all of that for real.'
           } ` +
           'This starts a background job; the job is then followed through the ' +
           "client's own tracking, which reads `core.get_jobs` and changes " +

@@ -967,6 +967,27 @@ nor a success. The tool reports no progress percentage and no live status, and
 names `tasks_recent_runs` — whose `id` is this tool's `job_id` — as where a
 still-running sync is followed up.
 
+**A plan names what the operation does to the data, not what the tool's name
+suggests it does.** `cloudsync_run` starts a task whose own `transfer_mode` — a
+required field on the pinned entity — decides whether the run DELETES anything:
+`COPY` deletes nothing, `SYNC` removes whatever at the destination is not at the
+source, and `MOVE` removes the source once the copy lands. A plan step reading
+"this copies data" would have been true for one of the three and would have
+hidden a deletion behind the word the tool is named for. The mode is named in
+the plan, its effect is spelled out in the mode's own terms, and a mode this
+catalog cannot read says so rather than defaulting to the harmless one — an
+approver told nothing about deletion reads the silence as "nothing is deleted",
+which is the one reading that costs data.
+
+**`destructiveness` is about the operation, not about the bytes, and it cannot
+say both.** A cloud sync run can be stopped; what it has already written or
+deleted is gone. The field is `reversible` because `irreversible` exists only so
+the catalog can REJECT a tool (`catalog/tool.ts`), so the other value would
+remove the tool rather than describe it more honestly. **Where those two come
+apart, the field records the operation and the description carries the account of
+the data** — and the description then may not claim reversibility on the field's
+behalf.
+
 **The plan names one call, which is #119's distinction rather than a lapse.**
 `scheduled_task_set_enabled` names its read as a step because `execute` makes
 it; this tool reads only at plan time — to name the task, and to fail on an id
