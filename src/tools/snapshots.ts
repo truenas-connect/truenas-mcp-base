@@ -137,10 +137,12 @@ const MAX_LIMIT = 1000;
  */
 
 /**
- * A ZFS property as a snapshot row carries it. `pool.snapshot.query` answers
- * rows typed `Record<string, unknown>`, so every field of a property arrives as
- * `unknown` and is restated here — the same way `storage.ts` restates a
- * dataset's properties.
+ * A ZFS property as a snapshot row carries it. `pool.snapshot.query` declares
+ * the property object it answers with — `rawvalue` as a string, `parsed` as
+ * `unknown` — and both are restated `unknown` here, because a declared type is
+ * a claim about what the middleware sends rather than about the value received:
+ * the guards below are what decide whether either field is a number or a string
+ * at all. The same way `storage.ts` restates a dataset's properties.
  */
 interface SnapshotProperty {
   rawvalue?: unknown;
@@ -209,9 +211,9 @@ function stringOrNull(value: unknown): string | null {
  * One entry of a snapshot's `properties` map, or undefined where the row
  * carries no map to read it from.
  *
- * Guarded rather than asserted: `properties` arrives as `unknown` and a row
- * that sends something other than an object is exactly the case the assertion
- * would have got wrong.
+ * Guarded rather than asserted: the client declares `properties` a record, and
+ * a row that sends something other than an object is exactly the case an
+ * assertion resting on that declaration would have got wrong.
  */
 function snapshotProperty(properties: unknown, name: string): unknown {
   return typeof properties === 'object' && properties !== null

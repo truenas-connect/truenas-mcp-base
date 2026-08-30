@@ -1214,10 +1214,12 @@ const NOT_LISTED = 'the system did not list this pool';
 
 /**
  * A ZFS property as the middleware reports it. `pool.dataset.query` and
- * `pool.snapshot.query` both answer rows typed `Record<string, unknown>`, so the
- * parsed value has to be restated — as `storage.ts` and `snapshots.ts` each
- * restate it, and local here for the reason those files give: a tool file is
- * read on its own.
+ * `pool.snapshot.query` both declare the property object they answer with and
+ * both type its `parsed` value `unknown`, so the value still has to be restated
+ * to be read at all — as `storage.ts` and `snapshots.ts` each restate it, and
+ * local here for the reason `snapshots.ts` gives: families that happen to share
+ * ZFS's property shape read different payloads, and sharing two lines would
+ * couple them.
  */
 interface ZfsProperty {
   parsed?: unknown;
