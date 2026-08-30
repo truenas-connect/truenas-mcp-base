@@ -82,11 +82,12 @@ describe('apps_list', () => {
   });
 
   it('reads a field the projection asked for and the row does not carry as null', async () => {
-    // The failure mode `select` introduces: middleware honours it on its
-    // current api version, so a field named here can be ABSENT from the row
-    // rather than null on it. `undefined` serializes to no key, so without the
-    // fallback the caller would get an object missing fields the description
-    // promises — which reads as a different shape rather than as a null.
+    // The failure mode `select` introduces: middleware that honours it returns
+    // the named fields and no others, so a name the release answering does not
+    // carry comes back ABSENT from the row rather than null on it. `undefined`
+    // serializes to no key, so without the fallback the caller would get an
+    // object missing fields the description promises — which reads as a
+    // different shape rather than as a null.
     const { ctx } = fakeSystem({ ['app.query']: [{}] });
     expect(await appsList.handler(ctx, {})).toEqual([
       {

@@ -178,9 +178,9 @@ describe('reporting_app_vm_usage', () => {
   });
 
   it('reads an app row carrying none of the projected fields as nulls, not as absent keys', async () => {
-    // A `select` middleware does not honour, or a field a later release drops,
-    // both arrive as a row without the key. The row still has to answer with
-    // every field the description promises.
+    // A projection honoured against a release that does not carry one of the
+    // names — dropped or renamed since — arrives as a row without the key.
+    // The entry still has to answer with every field the description promises.
     const [entry] = await entries({ apps: [{}], vms: [], instances: [] });
     expect(entry).toEqual({
       kind: 'app',

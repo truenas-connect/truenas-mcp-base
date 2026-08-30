@@ -109,11 +109,17 @@ export const appsList: ReadOnlyTool = {
     return apps.map((app) => ({
       // `?? null` on every field, because a projection is the one read where a
       // field this tool names can be absent from the row rather than null on
-      // it — a `select` middleware does not honour, or a field a later release
-      // drops. `undefined` serializes to no key at all, so without it a caller
+      // it: middleware HONOURING the select returns those fields and no
+      // others, so a name that is not a field on the release answering — one a
+      // later release drops, or renames — comes back as no key at all. Not
+      // honouring it is the opposite failure and needs no fallback: an
+      // unrecognised parameter is dropped rather than refused, and the row
+      // arrives whole.
+      //
+      // `undefined` serializes to no key, so without the fallback a caller
       // would get an object missing fields the description promises instead of
-      // nulls it can see are absent, which is the reason `boot.ts` spells out
-      // an unread section's fields rather than leaving them off.
+      // nulls it can see are absent — the reason `boot.ts` spells out an
+      // unread section's fields rather than leaving them off.
       //
       // It is `?? null` and not `textOrNull`: this ticket is bandwidth, and a
       // guard would additionally change what a malformed value reports, which
@@ -487,11 +493,13 @@ export const appsUpdateSummary: ReadOnlyTool = {
   async handler({ system }) {
     let candidates: Candidate[];
     try {
-      // Four fields, which is fewer than `apps_list` reads: the mapping here
-      // deliberately does not report the changelog or the other versions
-      // available, so this call has no business asking for them. A `select`
-      // derived from a list shared with `apps_list` would ask for two fields
-      // nothing on this path reads.
+      // Four fields, and NOT the six `apps_list` asks for. The lists overlap
+      // without either containing the other: `candidateOf` never reads
+      // `latest_version` or `image_updates_available` — the newest catalog
+      // version this tool reports comes from `app.upgrade_summary` rather than
+      // from the listing — and it does read `human_version`, which `apps_list`
+      // deliberately drops. A `select` shared between the two paths would ask
+      // each of them for fields it has no mapping for.
       //
       // Written inline for the reason `apps_list` gives above.
       const rows = await firstValueFrom(
