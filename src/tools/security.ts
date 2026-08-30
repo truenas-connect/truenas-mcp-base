@@ -160,7 +160,9 @@ async function readSecurity(system: SystemHandle): Promise<Attempt<SecuritySetti
       value: {
         // Renamed off the imperative the middleware spells them with:
         // `enable_fips` reads as an instruction to turn FIPS on, and this is a
-        // report of whether it is on.
+        // report of whether it is SET. Not of whether the system is running
+        // that way: `system.security.info.fips_enabled` is a separate call and
+        // this tool does not make it, which the description says outright.
         fips_enabled: booleanOrNull(settings['enable_fips']),
         stig_enabled: booleanOrNull(settings['enable_gpos_stig']),
         // These keep the middleware's own names, unit and all — which is to say
@@ -256,12 +258,19 @@ export const securityConfig: ReadOnlyTool = {
     'EVERY OTHER FIELD IN THAT SECTION IS NULL BECAUSE IT WAS NOT READ, not ' +
     'because the system reported nothing. A failure in one section never ' +
     'empties or falsifies the other. ' +
-    'In `security`: `fips_enabled` is whether the system runs in FIPS 140 ' +
-    'validated-cryptography mode. `stig_enabled` is whether it runs in STIG ' +
-    'mode — the General Purpose Operating System Security Technical ' +
-    'Implementation Guide hardening profile, which the middleware spells ' +
-    '`enable_gpos_stig`; it is a hardening mode and NOT a statement that the ' +
-    'system passes a STIG assessment. Each is true, false, or NULL WHERE THE ' +
+    'In `security`: BOTH MODE FIELDS ARE THE CONFIGURED SETTING AND NEITHER IS ' +
+    'THE RUNNING STATE. `fips_enabled` is whether the system is CONFIGURED to ' +
+    'run in FIPS 140 validated-cryptography mode, read from the setting the ' +
+    'middleware spells `enable_fips`. Whether it is ACTUALLY running that way is ' +
+    'a separate call, `system.security.info.fips_enabled`, which NO TOOL IN THIS ' +
+    'CATALOG makes — that the middleware answers the two separately is the ' +
+    'reason to keep them distinct, so a true here is that the mode is set and is ' +
+    'NOT proof the running system is in it. `stig_enabled` is the same kind of ' +
+    'answer for STIG mode — the General Purpose Operating System Security ' +
+    'Technical Implementation Guide hardening profile, which the middleware ' +
+    'spells `enable_gpos_stig`; it is a hardening mode and NOT a statement that ' +
+    'the system passes a STIG assessment, and the surface this tool is pinned to ' +
+    'offers no running-state call for it at all. Each is true, false, or NULL WHERE THE ' +
     'SYSTEM REPORTED NO VALUE THIS TOOL COULD READ — and a null is neither ' +
     'answer, so a null must never be read as the mode being off. ' +
     'THE PASSWORD POLICY FIELDS ARE THE ONES MOST EASILY MISREAD. ' +
