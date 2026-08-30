@@ -937,7 +937,7 @@ describe('system_general_config', () => {
     });
   });
 
-  it('tells the three kinds of time apart by the value, not by the tool', async () => {
+  it('tells the kinds of time apart by the value, not by the tool', async () => {
     // A list of tool names is incomplete the day a tool is added and is
     // silently wrong rather than loudly so; the shape of the value a caller is
     // holding is not.
@@ -957,6 +957,29 @@ describe('system_general_config', () => {
     expect(systemGeneralConfig.description).toContain(
       'NOTHING IN THIS CATALOG ESTABLISHES WHAT ZONE IT IS IN',
     );
+  });
+
+  it('covers the middleware date envelope, which a tool can forward unread', async () => {
+    // `alerts_list` returns `alert.datetime` as it arrived, and that can be the
+    // `{ $date: <epoch ms> }` carrier `common.ts` names — absolute, and needing
+    // the same conversion as a `Z`-suffixed string. Sorting it by "carries no
+    // `Z`" gives the answer backwards, which is why it is its own rule.
+    expect(systemGeneralConfig.description).toContain('AN OBJECT CARRYING A `$date`');
+    expect(systemGeneralConfig.description).toContain('MILLISECONDS SINCE THE EPOCH');
+    expect(systemGeneralConfig.description).toContain('CONVERT it into this zone exactly as (2)');
+    expect(systemGeneralConfig.description).toContain('It is not (3)');
+  });
+
+  it('names tools as examples and ends on a rule for a shape it does not describe', async () => {
+    // The defect a count of forms reproduces one level up from a list of tool
+    // names: both are closed, and the catalog grows. The last rule is what
+    // makes a form nobody has written down yet answerable honestly.
+    expect(systemGeneralConfig.description).toContain('AMONG THEM, named as');
+    expect(systemGeneralConfig.description).toContain('examples and not as the whole set');
+    expect(systemGeneralConfig.description).toContain(
+      'a shape none of the above describes — IS NOT COVERED BY THIS RULE',
+    );
+    expect(systemGeneralConfig.description).not.toContain('the catalog reports times in three');
   });
 
   it('does not claim to be the only tool reporting the timezone', async () => {

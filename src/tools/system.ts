@@ -900,7 +900,19 @@ function certificateConfigured(value: unknown): boolean | null {
  * written — `describeSchedule` has three callers rather than the two the cron
  * rendering started with, and `toISOString` is reached for in six files. A list
  * of tool names cannot be right for long in a catalog that grows by a tool a
- * ticket, and it is silently wrong rather than loudly so. The three forms are:
+ * ticket, and it is silently wrong rather than loudly so.
+ *
+ * **A COUNT OF FORMS IS A LIST OF THE SAME KIND**, which is the fourth draft's
+ * version of the defect and is why the description states no number now. It
+ * said the catalog reported times in three forms and every tool that reported
+ * one used them, and `alerts_list` already returned a fourth: it forwards
+ * `alert.datetime` unread, and what arrives can be the middleware's own
+ * {@link MiddlewareDate} envelope, which this repository's own fixture uses for
+ * exactly that field. An envelope carries epoch milliseconds and is absolute,
+ * so the only rule it matched on its face was the one for a string carrying no
+ * zone — *do not convert* — which is the answer backwards. The rules sort a
+ * value by its SHAPE and end in a case for a shape none of them describe, so a
+ * form nobody has written down yet is answered honestly rather than absorbed:
  *
  * - **A rendered schedule** — the English a `schedule_description` holds — is
  *   already local, because the system runs the cron expression behind it at that
@@ -909,18 +921,23 @@ function certificateConfigured(value: unknown): boolean | null {
  *   what every `toISOString` in the catalog produces. To be converted into this
  *   zone before anyone is told a wall-clock hour.
  * - **A timestamp carrying neither** was written by the system and passed
- *   through — `storage_scrub_history`'s scan times, `boot_pool_status`'s
- *   `created_at`. NOTHING in the catalog establishes what zone those are in,
- *   this tool included, so they are not to be converted either. Saying otherwise
- *   would assert a frame the sibling tool refuses to state, and would shift a
- *   string already written in local time by this offset a second time.
+ *   through unread. NOTHING in the catalog establishes what zone those are in,
+ *   this tool included, so they are not to be converted. Saying otherwise would
+ *   assert a frame the sibling tool refuses to state, and would shift a string
+ *   already written in local time by this offset a second time.
+ * - **An object carrying `$date`** is the middleware's date representation
+ *   passed through unread, and the number in it is milliseconds since the epoch
+ *   — absolute, and to be converted exactly as the second bullet is. Every tool
+ *   that READS one turns it into `Z`-suffixed text and so reports the second
+ *   form; this bullet is for the ones that forward it.
+ * - **Anything else** is not covered, and is to be reported as what it is with
+ *   its frame unstated rather than sorted into the nearest rule.
  *
- * The third bullet names tools and the first two do not, which looks like the
- * defect above and is the other half of the same rule: the API declares both of
- * those fields as bare strings and states no format, so what those two tools
- * pass through MIGHT carry a zone and might not. Naming them tells a caller
- * where to look, and the sorting is still done on the value — which is why the
- * description says to read it rather than which group it lands in.
+ * Tools ARE named in the description, under the last three bullets and as
+ * examples rather than as the set — the API declares those fields as bare
+ * strings and states no format, so what a given one passes through might carry
+ * a zone, might not, and might not be a string at all. Naming them tells a
+ * caller where to look, and the sorting is still done on the value.
  *
  * One tool reporting the frame once is the deliverable; restating it inside every
  * tool that reports a time is a separate change and is not made here.
@@ -967,9 +984,8 @@ export const systemGeneralConfig: ReadOnlyTool = {
     'what follows here, is what that zone is the frame FOR. ' +
     'IT APPLIES TO THE CATALOG\'S KINDS OF TIME IN OPPOSITE DIRECTIONS, AND ' +
     'GETTING THAT ROUND THE WRONG WAY IS WORSE THAN NOT READING IT AT ALL. ' +
-    'DECIDE FROM THE VALUE YOU ARE HOLDING, NEVER FROM WHICH TOOL RETURNED IT — ' +
-    'the catalog reports times in three forms and every tool that reports one ' +
-    'uses these. (1) A RENDERED SCHEDULE — the English in a ' +
+    'DECIDE FROM THE VALUE YOU ARE HOLDING, NEVER FROM WHICH TOOL RETURNED IT, ' +
+    'AND SORT IT BY ITS SHAPE. (1) A RENDERED SCHEDULE — the English in a ' +
     '`schedule_description`, such as "at 02:00, every day" — IS ALREADY IN ' +
     'THIS ZONE, because the system runs the cron expression behind it at that ' +
     'hour local to itself. Name this zone when repeating one and do NOT ' +
@@ -979,11 +995,21 @@ export const systemGeneralConfig: ReadOnlyTool = {
     'A TIMESTAMP CARRYING NEITHER was written by the system and passed through ' +
     'unchanged, and NOTHING IN THIS CATALOG ESTABLISHES WHAT ZONE IT IS IN — ' +
     'this field included. Do NOT convert one and do NOT read it as UTC; say ' +
-    'the zone is unstated. `storage_scrub_history` and `boot_pool_status` are ' +
-    'the tools that pass a time through this way; WHETHER a given one of their ' +
-    'values carries a zone is not fixed — the API declares them as bare ' +
-    'strings and states no format — so READ THE VALUE and sort it into (2) or ' +
-    '(3) by what it actually carries. ' +
+    'the zone is unstated. (4) AN OBJECT CARRYING A `$date`, such as ' +
+    '`{"$date": 1756468800000}`, IS THE MIDDLEWARE\'S OWN DATE REPRESENTATION ' +
+    'FORWARDED UNREAD, and the number in it is MILLISECONDS SINCE THE EPOCH, ' +
+    'which is ABSOLUTE: CONVERT it into this zone exactly as (2). It is not ' +
+    '(3) — carrying no `Z` does not make it local, and reading it as (3) is ' +
+    'the one mistake this form is written out to stop. (5) ANYTHING ELSE — a ' +
+    'bare number, or a shape none of the above describes — IS NOT COVERED BY ' +
+    'THIS RULE: report it as what it is and say its zone is unstated, rather ' +
+    'than sorting it into the nearest form. Tools that pass a time through ' +
+    'without reading it are where (3) and (4) turn up — `alerts_list`, ' +
+    '`storage_scrub_history` and `boot_pool_status` AMONG THEM, named as ' +
+    'examples and not as the whole set. WHICH form a given one of their ' +
+    'values takes is not fixed: the API declares those fields as bare strings ' +
+    'and states no format, so READ THE VALUE and sort it by what it actually ' +
+    'carries. ' +
     '`timezone` is null where the system reported no timezone this tool could ' +
     'read — which is NOT UTC, and must not be treated as UTC; say the zone is ' +
     'unknown instead of assuming one. ' +
