@@ -140,6 +140,31 @@ describe('nfs_clients', () => {
       });
     });
 
+    it('names a key it looked for whose value was not of the type it reads', async () => {
+      // `info` is published per client as a text file, so a middleware that
+      // parses it without coercing sends every value as a string — the likelier
+      // of the two ways the allowlist can be wrong, and the one a list filtered
+      // by key name could not show. Every key here is spelled exactly as this
+      // tool expects; two of them carry text where a number is read.
+      const row = await oneV4({
+        id: 'c',
+        info: {
+          address: '10.0.0.4:849',
+          status: 'confirmed',
+          'seconds from last renew': '12',
+          'minor version': '2',
+        },
+        states: [],
+      });
+      expect(row).toMatchObject({
+        address: '10.0.0.4:849',
+        status: 'confirmed',
+        seconds_from_last_renew: null,
+        minor_version: null,
+        unreported_info_fields: ['minor version', 'seconds from last renew'],
+      });
+    });
+
     it('reports a null info record as unread rather than as carrying no keys', async () => {
       const row = await oneV4({ id: 'c', info: 'not a record', states: [] });
       expect(row).toMatchObject({
@@ -193,9 +218,15 @@ describe('nfs_clients', () => {
       expect(row).toMatchObject({ state_count: 2, state_types: ['open'] });
     });
 
-    it('names no type for a state whose type could not be read', async () => {
+    it('names no type for a state whose type could not be read, and names the key', async () => {
+      // The entry carried a `type` and none is reported, so the key belongs in
+      // the unreported list beside the keys this tool never looks for.
       const row = await oneV4({ id: 'c', info: info(), states: [state({ type: 7 })] });
-      expect(row).toMatchObject({ state_count: 1, state_types: [] });
+      expect(row).toMatchObject({
+        state_count: 1,
+        state_types: [],
+        unreported_state_fields: ['access', 'filename', 'type'],
+      });
     });
 
     it('answers with every field null for a client row that is not a record', async () => {

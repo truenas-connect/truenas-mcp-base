@@ -460,13 +460,25 @@ off, so the names in `INFO_KEYS` are taken from what the Linux NFS server
 publishes per client and are a considered guess.
 
 **The guess is made checkable rather than hidden.** Every key the record
-actually carried that the tool does not read is reported by name, in
+actually carried whose value is not reported is named, in
 `unreported_info_fields` and `unreported_state_fields`. A key name is not a
 value, so nothing a later TrueNAS release adds reaches a caller — but a caller
 seeing the named fields all null beside a full list of unreported names is
-looking at an allowlist whose spellings are wrong, not at a client the server
-knows nothing about. Those two readings are otherwise identical, and only one of
-them is a defect.
+looking at an allowlist that does not fit this system, not at a client the
+server knows nothing about. Those two readings are otherwise identical, and only
+one of them is a defect.
+
+**Such a list is built from the keys that produced a value, never from the
+allowlist.** There are two ways an unconfirmed allowlist is wrong and only one
+of them is a wrong key name: the other is a right key over a value of an
+unexpected type, which here is the likelier, since `info` is published per
+client as a text file and a middleware that parses it without coercing sends
+every value as a string. A list filtered by key name shows the first and hides
+the second — it would answer "every key it carried is reported" beside a null
+field, which is the reading the list exists to prevent. So a key whose guard
+rejected the value lands in the list exactly as an unlooked-for key does, and
+the field's description says a null field beside an empty list is the separate
+answer "the record carried nothing under that name".
 
 **Reach for this only where the key names themselves are unconfirmed.** A record
 whose shape the client declares, or that has been read off a live system, gets a

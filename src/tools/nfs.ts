@@ -158,12 +158,15 @@ interface Nfsv4Client {
  * all — they are a considered guess and not an observation.
  *
  * Guessing wrong costs nulls rather than wrong answers, and it is visible:
- * every key the record actually carried and this tool does not read is reported
- * by name in `unreported_info_fields`, so a caller seeing four nulls beside a
- * full list of unreported names is looking at an allowlist that needs the real
- * names, not at a client the server knows nothing about. That is what makes
- * this safe to ship without a live system to check it against — and correcting
- * the names later is a change here and in nothing else.
+ * every key the record actually carried whose value is not reported above is
+ * named in `unreported_info_fields`, so a caller seeing four nulls beside a
+ * full list of unreported names is looking at an allowlist that does not fit
+ * this system, not at a client the server knows nothing about. That covers both
+ * ways the guess can be wrong — a key spelled differently, and a key spelled as
+ * expected whose value is not of the type read here — because the list is built
+ * from what was read rather than from the names below. It is what makes this
+ * safe to ship without a live system to check it against, and correcting the
+ * names later is a change here and in nothing else.
  */
 const INFO_KEYS = {
   address: 'address',
@@ -176,8 +179,22 @@ const INFO_KEYS = {
 const STATE_TYPE_KEY = 'type';
 
 /**
- * The keys of a record that this tool does not report, by name and never by
- * value.
+ * The keys of a record whose values this tool does not report, by name and
+ * never by value.
+ *
+ * `reported` IS THE KEYS THAT ACTUALLY PRODUCED A VALUE, NOT THE ALLOWLIST, and
+ * that is the whole of what makes this list say what it claims to. A key this
+ * tool looks for whose value a guard rejected has not been reported either, and
+ * it belongs here for exactly the reason a key nobody looked for does: the
+ * caller is left with a null field, and this list is the only thing that says
+ * the record held something under that name. Filtering by the allowlist instead
+ * would answer "every key is reported" while a named field beside it was null —
+ * the one reading this list exists to prevent.
+ *
+ * That case is not the unlikely one. `info` is published per client as a text
+ * file, so a middleware that parses it without coercing sends every value as a
+ * string, and a right key carrying an unexpected type is the likelier of the
+ * two ways this file's guess at the key names can be wrong.
  *
  * A key name is not a value: forwarding the record would put a field a later
  * TrueNAS release adds into a tool result unannounced, which is what the
@@ -188,14 +205,11 @@ const STATE_TYPE_KEY = 'type';
  * Sorted so two systems reporting the same keys in a different order answer
  * identically.
  */
-function unreportedKeys(record: Record<string, unknown>, read: readonly string[]): string[] {
+function unreportedKeys(record: Record<string, unknown>, reported: readonly string[]): string[] {
   return Object.keys(record)
-    .filter((key) => !read.includes(key))
+    .filter((key) => !reported.includes(key))
     .sort();
 }
-
-/** Every `info` key this tool reads, derived from the map rather than restated. */
-const READ_INFO_KEYS: readonly string[] = Object.values(INFO_KEYS);
 
 /**
  * The `states` half of one client: how much state it holds, of what kinds, and
@@ -225,7 +239,11 @@ function readStates(value: unknown): States {
     if (record === null) continue;
     const type = textOrNull(record[STATE_TYPE_KEY]);
     if (type !== null) types.add(type);
-    for (const key of unreportedKeys(record, [STATE_TYPE_KEY])) unreported.add(key);
+    // The type key counts as reported only where its value survived the guard.
+    // An entry carrying `type: 7` names no type above, so the key belongs in
+    // the unreported list rather than being filtered out of it by name.
+    const reported = type === null ? [] : [STATE_TYPE_KEY];
+    for (const key of unreportedKeys(record, reported)) unreported.add(key);
   }
   return {
     count: value.length,
@@ -239,23 +257,41 @@ function readNfsv4Client(client: unknown): Nfsv4Client {
   const record = recordOrNull(client) ?? {};
   const info = recordOrNull(record['info']);
   const states = readStates(record['states']);
+
+  // Which of the allowlisted keys `info` actually answered with a value for.
+  // Accumulated as the fields are read rather than restated from `INFO_KEYS`,
+  // because a key whose value a guard rejected is not reported and has to reach
+  // `unreportedKeys` as such — see that function for why the distinction is the
+  // point rather than a detail.
+  const reported: string[] = [];
+  const fromInfo = <T>(key: string, guard: (value: unknown) => T | null): T | null => {
+    const value = guard(info?.[key]);
+    if (value !== null) reported.push(key);
+    return value;
+  };
+
+  const address = fromInfo(INFO_KEYS.address, textOrNull);
+  // Reported as the word the server used. The vocabulary is the NFS server's
+  // and is not closed, so it is not coerced into a set this file invented.
+  const status = fromInfo(INFO_KEYS.status, textOrNull);
+  // The unit is in the field name because the server's own key states it (#96);
+  // where that key is absent this is null and no unit is asserted about
+  // anything.
+  const renew = fromInfo(INFO_KEYS.renew, numberOrNull);
+  const minorVersion = fromInfo(INFO_KEYS.minorVersion, numberOrNull);
+
   return {
     id: textOrNull(record['id']),
-    address: textOrNull(info?.[INFO_KEYS.address]),
-    // Reported as the word the server used. The vocabulary is the NFS server's
-    // and is not closed, so it is not coerced into a set this file invented.
-    status: textOrNull(info?.[INFO_KEYS.status]),
-    // The unit is in the field name because the server's own key states it
-    // (#96); where that key is absent this is null and no unit is asserted
-    // about anything.
-    seconds_from_last_renew: numberOrNull(info?.[INFO_KEYS.renew]),
-    minor_version: numberOrNull(info?.[INFO_KEYS.minorVersion]),
+    address,
+    status,
+    seconds_from_last_renew: renew,
+    minor_version: minorVersion,
     state_count: states.count,
     state_types: states.types,
     // Null rather than empty where `info` was not a record at all: empty says
     // the record was read and every key it carried is reported above, which is
     // a different answer from not having read it.
-    unreported_info_fields: info === null ? null : unreportedKeys(info, READ_INFO_KEYS),
+    unreported_info_fields: info === null ? null : unreportedKeys(info, reported),
     unreported_state_fields: states.unreported,
   };
 }
@@ -304,12 +340,19 @@ export const nfsClients: ReadOnlyTool = {
     'have not been checked against a live system. Nothing from either record ' +
     'is passed through: `unreported_info_fields` and `unreported_state_fields` ' +
     'name — by key name only, never by value — every key the records actually ' +
-    'carried that this tool does not report. IF THE NAMED FIELDS ARE ALL NULL ' +
-    'AND THOSE LISTS ARE FULL, the keys are spelled differently on this system ' +
-    'and the values are in there under the names listed; report that rather ' +
-    'than reading the nulls as a client the server knows nothing about. Both ' +
-    'are null where the record was not a record at all, and empty where it was ' +
-    'read and every key it carried is reported. `nfsv3` AND `nfsv4` ARE NULL ' +
+    'carried WHOSE VALUE IS NOT REPORTED ABOVE, which covers a key this tool ' +
+    'does not look for and equally a key it does look for whose value was not ' +
+    'of the type it reads. IF THE NAMED FIELDS ARE ALL NULL AND THOSE LISTS ' +
+    'ARE FULL, the values are in the records under the names listed and this ' +
+    'tool did not read them — either the keys are spelled differently on this ' +
+    'system, or they are spelled as expected and carry values of another type, ' +
+    'and a middleware that parses the per-client text file without coercing ' +
+    'would send every value as text. Report that rather than reading the nulls ' +
+    'as a client the server knows nothing about. A NULL FIELD BESIDE AN EMPTY ' +
+    'LIST IS THE OTHER ANSWER: the record was read and carried nothing under ' +
+    'that name. Both lists are null where the record was not a record at all, ' +
+    'and empty where it was read and every key it carried is reported. ' +
+    '`nfsv3` AND `nfsv4` ARE NULL ' +
     'WHEN THAT VERSION COULD NOT BE READ and empty when it was read and no ' +
     'client was found — never the same answer. The two reads are independent, ' +
     'so a failure of one does not stop the other answering — including a row ' +
