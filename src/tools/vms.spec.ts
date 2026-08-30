@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { FileContentError } from '@/content/file-content';
 import type { FileTail } from '@/interfaces';
 import { fakeSystem, failingSystem } from '@/testing/fake-systems';
-import { vmLogs, vmsList } from '@/tools/index';
+import { vmDevices, vmLogs, vmsList } from '@/tools/index';
 
 describe('vms_list', () => {
   /**
@@ -568,5 +568,273 @@ describe('vm_logs', () => {
       required: ['vm'],
       properties: { lines: { minimum: 1, maximum: 1000 } },
     });
+  });
+});
+
+describe('vm_devices', () => {
+  /** One device row as `vm.device.query` reports one, around its attributes. */
+  const device = (attributes: unknown, over: Record<string, unknown> = {}) => ({
+    id: 7,
+    vm: 1,
+    order: 1002,
+    attributes,
+    ...over,
+  });
+
+  const read = async (devices: unknown[]): Promise<Record<string, unknown>> => {
+    const { ctx } = fakeSystem({ ['vm.device.query']: devices });
+    return (await vmDevices.handler(ctx, {})) as Record<string, unknown>;
+  };
+
+  const rows = async (devices: unknown[]): Promise<Record<string, unknown>[]> =>
+    (await read(devices))['devices'] as Record<string, unknown>[];
+
+  /** One device's mapped row. */
+  const one = async (attributes: unknown): Promise<Record<string, unknown>> =>
+    (await rows([device(attributes)]))[0];
+
+  /** One device's mapped `attributes`. */
+  const mapped = async (attributes: unknown): Promise<unknown> =>
+    (await one(attributes))['attributes'];
+
+  it('reports a device with the envelope that attributes it to a VM', async () => {
+    expect(await read([device({ dtype: 'PCI', pptdev: '0000:01:00.0' })])).toEqual({
+      devices: [
+        {
+          id: 7,
+          // The join to `vms_list`: this is the `id` it reports for a `source`
+          // `vm` entry, and there is no other way to attribute the device.
+          vm: 1,
+          order: 1002,
+          dtype: 'PCI',
+          attributes: { pptdev: '0000:01:00.0' },
+        },
+      ],
+    });
+  });
+
+  it('maps a DISK through its own fields', async () => {
+    expect(
+      await mapped({
+        dtype: 'DISK',
+        path: '/dev/zvol/tank/buildbox',
+        type: 'VIRTIO',
+        create_zvol: false,
+        zvol_name: 'tank/buildbox',
+        zvol_volsize: 42949672960,
+        logical_sectorsize: 512,
+        physical_sectorsize: 4096,
+        iotype: 'THREADS',
+        serial: 'BUILDBOX01',
+      }),
+    ).toEqual({
+      type: 'VIRTIO',
+      logical_sectorsize: 512,
+      physical_sectorsize: 4096,
+      iotype: 'THREADS',
+      serial: 'BUILDBOX01',
+      path: '/dev/zvol/tank/buildbox',
+      create_zvol: false,
+      zvol_name: 'tank/buildbox',
+      // Reported under the name the system uses, with no unit asserted: this
+      // API declares it as a bare number (#96).
+      zvol_volsize: 42949672960,
+    });
+  });
+
+  it('maps a RAW through its own fields, which are not a DISK’s', async () => {
+    expect(
+      await mapped({
+        dtype: 'RAW',
+        path: '/mnt/tank/images/win.img',
+        type: 'AHCI',
+        exists: true,
+        boot: true,
+        size: 21474836480,
+        logical_sectorsize: null,
+        physical_sectorsize: null,
+        iotype: 'NATIVE',
+        serial: null,
+      }),
+    ).toEqual({
+      type: 'AHCI',
+      logical_sectorsize: null,
+      physical_sectorsize: null,
+      iotype: 'NATIVE',
+      serial: null,
+      path: '/mnt/tank/images/win.img',
+      exists: true,
+      boot: true,
+      size: 21474836480,
+    });
+  });
+
+  it('maps a NIC through its own fields', async () => {
+    expect(
+      await mapped({
+        dtype: 'NIC',
+        type: 'VIRTIO',
+        nic_attach: 'br0',
+        mac: '00:a0:98:11:22:33',
+        trust_guest_rx_filters: false,
+      }),
+    ).toEqual({
+      type: 'VIRTIO',
+      nic_attach: 'br0',
+      // Identifying but not secret, and response data rather than an argument
+      // — the same reading `disks_list` applies to a serial number.
+      mac: '00:a0:98:11:22:33',
+      trust_guest_rx_filters: false,
+    });
+  });
+
+  it('maps a CDROM and a USB through their own fields', async () => {
+    expect(await mapped({ dtype: 'CDROM', path: '/mnt/tank/iso/debian.iso' })).toEqual({
+      path: '/mnt/tank/iso/debian.iso',
+    });
+    expect(
+      await mapped({
+        dtype: 'USB',
+        controller_type: 'nec-xhci',
+        device: 'usb_device_0781_5583_0',
+        usb: { vendor_id: '0x0781', product_id: '0x5583' },
+      }),
+    ).toEqual({
+      controller_type: 'nec-xhci',
+      device: 'usb_device_0781_5583_0',
+      vendor_id: '0x0781',
+      product_id: '0x5583',
+    });
+    // The identifiers are one level down and the record is declared nullable.
+    expect(await mapped({ dtype: 'USB', device: 'usb_device_0781_5583_0', usb: null })).toEqual({
+      controller_type: null,
+      device: 'usb_device_0781_5583_0',
+      vendor_id: null,
+      product_id: null,
+    });
+  });
+
+  it('reports where a display listens and never its password', async () => {
+    expect(
+      await mapped({
+        dtype: 'DISPLAY',
+        type: 'SPICE',
+        bind: '0.0.0.0',
+        port: 5900,
+        web_port: 5901,
+        web: true,
+        wait: false,
+        resolution: '1920x1080',
+        password: 'SECRET-CONSOLE-PASSWORD',
+      }),
+    ).toEqual({
+      type: 'SPICE',
+      bind: '0.0.0.0',
+      port: 5900,
+      web_port: 5901,
+      web: true,
+      resolution: '1920x1080',
+    });
+  });
+
+  it('keeps the console password out of the result in every form', async () => {
+    // Not redacted and not reported as whether one is set: a tool result is
+    // recorded verbatim in the audit trail, so the passphrase must not reach
+    // one at all. `wait` is here to check the allowlist drops an ordinary
+    // unnamed field the same way it drops the credential.
+    const answer = await read([
+      device({
+        dtype: 'DISPLAY',
+        port: 5900,
+        wait: true,
+        password: 'SECRET-CONSOLE-PASSWORD',
+      }),
+    ]);
+    expect(JSON.stringify(answer)).not.toContain('SECRET');
+    expect(JSON.stringify(answer)).not.toContain('password');
+    expect(JSON.stringify(answer)).not.toContain('wait');
+  });
+
+  it('carries no field a device kind does not name, including one a later release adds', async () => {
+    expect(
+      await mapped({ dtype: 'PCI', pptdev: '0000:01:00.0', unheard_of_field: 'SECRET-NEW-SHAPE' }),
+    ).toEqual({ pptdev: '0000:01:00.0' });
+    const [row] = await rows([device({ dtype: 'PCI', pptdev: 'x' }, { unheard_of: 'SECRET' })]);
+    expect(Object.keys(row)).toEqual(['id', 'vm', 'order', 'dtype', 'attributes']);
+  });
+
+  it('names a device kind it cannot map and states no configuration for it', async () => {
+    // TrueNAS defines ISCSI_DISK on the device shape the `vm.device` events
+    // carry and not on the one `vm.device.query` answers with, so an unmapped
+    // kind is a case to expect rather than a defensive branch. The
+    // kind is still reported: a null `attributes` beside it is a device that is
+    // there and configured, not one with nothing configured.
+    expect(
+      await one({ dtype: 'ISCSI_DISK', portal_address: '10.0.0.1', initiator_iqn: 'iqn.2005' }),
+    ).toMatchObject({ dtype: 'ISCSI_DISK', attributes: null });
+  });
+
+  it('lists a device it could not read at all rather than dropping it', async () => {
+    // A shorter list would say the machine does not have that device, which is
+    // the wrong answer to give about a VM that will not start (#93).
+    expect(await rows([device(null), device(['DISK']), device({}), 'not a row'])).toEqual([
+      { id: 7, vm: 1, order: 1002, dtype: null, attributes: null },
+      { id: 7, vm: 1, order: 1002, dtype: null, attributes: null },
+      { id: 7, vm: 1, order: 1002, dtype: null, attributes: null },
+      { id: null, vm: null, order: null, dtype: null, attributes: null },
+    ]);
+  });
+
+  it('reports an unreadable field as null rather than as a configured value', async () => {
+    expect(await mapped({ dtype: 'NIC', nic_attach: null, mac: '', type: 7 })).toEqual({
+      type: null,
+      nic_attach: null,
+      mac: null,
+      trust_guest_rx_filters: null,
+    });
+    expect(await one(device({ dtype: 'PCI' })['attributes'])).toMatchObject({
+      attributes: { pptdev: null },
+    });
+  });
+
+  it('states no VM for a device it could not attribute to one', async () => {
+    expect(await rows([device({ dtype: 'PCI', pptdev: 'x' }, { vm: null, id: '7' })])).toEqual([
+      { id: null, vm: null, order: 1002, dtype: 'PCI', attributes: { pptdev: 'x' } },
+    ]);
+  });
+
+  it('returns no devices on a system with none', async () => {
+    // Which includes a system with no libvirt-backed VMs at all: neither
+    // throws, and both answer the empty list.
+    expect(await read([])).toEqual({ devices: [] });
+  });
+
+  it('raises a read it could not make rather than reporting no devices', async () => {
+    // An empty list means something definite — no VM on this system has any
+    // device attached — that a read which never happened has not established.
+    const { ctx } = failingSystem({}, { ['vm.device.query']: new Error('unknown method') });
+    await expect(vmDevices.handler(ctx, {})).rejects.toThrow(
+      'The virtual machine devices could not be listed: unknown method',
+    );
+  });
+
+  it('raises an answer that was not a list of devices', async () => {
+    // The call directory declares this method as answering a union that also
+    // admits a bare row and a count, so this is a shape the client's own types
+    // say the middleware has.
+    await expect(vmDevices.handler(fakeSystem({ ['vm.device.query']: 3 }).ctx, {})).rejects.toThrow(
+      'The virtual machine devices could not be listed: the system answered with something ' +
+        'other than a list of devices',
+    );
+  });
+
+  it('reads the libvirt device surface and nothing from the incus stack', async () => {
+    // Both seams are asserted on: a tool picks `call` or `query` per verb, so
+    // checking one alone would let a read through the other go unnoticed.
+    const { ctx, query, call } = fakeSystem({ ['vm.device.query']: [] });
+    await vmDevices.handler(ctx, {});
+    expect(query).toHaveBeenCalledWith('vm.device.query');
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(call).not.toHaveBeenCalled();
   });
 });

@@ -515,6 +515,39 @@ apart rather than folding them into one row type.
 names.** A second NFS tool answering a question about exports would belong in
 `shares.ts` despite this file existing.
 
+### A discriminated payload gets one allowlist per arm, and an arm for none (#100)
+
+`vm_devices` is the first tool over a payload the middleware discriminates: a
+`vm.device.query` row's `attributes` is a union of seven interfaces keyed on
+`dtype`, and a NIC shares no field with a disk. It reports `dtype` in the
+envelope and the arm's own fields nested under `attributes`, mapped by a
+`switch` with one allowlist per arm. **A flattened row unioning every arm's
+fields is the shape to refuse** — it is mostly nulls on every device, it cannot
+say whether a null is "this kind has no such field" or "unreadable", and it
+absorbs a field a later release adds to any one arm.
+
+**Write the `default` arm as a case you expect, not as a defensive branch.** The
+pinned client declares an eighth kind, `ISCSI_DISK`, on the device shape the
+`vm.device` added and changed events carry, and leaves it out of the one
+`vm.device.query` answers with — so a `dtype` an allowlist
+does not map is what this surface already does, before any release moves. The
+union a method answers with is not the union the same entity has elsewhere in
+the client, and deriving the type off the call (#91) is what makes that visible.
+`attributes` is null there and `dtype` is still reported, which is what lets a
+caller tell an unmapped kind from a device whose configuration could not be read
+at all (both null). Both readings have to be in the description: a null
+`attributes` is a device that is there and configured, never one configured with
+nothing.
+
+The other half is where #97's credential rule lands when the credential is
+inside an arm. `VMDisplayDevice.password` is the SPICE/VNC console passphrase —
+declared `string | null` beside the display's ordinary settings, with nothing in
+the type saying it is a credential, and the DISPLAY allowlist omits it: **not
+redacted, and not reported as whether one is set**,
+since a tool result is recorded verbatim in the audit trail (S3.3). Naming the
+arm's fields one by one is what keeps it out, and what keeps out a second
+credential-shaped field a later release adds to any arm.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
