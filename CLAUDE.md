@@ -622,10 +622,13 @@ boolean the field cannot hold.
 ### A declared field whose meaning the surface does not state is left out (#102)
 
 `system_general_config` reads a payload the client declares in full — seventeen
-named fields, every one of them typed — and reports fourteen. `wizardshown` and
-`ds_auth` are booleans the pinned surface declares and documents nowhere, and
-they are omitted rather than passed through under a name this repository made up
-for them. **A declared type says what arrives, never what it means**, and the two
+named fields, every one of them typed — and reports fourteen. `ds_auth` is the
+one this rule is about: a boolean the pinned surface declares and documents
+nowhere, omitted rather than passed through under a name this repository made up
+for it. (`wizardshown` is dropped for the simpler reason beside it — it is the
+setup wizard's own bookkeeping and answers no question anyone would ask a NAS.
+Two omissions, two different reasons, and only the first is a decision.)
+**A declared type says what arrives, never what it means**, and the two
 are separate questions: #91 settled the first, and a field that survives it can
 still fail this one. Reporting a guessed meaning is worse than omitting the
 field, because a caller cannot tell a reading from a guess — the same argument

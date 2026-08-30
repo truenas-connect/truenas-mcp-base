@@ -908,12 +908,19 @@ function certificateConfigured(value: unknown): boolean | null {
  * - **A timestamp carrying `Z` or an explicit offset** is absolute, which is
  *   what every `toISOString` in the catalog produces. To be converted into this
  *   zone before anyone is told a wall-clock hour.
- * - **A timestamp carrying no zone at all** was written by the system and passed
+ * - **A timestamp carrying neither** was written by the system and passed
  *   through — `storage_scrub_history`'s scan times, `boot_pool_status`'s
  *   `created_at`. NOTHING in the catalog establishes what zone those are in,
  *   this tool included, so they are not to be converted either. Saying otherwise
  *   would assert a frame the sibling tool refuses to state, and would shift a
  *   string already written in local time by this offset a second time.
+ *
+ * The third bullet names tools and the first two do not, which looks like the
+ * defect above and is the other half of the same rule: the API declares both of
+ * those fields as bare strings and states no format, so what those two tools
+ * pass through MIGHT carry a zone and might not. Naming them tells a caller
+ * where to look, and the sorting is still done on the value — which is why the
+ * description says to read it rather than which group it lands in.
  *
  * One tool reporting the frame once is the deliverable; restating it inside every
  * tool that reports a time is a separate change and is not made here.
@@ -963,17 +970,20 @@ export const systemGeneralConfig: ReadOnlyTool = {
     'DECIDE FROM THE VALUE YOU ARE HOLDING, NEVER FROM WHICH TOOL RETURNED IT — ' +
     'the catalog reports times in three forms and every tool that reports one ' +
     'uses these. (1) A RENDERED SCHEDULE — the English in a ' +
-    '`schedule_description`, "daily at 02:00" — IS ALREADY IN THIS ZONE, ' +
-    'because the system runs the cron expression behind it at that hour local ' +
-    'to itself. Name this zone when repeating one and do NOT convert it. (2) A ' +
-    'TIMESTAMP ENDING IN `Z`, OR CARRYING AN EXPLICIT `+HH:MM` OFFSET, IS ' +
-    'ABSOLUTE and is most of the times this catalog reports. CONVERT one INTO ' +
-    'this zone before stating a wall-clock hour. (3) A TIMESTAMP CARRYING NO ' +
-    'ZONE AT ALL was written by the system and passed through unchanged, and ' +
-    'NOTHING IN THIS CATALOG ESTABLISHES WHAT ZONE IT IS IN — this field ' +
-    'included. Do NOT convert one and do NOT read it as UTC; say the zone is ' +
-    'unstated. A scrub time from `storage_scrub_history` and a boot ' +
-    "environment's `created_at` are of this third kind. " +
+    '`schedule_description`, such as "at 02:00, every day" — IS ALREADY IN ' +
+    'THIS ZONE, because the system runs the cron expression behind it at that ' +
+    'hour local to itself. Name this zone when repeating one and do NOT ' +
+    'convert it. (2) A TIMESTAMP ENDING IN `Z`, OR CARRYING AN EXPLICIT ' +
+    '`+HH:MM` OFFSET, IS ABSOLUTE and is most of the times this catalog ' +
+    'reports. CONVERT one INTO this zone before stating a wall-clock hour. (3) ' +
+    'A TIMESTAMP CARRYING NEITHER was written by the system and passed through ' +
+    'unchanged, and NOTHING IN THIS CATALOG ESTABLISHES WHAT ZONE IT IS IN — ' +
+    'this field included. Do NOT convert one and do NOT read it as UTC; say ' +
+    'the zone is unstated. `storage_scrub_history` and `boot_pool_status` are ' +
+    'the tools that pass a time through this way; WHETHER a given one of their ' +
+    'values carries a zone is not fixed — the API declares them as bare ' +
+    'strings and states no format — so READ THE VALUE and sort it into (2) or ' +
+    '(3) by what it actually carries. ' +
     '`timezone` is null where the system reported no timezone this tool could ' +
     'read — which is NOT UTC, and must not be treated as UTC; say the zone is ' +
     'unknown instead of assuming one. ' +
