@@ -764,9 +764,9 @@ describe('vm_devices', () => {
   });
 
   it('names a device kind it cannot map and states no configuration for it', async () => {
-    // TrueNAS defines ISCSI_DISK on the device shape a `vm.query` row embeds
-    // and not on the one `vm.device.query` answers with, so an unmapped kind
-    // is a case to expect rather than a defensive branch. The
+    // TrueNAS defines ISCSI_DISK on the device shape the `vm.device` events
+    // carry and not on the one `vm.device.query` answers with, so an unmapped
+    // kind is a case to expect rather than a defensive branch. The
     // kind is still reported: a null `attributes` beside it is a device that is
     // there and configured, not one with nothing configured.
     expect(
@@ -828,9 +828,12 @@ describe('vm_devices', () => {
   });
 
   it('reads the libvirt device surface and nothing from the incus stack', async () => {
-    const { ctx, query } = fakeSystem({ ['vm.device.query']: [] });
+    // Both seams are asserted on: a tool picks `call` or `query` per verb, so
+    // checking one alone would let a read through the other go unnoticed.
+    const { ctx, query, call } = fakeSystem({ ['vm.device.query']: [] });
     await vmDevices.handler(ctx, {});
     expect(query).toHaveBeenCalledWith('vm.device.query');
     expect(query).toHaveBeenCalledTimes(1);
+    expect(call).not.toHaveBeenCalled();
   });
 });

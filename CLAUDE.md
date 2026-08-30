@@ -527,9 +527,9 @@ say whether a null is "this kind has no such field" or "unreadable", and it
 absorbs a field a later release adds to any one arm.
 
 **Write the `default` arm as a case you expect, not as a defensive branch.** The
-pinned client declares an eighth kind, `ISCSI_DISK`, on the device shape a
-`vm.query` row embeds and the `vm.device` added/changed events carry, and leaves
-it out of the one `vm.device.query` answers with — so a `dtype` an allowlist
+pinned client declares an eighth kind, `ISCSI_DISK`, on the device shape the
+`vm.device` added and changed events carry, and leaves it out of the one
+`vm.device.query` answers with — so a `dtype` an allowlist
 does not map is what this surface already does, before any release moves. The
 union a method answers with is not the union the same entity has elsewhere in
 the client, and deriving the type off the call (#91) is what makes that visible.

@@ -700,9 +700,9 @@ export const vmLogs: ReadOnlyTool = {
  *
  * `attributes` is null for a `dtype` this tool has no mapping for, and that is
  * a case to expect rather than a defensive branch: the pinned client already
- * declares an eighth kind, `ISCSI_DISK`, on the device shape a `vm.query` row
- * embeds and the `vm.device` added/changed events carry, while leaving it out
- * of the one `vm.device.query` answers with. A caller that treats a null
+ * declares an eighth kind, `ISCSI_DISK`, on the device shape the `vm.device`
+ * added and changed events carry, while leaving it out of the one
+ * `vm.device.query` answers with. A caller that treats a null
  * `attributes` as "this device has no configuration" would report an
  * iSCSI-backed disk as an empty device.
  */
@@ -934,14 +934,17 @@ function readAttributes(dtype: string, held: Record<string, unknown>): DeviceAtt
  */
 function readDevice(entry: unknown): VmDeviceRow {
   const row = (recordOrNull(entry) ?? {}) as Partial<VmDeviceEntry>;
-  const held = recordOrNull(row.attributes);
-  const dtype = held === null ? null : textOrNull(held['dtype']);
+  // An `attributes` that was not a record reads as an empty one, which answers
+  // no `dtype` and so no attributes — the same answer, without a second
+  // unreachable branch saying it.
+  const held = recordOrNull(row.attributes) ?? {};
+  const dtype = textOrNull(held['dtype']);
   return {
     id: numberOrNull(row.id),
     vm: numberOrNull(row.vm),
     order: numberOrNull(row.order),
     dtype,
-    attributes: dtype === null || held === null ? null : readAttributes(dtype, held),
+    attributes: dtype === null ? null : readAttributes(dtype, held),
   };
 }
 
@@ -1008,7 +1011,14 @@ export const vmDevices: ReadOnlyTool = {
     'because a shorter list would say the machine does not have that device, ' +
     'which is exactly the wrong answer to give about a VM that will not start. ' +
     'Every field is null where the system reported no value this tool could ' +
-    'read, which is never the same as a device configured without one. AN ' +
+    'read. FOR THE FIELDS THIS API DECLARES NULLABLE — a NIC\'s `nic_attach` ' +
+    "and `mac`, a disk's `path` and `serial`, a RAW device's `size`, both " +
+    'sector sizes — NULL IS ALSO WHAT THE DEVICE ITSELF RECORDS WHEN NOTHING ' +
+    'IS CONFIGURED, and THIS TOOL DOES NOT SEPARATE THE TWO: a null ' +
+    '`nic_attach` is a NIC attached to no interface, or one whose attachment ' +
+    'could not be read, and nothing here says which. The fields the API ' +
+    'declares non-nullable — `pptdev`, a `CDROM` `path`, a `dtype` — carry ' +
+    'null only for the second reason. AN ' +
     'EMPTY `devices` LIST IS A SYSTEM WITH NO LIBVIRT-BACKED VM DEVICES AT ' +
     'ALL, which includes a system with no libvirt-backed VMs. A machine ' +
     '`vms_list` reports with `source` `vm` AND NO ROW HERE HAS NO DEVICES ' +
