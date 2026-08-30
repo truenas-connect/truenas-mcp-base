@@ -448,6 +448,73 @@ beside a named credential is not evidence the task has no remote host.
 promising more than the normalization delivers** — check that the payload states
 the grouping before writing one.
 
+### An unconfirmed allowlist over an open record names the keys it did not read (#98)
+
+`nfs_clients` reads `nfs.get_nfs4_clients`, whose row is `{ id, info, states }`
+with `info` typed `Record<string, unknown>` and `states` a list of them — the
+client declares that the records are there and says nothing whatever about what
+is in either, which is a shape and not a content. The
+allowlist convention still applies and the record must not be forwarded, so the
+tool has to name keys; but no live system was available to read the real ones
+off, so the names in `INFO_KEYS` are taken from what the Linux NFS server
+publishes per client and are a considered guess.
+
+**The guess is made checkable rather than hidden.** Every key the record
+actually carried whose value is not reported is named, in
+`unreported_info_fields` and `unreported_state_fields`. A key name is not a
+value, so nothing a later TrueNAS release adds reaches a caller — but a caller
+seeing the named fields all null beside a full list of unreported names is
+looking at an allowlist that does not fit this system, not at a client the
+server knows nothing about. Those two readings are otherwise identical, and only
+one of them is a defect.
+
+**Such a list is built from the keys that produced a value, never from the
+allowlist.** There are two ways an unconfirmed allowlist is wrong and only one
+of them is a wrong key name: the other is a right key over a value of an
+unexpected type, which here is the likelier, since `info` is published per
+client as a text file and a middleware that parses it without coercing sends
+every value as a string. A list filtered by key name shows the first and hides
+the second — it would answer "every key it carried is reported" beside a null
+field, which is the reading the list exists to prevent. So a key whose guard
+rejected the value lands in the list exactly as an unlooked-for key does, and
+the field's description says a null field beside an empty list is the separate
+answer "the record carried nothing under that name".
+
+**Reach for this only where the key names themselves are unconfirmed.** A record
+whose shape the client declares, or that has been read off a live system, gets a
+plain allowlist and no such list — the extra fields are the price of not being
+able to check, not a default. Null there means the record was not a record;
+empty means it was read and every key it carried is reported.
+
+**Over a LIST of such records that rule moves up a level and stops being the
+same rule.** `unreported_state_fields` is null where `states` was not a list at
+all, and its empty case covers two answers rather than one: every entry's keys
+were reported, and no entry was a record in the first place. It is a union
+across entries, so a key can be both reported for one entry and named because
+another did not report it. What follows is the part a description is most
+likely to overpromise: **an entry that could not be read is counted and leaves
+no other trace** — it names no key, adds no type, and neither list has a length
+that can be compared against the count to find it, because one holds distinct
+kinds and the other key names. Say that outright, or report a count of the
+unreadable entries and make a comparison true; offering the caller an
+arithmetic that does not work is the same defect as any other description
+promising more than the normalization delivers.
+
+### A live-session tool is its own family, not a third tool in `shares.ts` (#98)
+
+`shares.ts` merges SMB and NFS into one list on the stated ground that a person
+asking what a NAS shares is not asking a question about protocols. `nfs.ts` asks
+the opposite kind of question — who is connected — and there the protocol is the
+whole of the answer: NFSv3 is stateless and reports `{ ip, export }` mounts,
+NFSv4 registers a client with an id and open state, the two share no vocabulary,
+and they come from two middleware calls that fail independently. So they are two
+lists in a file of their own, the same way `block.ts` keeps iSCSI and NVMe-oF
+apart rather than folding them into one row type.
+
+**A row shape is what decides which file a tool goes in, not the protocol it
+names.** A second NFS tool answering a question about exports would belong in
+`shares.ts` despite this file existing.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

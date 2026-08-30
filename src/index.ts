@@ -103,6 +103,7 @@ export {
   tasksRecentRuns,
   sharesList,
   shareAccess,
+  nfsClients,
   iscsiList,
   nvmeofList,
   usersList,
