@@ -288,6 +288,15 @@ Two things that rule does not decide on its own:
   The tests went back into `tasks.spec.ts`. A spec that is merely long is not a
   spec that has to split, and the default above — a new tool's tests go in its
   module's spec — is what governs until the number says otherwise.
+
+  **The number said otherwise at #121.** `tasks.spec.ts` was 1,352 lines and
+  that tool's block is around 460, so the merged file would be about 1,810 and
+  the exception is met where #97's was not. The block took
+  `scheduled-task-set-enabled.spec.ts`; the four listing tools stayed in
+  `tasks.spec.ts`, because the split is by tool and re-homing tests a ticket did
+  not touch is a separate change. So a module can be part-split, and that is not
+  a half-finished state to tidy — the next tool over the line takes its own spec
+  the same way.
 - **The catalog-wide test is not any tool's.** The exact-list assertion over
   `createDefaultCatalog()` is about `src/tools/index.ts`, so it lives in
   `index.spec.ts` under the same rule as everything else. Registering a tool
@@ -830,6 +839,64 @@ value (true, null temperature), and the whole read failing (`disks` null,
 asleep both land in the middle case and are NOT distinguishable from this
 payload — which the description states outright rather than leaving a caller to
 infer a cold disk.
+
+### A tool named for a category may not accept a member of another one (#121)
+
+`scheduled_task_set_enabled` switches one scheduled task on or off across six
+kinds — periodic snapshot, cloud sync, replication, cron, rsync and cloud
+backup — and it does **not** accept an init/shutdown script. That is the #97
+naming rule one level down, and it is worth stating because the API does not
+stop it: `InitShutdownScriptUpdate` declares `enabled?: boolean` exactly as the
+other six do, checked rather than assumed. An init/shutdown script runs at a
+point in the system's lifecycle, carries no cron fields and reports no
+`schedule` at all, which is precisely why `automated_tasks_list` is not called
+`scheduled_tasks_list`. Accepting one here would put the promise that tool's
+name refuses back into a `kind` enum. **The reachable surface is not the scope —
+ask what the tool's own name has already promised**, and where the two disagree
+the missing kind is a tool whose name fits, not an argument to add.
+
+**One tool over six kinds is not the #97 section decision, and the test is
+different.** `automated_tasks_list` returns four sections because a caller
+reaching three of them gets a confident answer with a category silently absent:
+the missing kind is the finding. Nothing is missing from a mutation. What makes
+this one tool is that the six calls are literally the same call — `(id, {
+enabled })` in, the updated entity out — so six tools would be six copies of one
+`plan`/`execute` pair differing in two strings, which is what `common.ts` was cut
+to stop. **Ask whether the kinds differ in what the caller is TOLD (sections) or
+only in which method is dialled (one tool with a discriminator).**
+
+**The discriminator is required, and that is a safety property rather than
+ergonomics.** Task ids are per-table integers, so id `3` exists under every kind
+and names a different task under each; a tool taking an id alone would be
+ambiguous in the one direction that matters, disabling the wrong task silently.
+Every enum value names the tool its ids come from, in the description and in the
+plan's failure — because a caller that reached the failure with the right id and
+the wrong kind can check the id and cannot check the kind.
+
+**A mutating tool's outcome is read from what came back, never from what was
+asked.** These methods answer with the updated entity, so `resulting_enabled` is
+read off the response through the same guard the row was read with, and
+`changed` is `previously_enabled !== resulting_enabled` — two readings or null.
+A `changed` derived from the request instead would report a call the system
+accepted and did not apply as having changed something. `confirmed` is the
+separate fact that the response agrees with the request, and **`confirmed: false`
+is not a success**: the call did not reject and the task is not in the state that
+was asked for. `alerts_dismiss` has no equivalent because `alert.dismiss` answers
+nothing — where a method returns the entity, reading it back is owed.
+
+**A filter is bandwidth; the check on the response is the control.** The read
+passes `[['id', '=', id]]` and then finds the row by id anyway. An unrecognised
+query parameter is dropped rather than refused (the same mechanism #115 states
+for `select`), so a filter that did not apply comes back as the whole table and
+is indistinguishable from one that matched everything — and the first row of that
+is a different task. **Never act on the first row of a filtered read.**
+
+**A cron job's `command` is reported by `automated_tasks_list` and is not
+repeated in a plan.** It is the operator's own text and may hold a credential
+someone inlined; the description and the user identify the job for approval
+without it, and a plan is shown to a person and then recorded. Passing a field
+through in a listing whose description warns about it is not the same act as
+putting it in a mutating tool's approval text.
 
 ## Conventions
 

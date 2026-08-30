@@ -34,7 +34,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `system_health_report`, `fleet_compliance_report`, `fleet_health_rollup`.
   Mutating family, all of them two-phase plan/confirm and all
   `destructiveness: 'reversible'`: `snapshots_create`, `alerts_dismiss`,
-  `alerts_restore`.
+  `alerts_restore`, `scheduled_task_set_enabled`.
 - **System registry** — 1..N named systems, each owning its own
   `@truenas/api-client` instance and credentials; `systems` selector
   (name / list / `all`, defaulting when one system is registered).

@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the fifty-two sketch tools', () => {
+  it('registers the fifty-three sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -57,6 +57,7 @@ describe('createDefaultCatalog', () => {
       'snapshots_create',
       'alerts_dismiss',
       'alerts_restore',
+      'scheduled_task_set_enabled',
     ]);
   });
 
@@ -64,6 +65,12 @@ describe('createDefaultCatalog', () => {
     const readOnly = createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name);
     expect(readOnly).not.toContain('alerts_dismiss');
     expect(readOnly).not.toContain('alerts_restore');
+  });
+
+  it('does not advertise scheduled_task_set_enabled to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(
+      'scheduled_task_set_enabled',
+    );
   });
 
   it('advertises fleet_health_rollup to a read-only credential', () => {

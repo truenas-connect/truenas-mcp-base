@@ -1,6 +1,6 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
-import { ReadOnlyTool } from '@/catalog/tool';
+import { MutatingTool, PlanStep, ReadOnlyTool, ToolContext } from '@/catalog/tool';
 import {
   booleanOrNull,
   errorText,
@@ -37,6 +37,12 @@ import {
  * once — scrubs, replication, cloud sync, app upgrades, updates — because every
  * long-running operation on TrueNAS is a job and they all land in the same
  * place.
+ *
+ * `scheduled_task_set_enabled` is the one tool here that changes anything, and
+ * it is the only one that acts on a kind another family lists: reading a task
+ * and then switching it off is one question, and which file the listing lives
+ * in is not part of it. It is written beside the schedule rendering above
+ * because a plan naming a task has to name it the way its listing tool does.
  */
 
 /**
@@ -1305,5 +1311,489 @@ export const tasksRecentRuns: ReadOnlyTool = {
       });
     }
     return rows;
+  },
+};
+
+/**
+ * `scheduled_task_set_enabled`: turning one scheduled task on or off, and the
+ * fourth mutating tool in the catalog.
+ *
+ * ONE TOOL OVER SIX KINDS, and unlike `automated_tasks_list` the reason is that
+ * the shape really is identical rather than that the missing kind is the
+ * finding. All six methods take `(id, { enabled })` and answer with the updated
+ * entity, so six tools would be six copies of one `plan`/`execute` pair
+ * differing in two strings — the eleven copies of `textOrNull` behind
+ * `common.ts` are what that becomes.
+ *
+ * THE KIND IS A REQUIRED ARGUMENT AND IS NEVER INFERRED. Task ids are
+ * per-table integers, so id `3` exists in all six tables and names six
+ * different things; a tool taking only an id would be ambiguous in the one way
+ * that matters, silently disabling the wrong task. Every kind's enum value
+ * names the tool its ids come from, in the description and in the failure.
+ *
+ * INIT/SHUTDOWN SCRIPTS ARE NOT A KIND HERE, and that is the #97 naming rule
+ * rather than a limit of the API — `InitShutdownScriptUpdate` carries `enabled`
+ * exactly as the six below do, and was checked. An init/shutdown script is not
+ * scheduled: it runs at a point in the system's lifecycle, carries no cron
+ * fields and reports no `schedule` at all, which is why `automated_tasks_list`
+ * is not called `scheduled_tasks_list`. Accepting one under a tool named
+ * `scheduled_task_set_enabled` would put that promise back one level down. It
+ * needs a tool whose name does not claim a schedule, which is its own ticket.
+ *
+ * ONLY `enabled` IS SENT. These are partial updates, so a tool that round-trips
+ * more of the row than it was asked to change can silently revert a concurrent
+ * edit — and every one of these update types declares fields this repository
+ * has no business writing.
+ *
+ * WHAT THE PLAN NAMES IS WHAT `execute` CALLS, INCLUDING THE READ, which is
+ * `alerts_dismiss`'s seam (#119) reached for the same reason: the prior state
+ * is only readable immediately before the call, and a plan naming only the
+ * mutation would omit a call the user is approving. The read is issued
+ * unconditionally and nothing branches on it, so `execute` stays a pure
+ * function of (args, system).
+ */
+
+/**
+ * One kind of scheduled task, and everything that differs between them.
+ *
+ * The two methods are literal strings inside {@link TaskKind.read} and
+ * {@link TaskKind.update} rather than fields the caller passes to `api.query`,
+ * so the client's own parameter and response types apply at each call site —
+ * the same reason `storage.ts` inlines its filters. `readMethod` and
+ * `updateMethod` restate them for the plan, which shows the caller what will
+ * run.
+ */
+interface TaskKind {
+  /** The `kind` argument's value, which is also what the failure names. */
+  kind: string;
+  /** What one of these is, in words, for the plan and for the failure. */
+  noun: string;
+  /** The catalog tool whose rows carry the `id` this tool takes. */
+  listedBy: string;
+  /** The middleware method the plan's read step names. */
+  readMethod: string;
+  /** The middleware method the plan's mutation step names. */
+  updateMethod: string;
+  /** Whatever the listing method answered with, unread. */
+  read(ctx: ToolContext, id: number): Promise<unknown>;
+  /** The updated entity the update method answered with, unread. */
+  update(ctx: ToolContext, id: number, enabled: boolean): Promise<unknown>;
+  /**
+   * The task in the terms its listing tool names it, label by label. A null
+   * value is stated as absent rather than dropped, as `describeAlert`'s three
+   * fields are: a plan that silently omits the description reads as a task
+   * without one, and the person approving cannot tell which.
+   */
+  label(row: Record<string, unknown>): [string, string | null][];
+}
+
+/**
+ * The task's schedule with its daily window where it has one, ready for
+ * {@link describeSchedule}.
+ *
+ * The window is read for every kind rather than only for the two that carry
+ * one: a kind whose schedule has no `begin` reads it as null, and
+ * {@link windowPhrase} renders nothing for a half window — so one reading
+ * covers all six without claiming a restriction a task does not have.
+ */
+function taskSchedule(row: Record<string, unknown>): (CronFields & Partial<DailyWindow>) | null {
+  const cron = cronOf(row['schedule']);
+  if (cron === null) return null;
+  return { ...cronFieldsOf(cron), begin: fieldOrNull(cron.begin), end: fieldOrNull(cron.end) };
+}
+
+/** What a label the system named no value for is stated as. */
+const NONE_REPORTED = '(the system reported none)';
+
+/**
+ * The schedule for the plan, in words.
+ *
+ * A schedule this tool does not render in words is stated as exactly that,
+ * never as one the system reported none of: `describeSchedule` answers null for
+ * both a missing field and a shape it will not put into English, and the two
+ * are a limit of this tool rather than a task without a schedule. The listing
+ * tool reports the cron fields exactly either way, so the caller is pointed at
+ * it.
+ */
+function schedulePhrase(spec: TaskKind, row: Record<string, unknown>): string {
+  const schedule = taskSchedule(row);
+  const words = schedule === null ? null : describeSchedule(schedule);
+  return `schedule ${words ?? `(not rendered in words here; \`${spec.listedBy}\` reports its cron fields)`}`;
+}
+
+/**
+ * The task in the terms its listing tool shows it, for the human approving the
+ * plan.
+ *
+ * An integer is not a thing anyone recognises, so the plan step names the task
+ * the way the tool that listed it does — its description or name, its dataset
+ * or path, and its schedule in the same English `tasks.ts` already produces.
+ */
+function describeTask(spec: TaskKind, row: Record<string, unknown>, id: number): string {
+  const labelled = spec
+    .label(row)
+    .map(([name, value]) => `${name} ${value === null ? NONE_REPORTED : `"${value}"`}`);
+  return `the ${spec.noun} with ${[...labelled, schedulePhrase(spec, row)].join(', ')} (id ${id})`;
+}
+
+/**
+ * The six kinds, in the order their listing tools are registered in.
+ *
+ * `cronjob.update`, `initshutdownscript.update` and the four below it are all
+ * on `DefaultApiDirectory` — checked there rather than on a later directory,
+ * since that is the surface these tools are written against (#91).
+ */
+const TASK_KINDS: TaskKind[] = [
+  {
+    kind: 'periodic_snapshot',
+    noun: 'periodic snapshot task',
+    listedBy: 'snapshot_tasks_list',
+    readMethod: 'pool.snapshottask.query',
+    updateMethod: 'pool.snapshottask.update',
+    read: (ctx, id) =>
+      firstValueFrom(ctx.system.client.api.query('pool.snapshottask.query', [['id', '=', id]])),
+    update: (ctx, id, enabled) =>
+      firstValueFrom(ctx.system.client.api.call('pool.snapshottask.update', [id, { enabled }])),
+    label: (row) => [['dataset', textOrNull(row['dataset'])]],
+  },
+  {
+    kind: 'cloud_sync',
+    noun: 'cloud sync task',
+    listedBy: 'cloudsync_tasks_list',
+    readMethod: 'cloudsync.query',
+    updateMethod: 'cloudsync.update',
+    read: (ctx, id) =>
+      firstValueFrom(ctx.system.client.api.query('cloudsync.query', [['id', '=', id]])),
+    update: (ctx, id, enabled) =>
+      firstValueFrom(ctx.system.client.api.call('cloudsync.update', [id, { enabled }])),
+    label: (row) => [
+      ['description', textOrNull(row['description'])],
+      ['path', textOrNull(row['path'])],
+      ['direction', textOrNull(row['direction'])],
+    ],
+  },
+  {
+    kind: 'replication',
+    noun: 'replication task',
+    listedBy: 'replication_status',
+    readMethod: 'replication.query',
+    updateMethod: 'replication.update',
+    read: (ctx, id) =>
+      firstValueFrom(ctx.system.client.api.query('replication.query', [['id', '=', id]])),
+    update: (ctx, id, enabled) =>
+      firstValueFrom(ctx.system.client.api.call('replication.update', [id, { enabled }])),
+    label: (row) => [
+      ['name', textOrNull(row['name'])],
+      ['target dataset', textOrNull(row['target_dataset'])],
+    ],
+  },
+  {
+    kind: 'cron',
+    noun: 'cron job',
+    listedBy: 'automated_tasks_list',
+    readMethod: 'cronjob.query',
+    updateMethod: 'cronjob.update',
+    read: (ctx, id) =>
+      firstValueFrom(ctx.system.client.api.query('cronjob.query', [['id', '=', id]])),
+    update: (ctx, id, enabled) =>
+      firstValueFrom(ctx.system.client.api.call('cronjob.update', [id, { enabled }])),
+    // The `command` is deliberately NOT among these. `automated_tasks_list`
+    // passes it through and says so, but it is whatever the operator typed and
+    // can hold a password someone inlined — and a plan is shown to a person and
+    // then recorded. The description and the user identify the job without
+    // repeating it, and the listing tool is where the command is read.
+    label: (row) => [
+      ['description', textOrNull(row['description'])],
+      ['user', textOrNull(row['user'])],
+    ],
+  },
+  {
+    kind: 'rsync',
+    noun: 'rsync task',
+    listedBy: 'automated_tasks_list',
+    readMethod: 'rsynctask.query',
+    updateMethod: 'rsynctask.update',
+    read: (ctx, id) =>
+      firstValueFrom(ctx.system.client.api.query('rsynctask.query', [['id', '=', id]])),
+    update: (ctx, id, enabled) =>
+      firstValueFrom(ctx.system.client.api.call('rsynctask.update', [id, { enabled }])),
+    // `desc` is the middleware's own name for this one, reported under the
+    // sibling label so that one word means one thing across the six kinds — as
+    // `mapRsyncTask` already does for the listing.
+    label: (row) => [
+      ['description', textOrNull(row['desc'])],
+      ['path', textOrNull(row['path'])],
+      ['direction', textOrNull(row['direction'])],
+    ],
+  },
+  {
+    kind: 'cloud_backup',
+    noun: 'cloud backup task',
+    listedBy: 'automated_tasks_list',
+    readMethod: 'cloud_backup.query',
+    updateMethod: 'cloud_backup.update',
+    read: (ctx, id) =>
+      firstValueFrom(ctx.system.client.api.query('cloud_backup.query', [['id', '=', id]])),
+    update: (ctx, id, enabled) =>
+      firstValueFrom(ctx.system.client.api.call('cloud_backup.update', [id, { enabled }])),
+    label: (row) => [
+      ['description', textOrNull(row['description'])],
+      ['path', textOrNull(row['path'])],
+    ],
+  },
+];
+
+/** The kinds by name, which is also what the argument is validated against. */
+const TASK_KINDS_BY_NAME = new Map(TASK_KINDS.map((spec) => [spec.kind, spec]));
+
+/**
+ * The three arguments this tool takes, with the kind already resolved to the
+ * definition behind it — so nothing downstream has to look one up again and
+ * decide what to do if it is not there.
+ */
+interface TaskSwitch {
+  spec: TaskKind;
+  id: number;
+  enabled: boolean;
+}
+
+/**
+ * The caller's arguments, or the error naming what is wrong with them.
+ *
+ * Strict on all three, as `snapshots_create` is about `recursive` and for a
+ * sharper version of the same reason: coercing `"false"` to true would switch
+ * ON a backup task the caller asked to switch off, and a kind read loosely
+ * would act on a different table's id `3`. There is nothing here a wrong
+ * reading answers a narrower question — it answers a different one.
+ *
+ * `id` must be a whole number: the middleware holds these under integer
+ * primary keys, and `3.5` is not one of them.
+ */
+function parseSwitch(args: Record<string, unknown>): TaskSwitch {
+  const kind = args['kind'];
+  const spec = typeof kind === 'string' ? TASK_KINDS_BY_NAME.get(kind) : undefined;
+  if (spec === undefined) {
+    throw new Error(
+      `"kind" is required and must be one of ${TASK_KINDS.map((one) => one.kind).join(', ')}`,
+    );
+  }
+  const id = args['id'];
+  if (typeof id !== 'number' || !Number.isInteger(id)) {
+    throw new Error('"id" is required and must be a whole number');
+  }
+  const enabled = args['enabled'];
+  if (typeof enabled !== 'boolean') {
+    throw new Error('"enabled" is required and must be a boolean');
+  }
+  return { spec, id, enabled };
+}
+
+/**
+ * The row the system listed under this id, or null where it listed none that
+ * did.
+ *
+ * The id is checked on the RESPONSE and not only asked for in the filter. An
+ * unrecognised query parameter is dropped rather than refused, so a filter that
+ * did not apply comes back as the whole table and looks exactly like one that
+ * matched everything — and the first row of that is a different task, which is
+ * the one mistake this tool must not make. The filter is still sent, for the
+ * same reason `select` is sent in `tasks_recent_runs`: it bounds what crosses
+ * the wire, and it is not what decides.
+ */
+function rowWithId(rows: unknown, id: number): Record<string, unknown> | null {
+  if (!Array.isArray(rows)) return null;
+  for (const row of rows) {
+    const held = recordOrNull(row);
+    if (held !== null && numberOrNull(held['id']) === id) return held;
+  }
+  return null;
+}
+
+/**
+ * What the plan says the call will do, given the state the task is in now.
+ *
+ * Three cases and not two, as `alerts_dismiss`'s is: a task whose `enabled`
+ * could not be read as a boolean is neither already there nor about to move,
+ * and saying either would be a claim the read did not establish.
+ */
+function switchSentence(current: boolean | null, target: boolean): string {
+  if (current === null) {
+    return 'Whether it is enabled could not be read, so this may change nothing.';
+  }
+  if (current === target) {
+    return `It is already ${current ? 'enabled' : 'disabled'}, so this changes nothing and is not an error.`;
+  }
+  return `It is ${current ? 'enabled' : 'disabled'}, so this will ${target ? 'enable' : 'disable'} it.`;
+}
+
+/** The filter both `plan` and `execute` read the task with, as the method takes it. */
+function readParams(id: number): unknown {
+  return [[['id', '=', id]]];
+}
+
+export const scheduledTaskSetEnabled: MutatingTool = {
+  name: 'scheduled_task_set_enabled',
+  description:
+    'Turns one scheduled task on this TrueNAS system on or off, and changes ' +
+    'nothing else about it. Two-phase: called without a confirmation_token it ' +
+    'returns a plan for user approval; called with one it switches the task. ' +
+    'THE TASK IS NAMED BY `kind` AND `id` TOGETHER, AND `id` ALONE IS NEVER ' +
+    'ENOUGH: task ids are per-table integers, so id 3 exists under every kind ' +
+    'and means a different task under each. `kind` is one of ' +
+    '`periodic_snapshot`, whose ids come from `snapshot_tasks_list`; ' +
+    '`cloud_sync`, from `cloudsync_tasks_list`; `replication`, from ' +
+    '`replication_status`; `cron`, from the `cron_jobs` section of ' +
+    '`automated_tasks_list`; `rsync`, from its `rsync_tasks` section; and ' +
+    '`cloud_backup`, from its `cloud_backup_tasks` section. Every one of those ' +
+    'listing tools reports the `id` this tool takes, so no second lookup is ' +
+    'needed. INIT/SHUTDOWN SCRIPTS ARE NOT COVERED: they are not scheduled — ' +
+    'they run at a point in the system\'s lifecycle — and no tool here ' +
+    'switches one on or off. `enabled` is the state to move the task to, true ' +
+    'or false, and is required: there is no toggle, because a toggle acts on a ' +
+    'state read after the plan was approved. ONLY THE `enabled` FIELD IS SENT. ' +
+    'The schedule, paths, retention, credentials and every other setting are ' +
+    'left exactly as they are, and this tool cannot change them, cannot create ' +
+    'or delete a task, and cannot run one now. THE PLAN NAMES THE TASK IN ' +
+    'HUMAN TERMS — its description or name, its dataset or path, and its ' +
+    'schedule in words — beside the kind and the id, so that what is approved ' +
+    'is recognisable. A cron job\'s `command` is NOT repeated in the plan, ' +
+    'because it is whatever an operator typed and can contain a secret; ' +
+    '`automated_tasks_list` is where it is reported. PLANNING AGAINST AN id NO ' +
+    'TASK OF THAT KIND HAS FAILS, naming the id, the kind searched and the ' +
+    'tool that lists it — so an approved plan is always a plan about a task ' +
+    'that existed when it was made, and a failure here is very often the wrong ' +
+    '`kind` rather than a missing task. SWITCHING A TASK TO THE STATE IT IS ' +
+    'ALREADY IN IS NOT AN ERROR, and the result says which of the two ' +
+    'happened. `requested_enabled` is what was asked for. ' +
+    '`previously_enabled` is the task\'s state as read immediately before the ' +
+    'call. `resulting_enabled` is the state read back off the response the ' +
+    'update itself answered with, which is the updated task. `changed` is true ' +
+    'where those two disagree and false where they are the same — so false is ' +
+    '"it was already in that state", not "the call failed". ALL THREE OF ' +
+    '`previously_enabled`, `resulting_enabled` AND `changed` ARE NULL WHERE ' +
+    'THE STATE BEHIND THEM COULD NOT BE ESTABLISHED, WHICH IS NOT "NOTHING ' +
+    'CHANGED", and `changed` is null whenever either of the other two is. ' +
+    '`confirmed` is whether `resulting_enabled` is what was requested: true is ' +
+    'the system reporting back the state that was asked for, FALSE IS THE ' +
+    'SYSTEM REPORTING THE OTHER STATE AND IS NOT A SUCCESS — the call did not ' +
+    'reject and the task is not in the requested state — and null is a ' +
+    'response that stated no `enabled` this tool could read, under which ' +
+    'nothing here establishes what the task is now set to. `lookup` says what ' +
+    'the read before the call did: `FOUND` is a read that named this task, ' +
+    '`NOT_FOUND` a read that completed and listed no task of that kind with ' +
+    'that id (it was deleted between the plan and the confirmation), and ' +
+    '`UNREADABLE` a read that failed, with `lookup_error` naming why. IT HAS ' +
+    'THREE VALUES AND `previously_enabled` HAS FOUR CAUSES FOR ITS NULL: the ' +
+    'two above, and ALSO `FOUND` where the task stated no `enabled` this tool ' +
+    'could read as a boolean. So `lookup` alone does not tell them apart, and ' +
+    '`FOUND` beside a null `previously_enabled` is that fourth case. THE ' +
+    'UPDATE IS ATTEMPTED IN ALL THREE CASES, because what runs must be what ' +
+    'was approved. DISABLING A TASK IS CHEAP TO DO AND EXPENSIVE TO FORGET: a ' +
+    'disabled backup, replication or snapshot task stops protecting anything ' +
+    'and announces that nowhere — the listing tools report it as ' +
+    '`enabled: false` and nothing raises an alert. This tool is the exact ' +
+    'inverse of itself with `enabled` flipped.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      kind: {
+        type: 'string',
+        enum: TASK_KINDS.map((spec) => spec.kind),
+        description:
+          'Which kind of scheduled task the id names. `periodic_snapshot` ' +
+          '(ids from `snapshot_tasks_list`), `cloud_sync` (from ' +
+          '`cloudsync_tasks_list`), `replication` (from `replication_status`), ' +
+          '`cron`, `rsync` and `cloud_backup` (from the matching sections of ' +
+          '`automated_tasks_list`). Required: an id alone names a different ' +
+          'task under every kind.',
+      },
+      id: {
+        type: 'integer',
+        description:
+          "The task's `id` as its listing tool reports it, on the system being " +
+          'targeted. It is unique only within its own kind.',
+      },
+      enabled: {
+        type: 'boolean',
+        description:
+          'The state to move the task to: true switches it on, false switches ' +
+          'it off. Required — this is not a toggle.',
+      },
+    },
+    required: ['kind', 'id', 'enabled'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const { spec, id, enabled } = parseSwitch(rawArgs);
+    return { kind: spec.kind, id, enabled };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const { spec, id, enabled } = parseSwitch(rawArgs);
+    const row = rowWithId(await spec.read(ctx, id), id);
+    // The failure names the kind as well as the id, because a caller that
+    // reached here with the right id and the wrong kind sees an id it can
+    // check and a kind it cannot. `assertDatasetExists` fails the same way for
+    // `snapshots_create`, with one fewer thing to get wrong.
+    if (row === null) {
+      throw new Error(
+        `No ${spec.noun} with id ${id} on this system — the kind searched was ` +
+          `"${spec.kind}", whose ids come from \`${spec.listedBy}\``,
+      );
+    }
+    return [
+      {
+        method: spec.readMethod,
+        params: readParams(id),
+        description:
+          `Read this system's ${spec.noun} with id ${id}, to report whether it was ` +
+          'already in the state this call moves it to. Changes nothing.',
+      },
+      {
+        method: spec.updateMethod,
+        params: [id, { enabled }],
+        description:
+          `${enabled ? 'Enable' : 'Disable'} ${describeTask(spec, row, id)}. ` +
+          `Only the enabled flag is sent. ${switchSentence(booleanOrNull(row['enabled']), enabled)}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const { spec, id, enabled } = parseSwitch(rawArgs);
+    // Caught rather than thrown: this read exists to describe the outcome, and
+    // letting it fail the call would lose an approval the user has already
+    // given for a mutation that is still safe to make. The result then says the
+    // prior state could not be established.
+    let row: Record<string, unknown> | null = null;
+    let lookupError: string | null = null;
+    try {
+      row = rowWithId(await spec.read(ctx, id), id);
+    } catch (reason) {
+      lookupError = errorText(reason);
+    }
+    // Unconditional, whatever the read said. Skipping the update for a task the
+    // read no longer lists would be `execute` branching on state read at
+    // execution time, which is what the confirmation token cannot bind.
+    const updated = await spec.update(ctx, id, enabled);
+    const previous = row === null ? null : booleanOrNull(row['enabled']);
+    // The method answers with the updated task, so what it says about `enabled`
+    // is the state that actually resulted — read back through the same guard
+    // rather than echoing what was asked for.
+    const resulting = booleanOrNull(recordOrNull(updated)?.['enabled']);
+    return {
+      kind: spec.kind,
+      id,
+      requested_enabled: enabled,
+      lookup: lookupError !== null ? 'UNREADABLE' : row === null ? 'NOT_FOUND' : 'FOUND',
+      lookup_error: lookupError,
+      previously_enabled: previous,
+      resulting_enabled: resulting,
+      // Both readings or nothing. A `changed` derived from the request rather
+      // than from the response would report a call the system did not apply as
+      // having changed something.
+      changed: previous === null || resulting === null ? null : previous !== resulting,
+      confirmed: resulting === null ? null : resulting === enabled,
+    };
   },
 };
