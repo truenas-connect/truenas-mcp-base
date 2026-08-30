@@ -184,8 +184,11 @@ async function readSecurity(system: SystemHandle): Promise<Attempt<SecuritySetti
  * The two-factor settings, with a failure named rather than thrown.
  *
  * `window` keeps the middleware's own name and carries no unit, for the reason
- * given above and one more: what it is a window of is documented nowhere on the
- * pinned surface. It is passed through as the number the system reported.
+ * given above: the pinned surface declares it a bare number and documents no
+ * unit for it, so it is passed through as the number the system reported.
+ * (unconfirmed) It is the validity window of a one-time password, read off the
+ * field's name and its place in the two-factor configuration rather than off
+ * anything the surface states.
  *
  * `id` is dropped here too, on the same terms as in {@link readSecurity}.
  */
@@ -306,14 +309,17 @@ export const securityConfig: ReadOnlyTool = {
     'answer that two-factor covers NOTHING THIS PAYLOAD NAMES. `enabled` true ' +
     'with such a list is two-factor switched on and applied to nothing it can ' +
     'name, which is a real state and is worth reporting as itself rather than ' +
-    'as "two-factor is on". `window` is the one-time-password validity window ' +
-    'the system reported, passed through as the number it gave; THE API ' +
+    'as "two-factor is on". `window` is (unconfirmed) the validity window of a ' +
+    'one-time password, passed through as the number the system gave; THE API ' +
     'DECLARES NO UNIT FOR IT and neither does this tool, so do not render it as ' +
     'seconds, minutes or steps. It is null where the system reported no number ' +
     'this tool could read. ' +
-    'Neither section reports anything about the users on the system: whether an ' +
-    'individual account has two-factor set up, and who has which privileges, ' +
-    'are `users_list`, not this tool. Whether the hardware is CAPABLE of FIPS, ' +
+    'EVERYTHING HERE IS SYSTEM-WIDE SETTINGS AND NOTHING HERE IS PER-ACCOUNT. ' +
+    'Whether an individual account has two-factor set up, and what any account ' +
+    'is permitted to do, are reported by NO TOOL IN THIS CATALOG — `users_list` ' +
+    'returns no two-factor state and says outright that it does not report what ' +
+    'an account is permitted to do, so do not send a caller there for either. ' +
+    'Whether the hardware is CAPABLE of FIPS, ' +
     'as opposed to whether it is on, is not reported. This tool only reports. ' +
     'It does not enable or disable FIPS or STIG mode, change any password ' +
     'policy setting, or turn two-factor authentication on or off — those are ' +
