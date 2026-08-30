@@ -68,10 +68,22 @@ export const appsList: ReadOnlyTool = {
     'running state, and whether an update is waiting. Apps that are not ' +
     'running are included — `state` distinguishes STOPPED from CRASHED, and ' +
     'from the transient DEPLOYING and STOPPING. `upgrade_available` means a ' +
-    'newer catalog version exists (`latest_version` names it, and is null ' +
-    'when the system does not know of one); `image_updates_available` is the ' +
-    'separate question of whether the containers the app already runs have ' +
-    'newer images, which is the only kind of update a custom app can have.',
+    'newer catalog version exists (`latest_version` names it); ' +
+    '`image_updates_available` is the separate question of whether the ' +
+    'containers the app already runs have newer images, which is the only ' +
+    'kind of update a custom app can have. EVERY FIELD IS NULL WHERE THE ' +
+    'SYSTEM REPORTED NO VALUE FOR IT, and A NULL IS NEVER TO BE READ AS THE ' +
+    'NEGATIVE. A null `upgrade_available` or `image_updates_available` means ' +
+    'NOTHING WAS ESTABLISHED about that kind of update; it is not the claim ' +
+    'that none is waiting, which is FALSE. `latest_version` is null both ' +
+    'where the system knows of no newer version and where it reported none, ' +
+    'and this tool does not tell those two apart. A null `name`, `version` ' +
+    'or `state` is the system having reported no value under that name, and ' +
+    'a null `state` is NOT an app that is stopped. An app is never left out ' +
+    'of the list for carrying one, so a null never shortens this list. THERE ' +
+    'IS NO PARTIAL ANSWER HERE: the listing either succeeds or this tool ' +
+    'fails, so a null is always about one field of one app rather than about ' +
+    'a read that did not happen.',
   inputSchema: { type: 'object', properties: {} },
   requiredRole: Role.ReadOnly,
   mutating: false,
