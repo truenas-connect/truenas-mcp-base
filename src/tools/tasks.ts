@@ -2137,10 +2137,18 @@ export const cloudsyncRun: MutatingTool = {
   // `reversible` is a claim about the OPERATION — the run can be stopped — and
   // not about the bytes, which a `SYNC` or a `MOVE` deletes for good. The two
   // are not the same and this field cannot say both: `irreversible` exists only
-  // so the catalog can REJECT it (`catalog/tool.ts`), so marking it that way
-  // would remove the tool rather than describe it more honestly. The honest
-  // account of what the run does to the data is in the description above and in
-  // the plan, which is where a person reads it.
+  // so the catalog can REJECT a tool (`catalog/catalog.ts` throws on it), so
+  // the other value would delete this tool rather than describe it more
+  // honestly.
+  //
+  // What settles which of the two it is: THIS TOOL TRIGGERS AN OPERATION IT
+  // DOES NOT AUTHOR. Everything a run deletes was decided by whoever configured
+  // the task — the mode, the paths, the direction — and the system does the
+  // same thing on its own at the next scheduled window. What this changes is
+  // WHEN, not WHAT, which is not the case the destructive-action policy is
+  // about: a tool that composed its own deletion would be. The account of what
+  // the run does to the data is in the description above and named in the plan,
+  // which is where the person approving it reads it.
   destructiveness: 'reversible',
   normalizeArgs(rawArgs) {
     const run = parseRun(rawArgs);

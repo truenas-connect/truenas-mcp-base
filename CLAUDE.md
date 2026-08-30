@@ -982,11 +982,21 @@ which is the one reading that costs data.
 **`destructiveness` is about the operation, not about the bytes, and it cannot
 say both.** A cloud sync run can be stopped; what it has already written or
 deleted is gone. The field is `reversible` because `irreversible` exists only so
-the catalog can REJECT a tool (`catalog/tool.ts`), so the other value would
-remove the tool rather than describe it more honestly. **Where those two come
-apart, the field records the operation and the description carries the account of
-the data** — and the description then may not claim reversibility on the field's
-behalf.
+the catalog can REJECT a tool — `catalog/catalog.ts` throws on registration — so
+the other value would delete this tool rather than describe it more honestly.
+**Where those two come apart, the field records the operation and the
+description carries the account of the data**, and the description then may not
+claim reversibility on the field's behalf.
+
+What decides which value a triggering tool takes is **whether it authors the
+destruction or only its timing.** Everything a cloud sync run deletes was
+decided by whoever configured the task, and the system does the same thing
+unattended at the next scheduled window; this tool moves the moment, not the
+effect. A tool that composed a deletion of its own — chose the paths, or the
+mode — would be the case the destructive-action policy is actually about, and
+would not belong in the catalog at all. **Ask which of those two a new mutating
+tool is before reaching for either value**, and say the answer where the tool
+declares it rather than leaving the field to carry an argument on its own.
 
 **The plan names one call, which is #119's distinction rather than a lapse.**
 `scheduled_task_set_enabled` names its read as a step because `execute` makes
