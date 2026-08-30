@@ -937,30 +937,25 @@ describe('system_general_config', () => {
     });
   });
 
-  it('says in its description which way the timezone applies to each kind of time', async () => {
-    // The two are opposite operations, and telling a caller "the catalog
-    // reports local times" would make it convert the UTC ones a second time.
+  it('tells the three kinds of time apart by the value, not by the tool', async () => {
+    // A list of tool names is incomplete the day a tool is added and is
+    // silently wrong rather than loudly so; the shape of the value a caller is
+    // holding is not.
     expect(systemGeneralConfig.description).toContain(
-      'A RENDERED SCHEDULE IS ALREADY IN THIS ZONE',
+      'DECIDE FROM THE VALUE YOU ARE HOLDING, NEVER FROM WHICH TOOL RETURNED IT',
+    );
+    // Already local, and converting it would move it by the offset.
+    expect(systemGeneralConfig.description).toContain(
+      'A RENDERED SCHEDULE — the English in a `schedule_description`',
     );
     expect(systemGeneralConfig.description).toContain('do NOT convert it');
-    expect(systemGeneralConfig.description).toContain('A REPORTED INSTANT IS NOT');
-    expect(systemGeneralConfig.description).toContain('CONVERT those INTO this zone');
-    // The schedule renderers on one side of that line and the instant
-    // reporters on the other, named so a caller can place a tool it is holding.
-    expect(systemGeneralConfig.description).toContain('snapshot_tasks_list');
-    expect(systemGeneralConfig.description).toContain('audit_log_query');
-    // Every caller of `describeSchedule` belongs in the schedule group, which
-    // is three tools rather than the two the cron rendering started with.
-    expect(systemGeneralConfig.description).toContain('automated_tasks_list');
-  });
-
-  it('puts storage_scrub_history in neither group rather than asserting its frame', async () => {
-    // That tool reports its times "as the system reports them" and states no
-    // zone, so telling a caller to convert them would assert a frame it
-    // refuses to — and would shift an offsetless local string a second time.
+    // Absolute, and stating it as a wall-clock hour needs converting.
+    expect(systemGeneralConfig.description).toContain('IS ABSOLUTE');
+    expect(systemGeneralConfig.description).toContain('CONVERT one INTO this zone');
+    // Unstated, which is neither of the above and is the one a caller is most
+    // likely to convert twice.
     expect(systemGeneralConfig.description).toContain(
-      '`storage_scrub_history` IS IN NEITHER GROUP AND MUST NOT BE CONVERTED',
+      'NOTHING IN THIS CATALOG ESTABLISHES WHAT ZONE IT IS IN',
     );
   });
 
@@ -968,7 +963,6 @@ describe('system_general_config', () => {
     // `system_info` returns the same setting. What it does not do is say what
     // the zone is the frame for, which is what this tool adds.
     expect(systemGeneralConfig.description).toContain('`system_info` also returns a `timezone`');
-    expect(systemGeneralConfig.description).not.toContain('NO OTHER TOOL');
   });
 
   it('nulls a timezone it could not read rather than falling back to UTC', async () => {
@@ -1005,15 +999,12 @@ describe('system_general_config', () => {
   it('reduces the certificate to whether one is configured, never the record', async () => {
     // An open record forwarded would carry whatever a later release puts in it,
     // and `certificates_list` is the tool for the detail.
-    expect(await field({ ui_certificate: { id: 3, name: 'letsencrypt' } }, 'ui_certificate_configured')).toBe(
-      true,
-    );
-    expect(JSON.stringify(await forConfig({ ui_certificate: { name: 'letsencrypt' } }))).not.toContain(
-      'letsencrypt',
-    );
+    const named = { ui_certificate: { id: 3, name: 'letsencrypt' } };
+    expect(await field(named, 'ui_certificate_configured')).toBe(true);
+    expect(JSON.stringify(await forConfig(named))).not.toContain('letsencrypt');
   });
 
-  it('reads the newer surface\'s certificate id as one being configured', async () => {
+  it("reads the newer surface's certificate id as one being configured", async () => {
     // A later directory in the same client declares `ui_certificate` as the
     // certificate's id rather than an embedded record, so a system on that
     // release sends a number for a web UI that DOES have one. Reading only the
@@ -1035,14 +1026,24 @@ describe('system_general_config', () => {
   it('reports the usage-collection pair together, keeping off apart from never chosen', async () => {
     // Reporting the boolean alone loses exactly the distinction the second
     // field exists to preserve.
-    expect(await forConfig({ usage_collection: false, usage_collection_is_set: false })).toMatchObject(
-      { usage_collection: false, usage_collection_is_set: false },
-    );
-    expect(await forConfig({ usage_collection: false, usage_collection_is_set: true })).toMatchObject(
-      { usage_collection: false, usage_collection_is_set: true },
-    );
+    const pair = async (over: Record<string, unknown>): Promise<unknown> => {
+      const result = await forConfig(over);
+      return [result['usage_collection'], result['usage_collection_is_set']];
+    };
+    // Nobody has answered the question, so the false beside it is a default
+    // rather than a decision.
+    expect(await pair({ usage_collection: false, usage_collection_is_set: false })).toEqual([
+      false,
+      false,
+    ]);
+    // The same false, and this time somebody chose it.
+    expect(await pair({ usage_collection: false, usage_collection_is_set: true })).toEqual([
+      false,
+      true,
+    ]);
     for (const unreadable of [null, undefined, 'true', 1]) {
-      expect(await field({ usage_collection_is_set: unreadable }, 'usage_collection_is_set')).toBeNull();
+      const [, isSet] = (await pair({ usage_collection_is_set: unreadable })) as unknown[];
+      expect(isSet).toBeNull();
     }
   });
 

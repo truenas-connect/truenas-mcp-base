@@ -889,33 +889,34 @@ function certificateConfigured(value: unknown): boolean | null {
  * The timezone the rest of the catalog's times are relative to, with the web UI
  * and console settings that arrive beside it.
  *
- * The timezone is why this tool exists, and it lands on the catalog's two kinds
- * of time differently:
+ * The timezone is why this tool exists, and what the description spends its
+ * length on is which of the catalog's times it applies to and in which
+ * direction. Getting that round the wrong way is worse than not reading the
+ * timezone at all.
  *
- * - **A rendered SCHEDULE is already in this timezone.** `snapshot_tasks_list`,
- *   `cloudsync_tasks_list` and `automated_tasks_list` turn a cron expression
- *   into English — "daily at 02:00" — through the one `describeSchedule` in
- *   `tasks.ts`, and the system runs it at 02:00 LOCAL. Nothing in any of them
- *   says which local, so an assistant reporting it to a user in another timezone
- *   was off by the offset and confident. Every `schedule_description` in the
- *   catalog comes from that one renderer, so the group is defined by it rather
- *   than by a list that a fourth caller of it would silently fall out of.
- * - **A reported INSTANT is not.** `audit_log_query`, `tasks_recent_runs` and
- *   `snapshots_list` render ISO 8601 UTC, so those need CONVERTING into this
- *   timezone before anyone is told a wall-clock hour — the opposite operation.
+ * **The rule is keyed on the VALUE, not on the tool that returned it**, and
+ * three drafts of this description got that wrong in the same way: each named
+ * the tools in each group, and each list was already incomplete when it was
+ * written — `describeSchedule` has three callers rather than the two the cron
+ * rendering started with, and `toISOString` is reached for in six files. A list
+ * of tool names cannot be right for long in a catalog that grows by a tool a
+ * ticket, and it is silently wrong rather than loudly so. The three forms are:
  *
- * Getting the two the wrong way round is worse than not having the timezone at
- * all, so the description states which is which rather than saying "the catalog
- * reports local times". One tool reporting the frame once is the deliverable;
- * restating it inside every tool that reports a time is a separate change and is
- * not made here.
+ * - **A rendered schedule** — the English a `schedule_description` holds — is
+ *   already local, because the system runs the cron expression behind it at that
+ *   hour local to itself. Not to be converted.
+ * - **A timestamp carrying `Z` or an explicit offset** is absolute, which is
+ *   what every `toISOString` in the catalog produces. To be converted into this
+ *   zone before anyone is told a wall-clock hour.
+ * - **A timestamp carrying no zone at all** was written by the system and passed
+ *   through — `storage_scrub_history`'s scan times, `boot_pool_status`'s
+ *   `created_at`. NOTHING in the catalog establishes what zone those are in,
+ *   this tool included, so they are not to be converted either. Saying otherwise
+ *   would assert a frame the sibling tool refuses to state, and would shift a
+ *   string already written in local time by this offset a second time.
  *
- * `storage_scrub_history` is in NEITHER group and the description says so
- * outright: it reports `started_at` and `finished_at` "as the system reports
- * them" and states no zone for either, so this tool must not tell a caller to
- * convert them. Doing so would assert a frame the sibling tool refuses to, and
- * an offsetless string already written in local time would be shifted by the
- * offset a second time.
+ * One tool reporting the frame once is the deliverable; restating it inside every
+ * tool that reports a time is a separate change and is not made here.
  *
  * `system_info` ALREADY RETURNS A `timezone`, off `system.info`, and this tool
  * is not a duplicate of it. What was missing was never the string — it was any
@@ -957,23 +958,22 @@ export const systemGeneralConfig: ReadOnlyTool = {
     'NAS is told the wrong hour with full confidence. `system_info` also ' +
     'returns a `timezone` and it is the same setting; what it does not say, and ' +
     'what follows here, is what that zone is the frame FOR. ' +
-    'IT APPLIES TO THE CATALOG\'S TWO KINDS OF TIME IN OPPOSITE DIRECTIONS, AND ' +
+    'IT APPLIES TO THE CATALOG\'S KINDS OF TIME IN OPPOSITE DIRECTIONS, AND ' +
     'GETTING THAT ROUND THE WRONG WAY IS WORSE THAN NOT READING IT AT ALL. ' +
-    'A RENDERED SCHEDULE IS ALREADY IN THIS ZONE: every `schedule_description` ' +
-    'in this catalog — `snapshot_tasks_list`, `cloudsync_tasks_list` and each ' +
-    'scheduled section of `automated_tasks_list` — is a cron expression ' +
-    'rendered into English, "daily at 02:00", and the system runs it at that ' +
-    'hour LOCAL to itself. Name this zone when repeating one, and do NOT ' +
-    'convert it. A REPORTED INSTANT IS NOT: ' +
-    '`audit_log_query`, `tasks_recent_runs` and `snapshots_list` report ISO ' +
-    '8601 UTC timestamps, so CONVERT those INTO this zone before stating a ' +
-    'wall-clock time. ' +
-    '`storage_scrub_history` IS IN NEITHER GROUP AND MUST NOT BE CONVERTED ON ' +
-    'THE STRENGTH OF THIS FIELD: it reports its times as the system wrote them ' +
-    'and states no zone for either, so nothing here establishes what frame they ' +
-    'are in — a string already written in local time would be shifted by this ' +
-    'offset a second time. Read what that tool returned before deciding it ' +
-    'needs anything done to it. ' +
+    'DECIDE FROM THE VALUE YOU ARE HOLDING, NEVER FROM WHICH TOOL RETURNED IT — ' +
+    'the catalog reports times in three forms and every tool that reports one ' +
+    'uses these. (1) A RENDERED SCHEDULE — the English in a ' +
+    '`schedule_description`, "daily at 02:00" — IS ALREADY IN THIS ZONE, ' +
+    'because the system runs the cron expression behind it at that hour local ' +
+    'to itself. Name this zone when repeating one and do NOT convert it. (2) A ' +
+    'TIMESTAMP ENDING IN `Z`, OR CARRYING AN EXPLICIT `+HH:MM` OFFSET, IS ' +
+    'ABSOLUTE and is most of the times this catalog reports. CONVERT one INTO ' +
+    'this zone before stating a wall-clock hour. (3) A TIMESTAMP CARRYING NO ' +
+    'ZONE AT ALL was written by the system and passed through unchanged, and ' +
+    'NOTHING IN THIS CATALOG ESTABLISHES WHAT ZONE IT IS IN — this field ' +
+    'included. Do NOT convert one and do NOT read it as UTC; say the zone is ' +
+    'unstated. A scrub time from `storage_scrub_history` and a boot ' +
+    "environment's `created_at` are of this third kind. " +
     '`timezone` is null where the system reported no timezone this tool could ' +
     'read — which is NOT UTC, and must not be treated as UTC; say the zone is ' +
     'unknown instead of assuming one. ' +
