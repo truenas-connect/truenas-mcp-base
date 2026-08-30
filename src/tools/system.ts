@@ -892,11 +892,14 @@ function certificateConfigured(value: unknown): boolean | null {
  * The timezone is why this tool exists, and it lands on the catalog's two kinds
  * of time differently:
  *
- * - **A rendered SCHEDULE is already in this timezone.** `snapshot_tasks_list`
- *   and `cloudsync_tasks_list` turn a cron expression into English — "daily at
- *   02:00" — and the system runs it at 02:00 LOCAL. Nothing in either tool says
- *   which local, so an assistant reporting it to a user in another timezone was
- *   off by the offset and confident.
+ * - **A rendered SCHEDULE is already in this timezone.** `snapshot_tasks_list`,
+ *   `cloudsync_tasks_list` and `automated_tasks_list` turn a cron expression
+ *   into English — "daily at 02:00" — through the one `describeSchedule` in
+ *   `tasks.ts`, and the system runs it at 02:00 LOCAL. Nothing in any of them
+ *   says which local, so an assistant reporting it to a user in another timezone
+ *   was off by the offset and confident. Every `schedule_description` in the
+ *   catalog comes from that one renderer, so the group is defined by it rather
+ *   than by a list that a fourth caller of it would silently fall out of.
  * - **A reported INSTANT is not.** `audit_log_query`, `tasks_recent_runs` and
  *   `snapshots_list` render ISO 8601 UTC, so those need CONVERTING into this
  *   timezone before anyone is told a wall-clock hour — the opposite operation.
@@ -956,10 +959,12 @@ export const systemGeneralConfig: ReadOnlyTool = {
     'what follows here, is what that zone is the frame FOR. ' +
     'IT APPLIES TO THE CATALOG\'S TWO KINDS OF TIME IN OPPOSITE DIRECTIONS, AND ' +
     'GETTING THAT ROUND THE WRONG WAY IS WORSE THAN NOT READING IT AT ALL. ' +
-    'A RENDERED SCHEDULE IS ALREADY IN THIS ZONE: the cron schedules ' +
-    '`snapshot_tasks_list` and `cloudsync_tasks_list` render into English — ' +
-    '"daily at 02:00" — run at that hour LOCAL to the system, so name this zone ' +
-    'when repeating one and do NOT convert it. A REPORTED INSTANT IS NOT: ' +
+    'A RENDERED SCHEDULE IS ALREADY IN THIS ZONE: every `schedule_description` ' +
+    'in this catalog — `snapshot_tasks_list`, `cloudsync_tasks_list` and each ' +
+    'scheduled section of `automated_tasks_list` — is a cron expression ' +
+    'rendered into English, "daily at 02:00", and the system runs it at that ' +
+    'hour LOCAL to itself. Name this zone when repeating one, and do NOT ' +
+    'convert it. A REPORTED INSTANT IS NOT: ' +
     '`audit_log_query`, `tasks_recent_runs` and `snapshots_list` report ISO ' +
     '8601 UTC timestamps, so CONVERT those INTO this zone before stating a ' +
     'wall-clock time. ' +

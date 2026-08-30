@@ -950,6 +950,9 @@ describe('system_general_config', () => {
     // reporters on the other, named so a caller can place a tool it is holding.
     expect(systemGeneralConfig.description).toContain('snapshot_tasks_list');
     expect(systemGeneralConfig.description).toContain('audit_log_query');
+    // Every caller of `describeSchedule` belongs in the schedule group, which
+    // is three tools rather than the two the cron rendering started with.
+    expect(systemGeneralConfig.description).toContain('automated_tasks_list');
   });
 
   it('puts storage_scrub_history in neither group rather than asserting its frame', async () => {
