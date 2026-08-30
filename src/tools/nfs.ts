@@ -75,14 +75,16 @@ const NOT_A_LIST = 'the system answered with something other than a list of clie
  * The read is passed as a thunk so the call is made inside the `try`, which
  * keeps this correct for a read that throws before it returns a promise at all.
  *
- * A rejection is not the only way a read can fail to produce clients: the
- * client's own types declare both of these calls as answering a union that
- * includes a bare row and a count, and a declared type is a claim about what the
- * middleware sends rather than the value received. So an answer that is not a
- * list is caught here and reported exactly like a rejection — the alternative is
- * a `.map` throwing out of the handler, which would take THE OTHER VERSION'S
- * ANSWER DOWN WITH IT and is the one thing the two reads being independent is
- * meant to prevent.
+ * A rejection is not the only way a read can fail to produce clients. `query`
+ * types its answer as a plain array of rows, and that is a claim about what the
+ * middleware sends rather than the value received — the same ground every field
+ * guard in this file stands on. The claim is a weaker one here than usual: the
+ * call directory declares both of these methods as answering a union that also
+ * admits a bare row and a count, so a non-list answer is a shape the client's
+ * own types say the middleware has. So one is caught here and reported exactly
+ * like a rejection — the alternative is a `.map` throwing out of the handler,
+ * which would take THE OTHER VERSION'S ANSWER DOWN WITH IT and is the one thing
+ * the two reads being independent is meant to prevent.
  */
 async function readClients<T>(source: Source, read: () => Promise<T[]>): Promise<Attempt<T>> {
   try {
