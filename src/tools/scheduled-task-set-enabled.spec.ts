@@ -223,10 +223,13 @@ describe('scheduled_task_set_enabled', () => {
     });
 
     it('executes nothing when an argument is unreadable', async () => {
-      const { call } = system(kinds[0]);
+      // The spy and the context have to come from the SAME fake system, or the
+      // assertion is about a system `execute` never saw and cannot fail.
+      const { ctx: own, query, call } = system(kinds[3]);
       await expect(
-        scheduledTaskSetEnabled.execute(ctx, { kind: 'cron', id: 3, enabled: 'yes' }),
+        scheduledTaskSetEnabled.execute(own, { kind: 'cron', id: 3, enabled: 'yes' }),
       ).rejects.toThrow(/"enabled" is required/);
+      expect(query).not.toHaveBeenCalled();
       expect(call).not.toHaveBeenCalled();
     });
   });
