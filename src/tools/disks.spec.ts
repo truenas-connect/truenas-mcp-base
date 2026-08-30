@@ -259,10 +259,16 @@ describe('disks_temperature', () => {
     });
   });
 
-  it('reads no names from a listing that is not a list, or from an unnamed row', async () => {
-    const notAList = fakeSystem({ ['disk.query']: { sda: {} } });
-    expect(await disksTemperature.handler(notAList.ctx, {})).toMatchObject({ disks: [] });
+  it('raises a listing that is not a list rather than reading it as no disks', async () => {
+    // `disks: []` is defined as "the system lists no disks", which an answer
+    // that was not a list at all does not establish.
+    const { ctx } = fakeSystem({ ['disk.query']: { sda: {} } });
+    await expect(disksTemperature.handler(ctx, {})).rejects.toThrow(
+      'the system answered with something other than a list of disks',
+    );
+  });
 
+  it('reads no name from an unnamed row', async () => {
     // A row the listing carried whose name could not be read names no device,
     // so it is not asked about — there is nothing to ask the temperature read
     // for, and a row keyed by nothing could not be matched back to an answer.

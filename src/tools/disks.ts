@@ -163,6 +163,9 @@ const MAX_HISTORY_DAYS = 90;
 /** What a read that answered with something other than a record is reported as. */
 const NOT_A_RECORD = 'the system answered with something other than a record of temperatures';
 
+/** What a listing that answered with something other than a list is reported as. */
+const NOT_A_LIST = 'the system answered with something other than a list of disks';
+
 /** One disk's temperature, the thresholds it is judged against, and its history. */
 interface DiskTemperature {
   name: string;
@@ -223,10 +226,18 @@ function requestedHistoryDays(raw: unknown): number | null {
  *
  * A listing that cannot be read is fatal rather than reported beside an answer:
  * both reads below need the names, so there is no partial answer left to give.
+ *
+ * A rejection is not the only way it can fail to produce names. `query` types
+ * its answer as a plain array of rows, and that is a claim about what the
+ * middleware sends rather than the value received — the call directory declares
+ * `disk.query` as answering a union that also admits a bare row and a count. So
+ * a non-list answer is raised exactly like a rejection, and NOT read as a system
+ * that lists no disks: an empty result is defined as "the system lists none",
+ * which is a claim this read did not establish.
  */
 async function allDiskNames(system: SystemHandle): Promise<string[]> {
   const rows: unknown = await firstValueFrom(system.client.api.query('disk.query'));
-  if (!Array.isArray(rows)) return [];
+  if (!Array.isArray(rows)) throw new Error(NOT_A_LIST);
   return rows.flatMap((row) => {
     const name = textOrNull(recordOrNull(row)?.['name']);
     return name === null ? [] : [name];
