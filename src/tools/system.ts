@@ -898,9 +898,8 @@ function certificateConfigured(value: unknown): boolean | null {
  *   which local, so an assistant reporting it to a user in another timezone was
  *   off by the offset and confident.
  * - **A reported INSTANT is not.** `audit_log_query`, `tasks_recent_runs` and
- *   `snapshots_list` render ISO 8601 UTC, and `storage_scrub_history` passes the
- *   middleware's own string through. Those need CONVERTING into this timezone
- *   before anyone is told a wall-clock hour, which is the opposite operation.
+ *   `snapshots_list` render ISO 8601 UTC, so those need CONVERTING into this
+ *   timezone before anyone is told a wall-clock hour — the opposite operation.
  *
  * Getting the two the wrong way round is worse than not having the timezone at
  * all, so the description states which is which rather than saying "the catalog
@@ -908,19 +907,32 @@ function certificateConfigured(value: unknown): boolean | null {
  * restating it inside every tool that reports a time is a separate change and is
  * not made here.
  *
+ * `storage_scrub_history` is in NEITHER group and the description says so
+ * outright: it reports `started_at` and `finished_at` "as the system reports
+ * them" and states no zone for either, so this tool must not tell a caller to
+ * convert them. Doing so would assert a frame the sibling tool refuses to, and
+ * an offsetless string already written in local time would be shifted by the
+ * offset a second time.
+ *
+ * `system_info` ALREADY RETURNS A `timezone`, off `system.info`, and this tool
+ * is not a duplicate of it. What was missing was never the string — it was any
+ * statement of what the string is the frame FOR, which `system_info` does not
+ * make and which is most of this tool's description.
+ *
  * THIS TOOL STATES NO VERDICT, per the #47 decision in `CLAUDE.md` and for the
  * same reason `security_config` states none: a TLS protocol list is a fact, and
  * whether accepting TLSv1 is acceptable is a claim against a standard that lives
  * outside this repository. So `ui_https_protocols` is reported as the system
  * spelled it and no field here scores it.
  *
- * Three fields of the payload are DELIBERATELY not reported, and each is a
- * different reason:
+ * Four fields of the payload do NOT appear under their own names, for three
+ * different reasons:
  *
  * - **`id`** is a middleware row id and means nothing outside the middleware —
  *   the same omission `security_config` makes.
- * - **`ui_certificate`** is an open record, reduced to
- *   {@link certificateConfigured} rather than forwarded.
+ * - **`ui_certificate`** is not dropped but REDUCED: it is an open record, and
+ *   {@link certificateConfigured} turns it into the one fact reading it
+ *   establishes, reported as `ui_certificate_configured`.
  * - **`wizardshown` and `ds_auth`** are read by nothing here. `wizardshown` is
  *   the setup wizard's own bookkeeping and answers no question about the system;
  *   `ds_auth` is a boolean whose meaning the pinned surface states nowhere, and
@@ -937,10 +949,11 @@ export const systemGeneralConfig: ReadOnlyTool = {
     'and TLS configuration, and its console keyboard map. ' +
     '`timezone` IS THE FIELD THIS TOOL EXISTS FOR AND IS THE SYSTEM\'S LOCAL ' +
     'TIME ZONE. It is the name the system holds, such as `America/Los_Angeles` ' +
-    'or `UTC`. NO OTHER TOOL IN THIS CATALOG REPORTS IT, so read it here before ' +
-    'telling anyone when something runs or when something happened — otherwise ' +
-    'a user in a different timezone from their NAS is told the wrong hour with ' +
-    'full confidence. ' +
+    'or `UTC`. Read it before telling anyone when something runs or when ' +
+    'something happened — otherwise a user in a different timezone from their ' +
+    'NAS is told the wrong hour with full confidence. `system_info` also ' +
+    'returns a `timezone` and it is the same setting; what it does not say, and ' +
+    'what follows here, is what that zone is the frame FOR. ' +
     'IT APPLIES TO THE CATALOG\'S TWO KINDS OF TIME IN OPPOSITE DIRECTIONS, AND ' +
     'GETTING THAT ROUND THE WRONG WAY IS WORSE THAN NOT READING IT AT ALL. ' +
     'A RENDERED SCHEDULE IS ALREADY IN THIS ZONE: the cron schedules ' +
@@ -948,9 +961,14 @@ export const systemGeneralConfig: ReadOnlyTool = {
     '"daily at 02:00" — run at that hour LOCAL to the system, so name this zone ' +
     'when repeating one and do NOT convert it. A REPORTED INSTANT IS NOT: ' +
     '`audit_log_query`, `tasks_recent_runs` and `snapshots_list` report ISO ' +
-    '8601 UTC timestamps, and `storage_scrub_history` passes through the time ' +
-    'the system itself wrote, so CONVERT those INTO this zone before stating a ' +
+    '8601 UTC timestamps, so CONVERT those INTO this zone before stating a ' +
     'wall-clock time. ' +
+    '`storage_scrub_history` IS IN NEITHER GROUP AND MUST NOT BE CONVERTED ON ' +
+    'THE STRENGTH OF THIS FIELD: it reports its times as the system wrote them ' +
+    'and states no zone for either, so nothing here establishes what frame they ' +
+    'are in — a string already written in local time would be shifted by this ' +
+    'offset a second time. Read what that tool returned before deciding it ' +
+    'needs anything done to it. ' +
     '`timezone` is null where the system reported no timezone this tool could ' +
     'read — which is NOT UTC, and must not be treated as UTC; say the zone is ' +
     'unknown instead of assuming one. ' +

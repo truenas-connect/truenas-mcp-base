@@ -950,7 +950,22 @@ describe('system_general_config', () => {
     // reporters on the other, named so a caller can place a tool it is holding.
     expect(systemGeneralConfig.description).toContain('snapshot_tasks_list');
     expect(systemGeneralConfig.description).toContain('audit_log_query');
-    expect(systemGeneralConfig.description).toContain('storage_scrub_history');
+  });
+
+  it('puts storage_scrub_history in neither group rather than asserting its frame', async () => {
+    // That tool reports its times "as the system reports them" and states no
+    // zone, so telling a caller to convert them would assert a frame it
+    // refuses to — and would shift an offsetless local string a second time.
+    expect(systemGeneralConfig.description).toContain(
+      '`storage_scrub_history` IS IN NEITHER GROUP AND MUST NOT BE CONVERTED',
+    );
+  });
+
+  it('does not claim to be the only tool reporting the timezone', async () => {
+    // `system_info` returns the same setting. What it does not do is say what
+    // the zone is the frame for, which is what this tool adds.
+    expect(systemGeneralConfig.description).toContain('`system_info` also returns a `timezone`');
+    expect(systemGeneralConfig.description).not.toContain('NO OTHER TOOL');
   });
 
   it('nulls a timezone it could not read rather than falling back to UTC', async () => {
