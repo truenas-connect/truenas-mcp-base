@@ -19,10 +19,9 @@ export const alertsList: ReadOnlyTool = {
     'PER-SYSTEM: it names one alert on the one system it was read from, so a ' +
     'uuid read from one system must not be passed to a tool call targeting ' +
     'another. `id` is the alert\'s own class-and-key identifier, is what ' +
-    '`klass` groups with, and IS NOT THAT ARGUMENT — it does not name a single ' +
-    "system's alert instance, and the same `id` can come back from two " +
-    'different systems for the same condition, so acting on it would be ' +
-    'ambiguous.',
+    '`klass` groups with, and IS NOT THAT ARGUMENT: nothing states that it ' +
+    "names one system's alert instance, so acting on it would be ambiguous " +
+    'wherever the same condition is raised on more than one system.',
   inputSchema: { type: 'object', properties: {} },
   requiredRole: Role.ReadOnly,
   mutating: false,
@@ -525,12 +524,17 @@ export const alertsDismiss: MutatingTool = alertStateTool({
     'true where that state was the other one and the call did not reject, and ' +
     'false where the alert was already dismissed and this call therefore moved ' +
     'nothing. BOTH ARE NULL WHERE THE PRIOR STATE COULD NOT BE ESTABLISHED, ' +
-    'WHICH IS NOT "NOTHING CHANGED": `lookup` says which — `FOUND` is the state ' +
-    'reported, `NOT_FOUND` is a read that completed and listed no alert with ' +
-    'this uuid (it cleared between the plan and the confirmation), and ' +
-    '`UNREADABLE` is a read that failed, with `lookup_error` naming why. THE ' +
+    'WHICH IS NOT "NOTHING CHANGED". `lookup` says what the read did: `FOUND` ' +
+    'is a read that named this alert, `NOT_FOUND` a read that completed and ' +
+    'listed no alert with this uuid (it cleared between the plan and the ' +
+    'confirmation), and `UNREADABLE` a read that failed, with `lookup_error` ' +
+    'naming why. IT HAS THREE VALUES AND THE NULL PAIR HAS FOUR CAUSES: the two ' +
+    'above, and ALSO `FOUND` where the alert reported no `dismissed` this tool ' +
+    'could read as a boolean — an alert that was there and did not state ' +
+    'whether it had been dismissed. So `lookup` alone does not tell them apart, ' +
+    'and `FOUND` beside a null `previously_dismissed` is that fourth case. THE ' +
     'DISMISSAL IS ATTEMPTED IN ALL THREE CASES, because what runs must be what ' +
-    'was approved; under `NOT_FOUND` and `UNREADABLE` this tool cannot say ' +
+    'was approved; wherever `previously_dismissed` is null this tool cannot say ' +
     'whether anything was dismissed, only that the call did not reject. ' +
     '`alerts_restore` is the exact inverse and un-dismisses an alert this tool ' +
     'dismissed. It changes no data, no configuration and no storage, it starts ' +
@@ -563,12 +567,18 @@ export const alertsRestore: MutatingTool = alertStateTool({
     'call, `changed` is true where the alert was dismissed and the call did not ' +
     'reject, and false where it was not dismissed and this call therefore moved ' +
     'nothing. BOTH ARE NULL WHERE THE PRIOR STATE COULD NOT BE ESTABLISHED, ' +
-    'WHICH IS NOT "NOTHING CHANGED": `lookup` says which — `FOUND` is the state ' +
-    'reported, `NOT_FOUND` is a read that completed and listed no alert with ' +
-    'this uuid (it cleared between the plan and the confirmation), and ' +
-    '`UNREADABLE` is a read that failed, with `lookup_error` naming why. THE ' +
+    'WHICH IS NOT "NOTHING CHANGED". `lookup` says what the read did: `FOUND` ' +
+    'is a read that named this alert, `NOT_FOUND` a read that completed and ' +
+    'listed no alert with this uuid (it cleared between the plan and the ' +
+    'confirmation), and `UNREADABLE` a read that failed, with `lookup_error` ' +
+    'naming why. IT HAS THREE VALUES AND THE NULL PAIR HAS FOUR CAUSES: the two ' +
+    'above, and ALSO `FOUND` where the alert reported no `dismissed` this tool ' +
+    'could read as a boolean — an alert that was there and did not state ' +
+    'whether it had been dismissed. So `lookup` alone does not tell them apart, ' +
+    'and `FOUND` beside a null `previously_dismissed` is that fourth case. THE ' +
     'RESTORE IS ATTEMPTED IN ALL THREE CASES, because what runs must be what was ' +
-    'approved; under `NOT_FOUND` and `UNREADABLE` this tool cannot say whether ' +
-    'anything was restored, only that the call did not reject. It changes no ' +
+    'approved; wherever `previously_dismissed` is null this tool cannot say ' +
+    'whether anything was restored, only that the call did not reject. It ' +
+    'changes no ' +
     'data, no configuration and no storage, and it starts no job.',
 });

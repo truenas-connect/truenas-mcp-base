@@ -727,12 +727,19 @@ call is made whatever the read said — including where the read failed, and whe
 it completed and listed no alert with that uuid. That is what keeps `execute` a
 pure function of (args, system), which is the property the confirmation token
 depends on: skipping the mutation for an alert the read no longer lists would be
-branching on state the token cannot bind. The three readings are reported as
-`lookup` (`FOUND` / `NOT_FOUND` / `UNREADABLE`) beside a `previously_dismissed`
-and a `changed` that are both null in the last two, and the description says
-outright that under those two the tool cannot say whether anything moved. The
-alternative — failing the call when the reporting read fails — would throw away
-an approval the user has already given for a mutation that is still safe.
+branching on state the token cannot bind. The alternative — failing the call
+when the reporting read fails — would throw away an approval the user has
+already given for a mutation that is still safe.
+
+**A three-valued account of a read does not enumerate a four-valued outcome, and
+the description has to say so.** `lookup` reports what the read did — `FOUND`,
+`NOT_FOUND`, `UNREADABLE` — while `previously_dismissed` and `changed` are null
+under the last two AND under `FOUND` where the alert stated no `dismissed` this
+tool could read as a boolean. Three values, four causes: the descriptions name
+the fourth explicitly and say that `lookup` alone does not tell them apart. A
+status field named for one half of an outcome will not partition the other half,
+and claiming it does is the house's most common review finding wearing a
+different hat.
 
 **Already-in-the-target-state is not an error, and saying which it was is the
 tool's job.** Most alerts on a running system are already dismissed; the plan
