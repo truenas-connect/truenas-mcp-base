@@ -2,8 +2,11 @@ import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool } from '@/catalog/tool';
 
-/** A ZFS property as the middleware reports it; the generated types flatten
- * these to `{}`, losing the parsed numeric value the tools surface. */
+/** A ZFS property as the middleware reports it. The client declares the property
+ * object on the dataset fields it names, but types its `parsed` value `unknown`
+ * — and the one property this file asks for that the client does NOT name
+ * reaches it through the row's index signature as `unknown` outright. Either
+ * way the value the tools surface has to be restated to be reached. */
 interface ZfsProperty {
   parsed?: unknown;
 }
@@ -69,8 +72,10 @@ export const listDatasets: ReadOnlyTool = {
       pool: dataset['pool'],
       type: dataset['type'],
       mountpoint: dataset['mountpoint'],
-      // The generated types erase the ZFS property object to `{}`, so the
-      // `parsed` field the middleware returns has to be re-stated here.
+      // The value the tools surface is the property's `parsed` field, which the
+      // client types `unknown` on the property object it declares. So it is
+      // reached through the restatement above and passed through as it arrived
+      // — this is the middleware's own value, not a number this file checked.
       used: (dataset['used'] as ZfsProperty | undefined)?.parsed,
       available: (dataset['available'] as ZfsProperty | undefined)?.parsed,
     }));
@@ -81,11 +86,13 @@ export const listDatasets: ReadOnlyTool = {
  * The numeric value of a ZFS property, or null where the middleware reported
  * none.
  *
- * Every property this tool reads is a byte count, and the generated types erase
- * the property object to `{}`, so `parsed` arrives as `unknown`: a value that
- * is not a finite number is not a byte count, whatever else it may be. Null
- * rather than a coerced zero, because a dataset whose usage could not be read
- * must not report as one using nothing.
+ * Every property this tool reads is a byte count, and `parsed` arrives as
+ * `unknown` whichever way it is reached — the client types that field `unknown`
+ * on the property object it declares, and the property named `referenced` is
+ * not a declared dataset field at all. A value that is not a finite number is
+ * not a byte count, whatever else it may be. Null rather than a coerced zero,
+ * because a dataset whose usage could not be read must not report as one using
+ * nothing.
  */
 function propertyBytes(property: unknown): number | null {
   const parsed = (property as ZfsProperty | undefined)?.parsed;
@@ -106,17 +113,20 @@ function propertyBytes(property: unknown): number | null {
  * property itself, or as its `parsed` value — on the evidence that the client
  * types this field `number | (0 | null)` on the dataset create and update
  * payloads: the API treats the two as one meaning on the side it does type.
- * The query response is typed `Record<string, unknown>` and settles nothing
- * either way, so this is a reading rather than a guarantee. Only a property
- * that is absent, that is not an object at all, or that carries no `parsed`
- * value is unreadable.
+ * The query response declares `quota` and `refquota` as property objects and
+ * types the `parsed` value inside each of them `unknown`, so it still settles
+ * nothing either way and this is a reading rather than a guarantee. Only a
+ * property that is absent, that is not an object at all, or that carries no
+ * `parsed` value is unreadable.
  */
 function quotaLimit(property: unknown): number | null {
   if (property === null) return 0;
-  // The row arrives as `unknown` and this is the only guard between it and the
-  // `in` below, which throws a TypeError on a primitive rather than answering
-  // false. A property the middleware sends as a bare number or string is not
-  // the object shape this tool reads, so it is unreadable rather than fatal.
+  // The property is read as `unknown` — the client declares it, but a declared
+  // type is a claim about what the middleware sends and not about the value
+  // received — and this is the only guard between it and the `in` below, which
+  // throws a TypeError on a primitive rather than answering false. A property
+  // the middleware sends as a bare number or string is not the object shape
+  // this tool reads, so it is unreadable rather than fatal.
   if (typeof property !== 'object') return null;
   if (!('parsed' in property)) return null;
   return (property as ZfsProperty).parsed === null ? 0 : propertyBytes(property);
@@ -199,12 +209,13 @@ export const quotaReport: ReadOnlyTool = {
         extra: {
           retrieve_children: true,
           // `referenced` is a core ZFS property and the one `refquota` caps.
-          // The client declares no dataset field at all — `pool.dataset.query`
-          // answers `Record<string, unknown>` — so asking for it by name is no
-          // less grounded than asking for `used`, and equally unconfirmed
-          // against a live middleware. One that does not return it leaves the
-          // refquota percentage null rather than computing a wrong one against
-          // `used`, which caps nothing of the sort.
+          // The client declares `used`, `quota` and `refquota` as dataset
+          // fields and does NOT declare `referenced`, which reaches this file
+          // through the row's index signature instead — so of the four names
+          // asked for here that one is the unconfirmed one, rather than all
+          // four being equally unconfirmed. A middleware that does not return
+          // it leaves the refquota percentage null rather than computing a
+          // wrong one against `used`, which caps nothing of the sort.
           properties: ['used', 'referenced', 'quota', 'refquota'],
         },
       }),

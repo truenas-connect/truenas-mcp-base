@@ -473,18 +473,21 @@ function jobError(run: LastRun | null): string | null {
 }
 
 /**
- * One named string field of a record the pinned client's types do not describe
- * field by field, or null where the record or the field is not readable.
+ * One named string field of a record this file reads without leaning on the
+ * client's type for it, or null where the record or the field is not readable.
  *
- * Each of the three places this is used needs it for its own reason. A task's
- * `attributes` is an open record — the client types it `Record<string,
- * unknown>`, so `bucket` and `folder` arrive as `unknown`. `description` is not
- * declared on the row at all: the server sends it and the generated dump omits
- * it, the same way it omits a job's own `description`, which the client
- * corrects by hand for exactly that reason. A task's credential IS declared,
- * with a `name` typed a string — but the middleware also sends the id-only
- * form, so a row that does not honour the type is the case a direct read would
- * have got wrong.
+ * Each of the places this is used needs it for its own reason, and the reason
+ * is not that the client describes nothing: it declares a cloud sync task's
+ * `description`, and declares `bucket` and `folder` on the attributes object
+ * beside it. Every one of those is optional on its own declaration, and a
+ * declared type is a claim about what the middleware sends rather than about
+ * the value received — so a row that carries something else reads as
+ * unreadable here rather than as a string it is not. The cloud backup and
+ * rsync sections reach the same kind of field through a row this file reads as
+ * `unknown`, with no declaration to lean on even in principle. A task's
+ * credential IS declared, with a `name` typed a string — but the middleware
+ * also sends the id-only form, so a row that does not honour the type is the
+ * case a direct read would have got wrong.
  */
 function stringField(record: unknown, field: string): string | null {
   if (typeof record !== 'object' || record === null) return null;
@@ -574,9 +577,10 @@ export const cloudsyncTasksList: ReadOnlyTool = {
         description: stringField(task, 'description'),
         direction: task.direction,
         path: task.path,
-        // Named rather than passed through: `attributes` is an open record
-        // whose contents differ per provider, so a field a later TrueNAS
-        // release adds to it does not reach the caller without a change here.
+        // Named rather than passed through: `attributes` holds whatever the
+        // provider a task uses needs, and the client declares one object
+        // covering every provider, so a field a later TrueNAS release adds to
+        // it does not reach the caller without a change here.
         bucket: stringField(task.attributes, 'bucket'),
         folder: stringField(task.attributes, 'folder'),
         // The credential by id and name and nothing else — its `provider` holds
@@ -815,8 +819,9 @@ function mapCloudBackup(row: unknown): CloudBackupRow {
     id: numberOrNull(held['id']),
     description: textOrNull(held['description']),
     path: textOrNull(held['path']),
-    // Named rather than passed through: `attributes` is an open record whose
-    // contents differ per provider, as in `cloudsync_tasks_list`.
+    // Named rather than passed through, as in `cloudsync_tasks_list`:
+    // `attributes` holds whatever the provider a task uses needs, and it is
+    // reached here through a row this function reads as `unknown`.
     bucket: stringField(held['attributes'], 'bucket'),
     folder: stringField(held['attributes'], 'folder'),
     credential_id: credentialId(held['credentials']),

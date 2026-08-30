@@ -7,15 +7,14 @@ import { textList, textOrNull } from '@/tools/common';
  * Certificates family: which certificates this system holds, and when each one
  * stops being valid.
  *
- * `certificate.query` answers all of it in one call, and unlike the interface
- * and network-configuration listings the pinned client TYPES the entity it
- * returns — `certificate.query` carries an `entity` in the client's own call
- * directory for the version this is written against, so `name`, `common`,
- * `san`, `from`, `until` and `expired` are read as declared fields rather than
- * guessed off a bare record the way `network.ts` has to read one. What is read
- * defensively here is the CONTENT of those fields, not their names: a date the
- * middleware formatted is still text this file has to parse, and `issuerName`
- * below is the one field with no declaration behind it at all.
+ * `certificate.query` answers all of it in one call and carries an `entity` in
+ * the client's own call directory for the version this is written against, so
+ * `name`, `common`, `san`, `from`, `until` and `expired` are read as declared
+ * fields — as the interface and network-configuration payloads are in
+ * `network.ts`. What is read defensively here is the CONTENT of those fields,
+ * not their names: a date the middleware formatted is still text this file has
+ * to parse, and `issuerName` below is the one field with no declaration behind
+ * it at all.
  *
  * The mapping is an allowlist, as in `pools.ts` and `network.ts`. A raw
  * certificate row carries the PEM certificate, its private key, the CSR, the
