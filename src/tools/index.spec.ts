@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the forty-six sketch tools', () => {
+  it('registers the forty-eight sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -19,6 +19,8 @@ describe('createDefaultCatalog', () => {
       'datasets_quota_report',
       'disks_list',
       'apps_list',
+      'app_engine_status',
+      'apps_update_summary',
       'vms_list',
       'vm_logs',
       'vm_devices',
@@ -156,6 +158,18 @@ describe('createDefaultCatalog', () => {
 
   it('advertises apps_list to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('apps_list');
+  });
+
+  it('advertises app_engine_status to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'app_engine_status',
+    );
+  });
+
+  it('advertises apps_update_summary to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'apps_update_summary',
+    );
   });
 
   it('advertises storage_pool_topology to a read-only credential', () => {

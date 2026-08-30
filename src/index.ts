@@ -91,6 +91,8 @@ export {
   quotaReport,
   disksList,
   appsList,
+  appEngineStatus,
+  appsUpdateSummary,
   vmsList,
   vmLogs,
   vmDevices,
