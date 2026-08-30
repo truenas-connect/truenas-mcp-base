@@ -302,6 +302,35 @@ a fact the tool asserts and you must keep.** Neither answer is the safe default,
 and a tool that copies whichever sibling it read first will land on the wrong one
 about half the time.
 
+### The boot pool is a separate read, and its scan record is unreported (#95)
+
+`pool.query` — which `storage_pool_status`, `storage_pool_topology` and
+`storage_scrub_history` all read — **does not list the boot pool**. The device
+the system runs from has its own verb, `boot.get_state`, and `boot_pool_status`
+(`src/tools/boot.ts`) is the only tool that reads it. A tool answering a question
+about "every pool" from `pool.query` is answering about the data pools, and its
+description has to say so — `boot_pool_status`'s says it from the other side,
+and the three above still read as covering every pool.
+
+`boot.get_state` carries `scan` and `expand` as open records, and this tool
+reports **neither**, in any form. The alternative was to reuse `pools.ts`'s
+`ScanRecord` reading, and the reason not to is where the line in `common.ts`
+falls: the *shape* of a ZFS scan record is common, but everything that reading
+does with it — `SCRUB` vs `RESILVER`, `NEVER_SCRUBBED`, `UNKNOWN` — is a
+vocabulary decided for data pools and is that family's own. Copying it into a
+second family is the drift `common.ts` was cut to stop; moving it there would
+move the vocabulary with it. So the boot pool's scrub outcome is a gap, it is
+named as one in the tool's description, and closing it means promoting the
+reading deliberately rather than as a side effect of this tool.
+
+**Two independent reads are two sections, each with its own `unavailable`.**
+`boot.get_state` and `boot.environment.query` fail separately, so neither may
+fail the tool — the same seam `system_health_report` and `fleet_compliance_report`
+use, and the reason `boot.ts` catches rather than throws. A section that could
+not be read still carries every field it promises, as nulls: `undefined`
+serializes to no key at all, and a caller would otherwise get a shape it was
+never told about.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
