@@ -441,25 +441,31 @@ describe('network_config', () => {
   });
 
   /**
-   * The three reads, canned. `config` and `summary` are spread over their
+   * The four reads, canned. `config` and `summary` are spread over their
    * defaults so a test naming one field keeps the rest; passing `null` for the
    * summary is how a test says the system answered with nothing this tool can
    * read, which is a different case from a summary missing one field.
+   *
+   * `pending` defaults to `false` — the settled system every other test in this
+   * block is about — so that a test reading a gateway is not also asserting
+   * that its fixture is provisional.
    */
   const read = async (
     config: Record<string, unknown> = {},
     summary: Record<string, unknown> | null = {},
     routes: unknown = [route()],
+    pending: unknown = false,
   ): Promise<Record<string, unknown>> => {
     const { ctx } = fakeSystem({
       ['network.configuration.config']: { ...CONFIG, ...config },
       ['network.general.summary']: summary === null ? null : { ...SUMMARY, ...summary },
       ['staticroute.query']: routes,
+      ['interface.has_pending_changes']: pending,
     });
     return (await networkConfig.handler(ctx, {})) as Record<string, unknown>;
   };
 
-  /** The same three reads, with the named ones rejecting instead. */
+  /** The same four reads, with the named ones rejecting instead. */
   const readFailing = async (
     failures: Partial<Record<string, unknown>>,
   ): Promise<Record<string, unknown>> => {
@@ -468,6 +474,7 @@ describe('network_config', () => {
         ['network.configuration.config']: CONFIG,
         ['network.general.summary']: SUMMARY,
         ['staticroute.query']: [route()],
+        ['interface.has_pending_changes']: false,
       },
       failures,
     );
@@ -476,6 +483,7 @@ describe('network_config', () => {
 
   it('reports the hostname, DNS, gateways and static routes from both sides', async () => {
     expect(await read()).toEqual({
+      changes_pending: false,
       hostname: 'nas',
       domain: 'example.com',
       search_domains: ['lab.example.com'],
@@ -527,6 +535,7 @@ describe('network_config', () => {
       { future_field: 'added by a later release' },
     );
     expect(Object.keys(result)).toEqual([
+      'changes_pending',
       'hostname',
       'domain',
       'search_domains',
@@ -640,17 +649,19 @@ describe('network_config', () => {
     });
   });
 
-  it('reports both failures where both supplementary reads fail', async () => {
+  it('names every supplementary read that failed', async () => {
     const result = await readFailing({
       ['network.general.summary']: new Error('summary refused'),
       ['staticroute.query']: new Error('routes refused'),
+      ['interface.has_pending_changes']: new Error('pending refused'),
     });
     expect(result['failures']).toEqual([
       { source: 'effective_values', error: 'summary refused' },
       { source: 'static_routes', error: 'routes refused' },
+      { source: 'changes_pending', error: 'pending refused' },
     ]);
     // And the configured side is still answered in full, which is the whole
-    // point of not letting either failure take the tool down.
+    // point of not letting any of them take the tool down.
     expect(result).toMatchObject({ hostname: 'nas', domain: 'example.com' });
   });
 
@@ -773,15 +784,58 @@ describe('network_config', () => {
     });
   });
 
-  it('asks for the configuration, the summary and the static routes', async () => {
+  it('reports a system with uncommitted network changes as having them pending', async () => {
+    expect(await read({}, {}, [route()], true)).toMatchObject({
+      changes_pending: true,
+      failures: [],
+    });
+  });
+
+  it('names a pending-changes read that failed, and reports it as unread', async () => {
+    // Null rather than false: a system whose commit state could not be read is
+    // not a system with nothing pending, and reading it as one is what would
+    // have a caller describe a configuration that reverts in minutes as
+    // settled.
+    expect(
+      await readFailing({ ['interface.has_pending_changes']: new Error('pending refused') }),
+    ).toMatchObject({
+      changes_pending: null,
+      failures: [{ source: 'changes_pending', error: 'pending refused' }],
+    });
+  });
+
+  it('answers the rest of the configuration where only the pending read failed', async () => {
+    const result = await readFailing({
+      ['interface.has_pending_changes']: new Error('pending refused'),
+    });
+    expect(result).toMatchObject({
+      hostname: 'nas',
+      domain: 'example.com',
+      ipv4_gateway: { configured: '192.168.1.1', in_effect: '192.168.1.1', source: 'STATIC' },
+      static_routes: [{ destination: '10.0.0.0/8', gateway: '192.168.1.254' }],
+    });
+  });
+
+  it('reports a pending state sent as something other than a boolean as unread', async () => {
+    // The read completed, so there is no failure to name — it answered a shape
+    // this tool cannot read, and null says that the same way the other reads do.
+    expect(await read({}, {}, [route()], 'yes')).toMatchObject({
+      changes_pending: null,
+      failures: [],
+    });
+  });
+
+  it('asks for the configuration, the summary, the static routes and the pending state', async () => {
     const { ctx, call, query } = fakeSystem({
       ['network.configuration.config']: CONFIG,
       ['network.general.summary']: SUMMARY,
       ['staticroute.query']: [],
+      ['interface.has_pending_changes']: false,
     });
     await networkConfig.handler(ctx, {});
     expect(call).toHaveBeenCalledWith('network.configuration.config');
     expect(call).toHaveBeenCalledWith('network.general.summary');
+    expect(call).toHaveBeenCalledWith('interface.has_pending_changes');
     expect(query).toHaveBeenCalledWith('staticroute.query');
   });
 });
