@@ -672,3 +672,372 @@ export const vmLogs: ReadOnlyTool = {
     }
   },
 };
+
+/**
+ * The virtual hardware attached to each VM: disks, network interfaces, display
+ * devices and passthrough hardware.
+ *
+ * `vms_list` reports what a VM has been given — its state, its CPUs, its memory
+ * — and nothing about what is attached to it, so "what disk is it booting
+ * from", "which bridge is its NIC on" and "what PCI device is passed through to
+ * it" have no answer in this catalog. They are also where "why will this VM not
+ * start" usually bottoms out: a missing disk, a NIC on an interface that no
+ * longer exists, a passthrough device the host has claimed.
+ *
+ * ONE STACK, NOT TWO, which is the same split `vm_logs` has and for the same
+ * reason. `vm.device.query` is the libvirt surface, so this reports devices for
+ * the machines `vms_list` reports with `source` `vm`. The incus-backed
+ * instances keep their devices inside the `virt.instance` record this catalog
+ * deliberately does not forward, and nothing here reports them.
+ *
+ * EACH DEVICE KIND IS MAPPED THROUGH ITS OWN ALLOWLIST rather than through one
+ * flattened row unioning every kind's fields. A flattened row would be mostly
+ * nulls on every device — a NIC has none of a disk's fields — and would absorb
+ * a field a later TrueNAS release adds to any one of the kinds. So the `dtype`
+ * the middleware discriminates on survives into the result, and `attributes`
+ * carries only the fields that kind actually has.
+ *
+ * `attributes` is null for a `dtype` this tool has no mapping for, and that is
+ * a case to expect rather than a defensive branch: the pinned client already
+ * declares an eighth kind, `ISCSI_DISK`, on the shape a device is CREATED with
+ * while leaving it out of the shape a query answers. A caller that treats a
+ * null `attributes` as "this device has no configuration" would report an
+ * iSCSI-backed disk as an empty device.
+ */
+
+/** One device as `vm.device.query` reports it, derived from the call (#91). */
+type VmDeviceEntry = ApiSurface['call']['vm.device.query']['entity'];
+
+/** The discriminated union of everything a device's `attributes` can be. */
+type VmDeviceAttributes = VmDeviceEntry['attributes'];
+
+/**
+ * One member of that union, as a partial.
+ *
+ * Partial because the declared shape is what the middleware is documented to
+ * send rather than the value received, and every field below is read through a
+ * guard anyway. Derived rather than named because the generator suffixes a
+ * colliding interface `$1`/`$2`/`$N` and the suffix a type carries in one
+ * release is not the one it carries in the next (#91) — but the FIELD names
+ * still want checking against the generated client, which is what this gives
+ * the seven readers below.
+ */
+type AttributesOf<D extends VmDeviceAttributes['dtype']> = Partial<
+  Extract<VmDeviceAttributes, { dtype: D }>
+>;
+
+/** A CD-ROM image attached to the VM. */
+interface CdromAttributes {
+  path: string | null;
+}
+
+/**
+ * A display device — the graphical console the VM is reachable on.
+ *
+ * `password` IS DELIBERATELY NOT REPORTED, IN ANY FORM. It is the passphrase
+ * the SPICE or VNC console is protected with, declared a plain `string` on this
+ * surface, and tool arguments and results are recorded verbatim in the audit
+ * trail (S3.3) — the same reasoning that keeps a cloud backup's passphrase and
+ * an rsync task's private key out of `automated_tasks_list` (#97). Naming the
+ * fields one by one rather than trimming the record is what keeps it out, and
+ * a later release adding a second credential-shaped field here is kept out by
+ * the same mechanism rather than by anyone noticing.
+ *
+ * This is not the console access path either: `vm.get_display_devices` and
+ * `vm.get_display_web_uri` mint access to a running console and are in no tool
+ * here. What this reports is where the console is configured to listen.
+ */
+interface DisplayAttributes {
+  type: string | null;
+  bind: string | null;
+  port: number | null;
+  web_port: number | null;
+  web: boolean | null;
+  resolution: string | null;
+}
+
+/** A virtual network interface. */
+interface NicAttributes {
+  type: string | null;
+  nic_attach: string | null;
+  mac: string | null;
+  trust_guest_rx_filters: boolean | null;
+}
+
+/** A host PCI device passed through to the VM. */
+interface PciAttributes {
+  pptdev: string | null;
+}
+
+/**
+ * The fields a RAW file and a zvol-backed disk describe identically.
+ *
+ * Shared because these five say the same thing on both kinds and are read the
+ * same way, not because the two kinds share a row: each still has its own
+ * allowlist below and its own fields beside these. `type` is the emulated
+ * controller (`AHCI`, `VIRTIO`) and is unrelated to `dtype`.
+ */
+interface DiskFileAttributes {
+  type: string | null;
+  logical_sectorsize: number | null;
+  physical_sectorsize: number | null;
+  iotype: string | null;
+  serial: string | null;
+}
+
+/** A raw disk image file on the host's filesystem. */
+interface RawAttributes extends DiskFileAttributes {
+  path: string | null;
+  exists: boolean | null;
+  boot: boolean | null;
+  size: number | null;
+}
+
+/** A disk backed by a zvol or a device path. */
+interface DiskAttributes extends DiskFileAttributes {
+  path: string | null;
+  create_zvol: boolean | null;
+  zvol_name: string | null;
+  zvol_volsize: number | null;
+}
+
+/** A USB device passed through to the VM. */
+interface UsbAttributes {
+  controller_type: string | null;
+  device: string | null;
+  vendor_id: string | null;
+  product_id: string | null;
+}
+
+/** Whatever kind of device this row turned out to be. */
+type DeviceAttributes =
+  | CdromAttributes
+  | DisplayAttributes
+  | NicAttributes
+  | PciAttributes
+  | RawAttributes
+  | DiskAttributes
+  | UsbAttributes;
+
+/** One attached device, in the shape this tool reports it. */
+interface VmDeviceRow {
+  id: number | null;
+  vm: number | null;
+  order: number | null;
+  dtype: string | null;
+  attributes: DeviceAttributes | null;
+}
+
+/** The five fields a RAW file and a DISK describe the same way. */
+function diskFileAttributes(held: AttributesOf<'RAW'> | AttributesOf<'DISK'>): DiskFileAttributes {
+  return {
+    type: textOrNull(held.type),
+    logical_sectorsize: numberOrNull(held.logical_sectorsize),
+    physical_sectorsize: numberOrNull(held.physical_sectorsize),
+    iotype: textOrNull(held.iotype),
+    serial: textOrNull(held.serial),
+  };
+}
+
+/**
+ * One device's configuration, read through the allowlist for its own kind.
+ *
+ * Null for a `dtype` this tool has no mapping for — see the file comment above
+ * for why that is an expected answer rather than an unreachable branch. The
+ * `dtype` itself is reported beside it either way, so a caller can tell a kind
+ * that was not mapped from a device whose configuration could not be read at
+ * all.
+ */
+function readAttributes(dtype: string, held: Record<string, unknown>): DeviceAttributes | null {
+  switch (dtype) {
+    case 'CDROM': {
+      const cdrom = held as AttributesOf<'CDROM'>;
+      return { path: textOrNull(cdrom.path) };
+    }
+    case 'DISPLAY': {
+      const display = held as AttributesOf<'DISPLAY'>;
+      return {
+        type: textOrNull(display.type),
+        bind: textOrNull(display.bind),
+        port: numberOrNull(display.port),
+        web_port: numberOrNull(display.web_port),
+        web: booleanOrNull(display.web),
+        resolution: textOrNull(display.resolution),
+      };
+    }
+    case 'NIC': {
+      const nic = held as AttributesOf<'NIC'>;
+      return {
+        type: textOrNull(nic.type),
+        nic_attach: textOrNull(nic.nic_attach),
+        mac: textOrNull(nic.mac),
+        trust_guest_rx_filters: booleanOrNull(nic.trust_guest_rx_filters),
+      };
+    }
+    case 'PCI': {
+      const pci = held as AttributesOf<'PCI'>;
+      return { pptdev: textOrNull(pci.pptdev) };
+    }
+    case 'RAW': {
+      const raw = held as AttributesOf<'RAW'>;
+      return {
+        ...diskFileAttributes(raw),
+        path: textOrNull(raw.path),
+        exists: booleanOrNull(raw.exists),
+        boot: booleanOrNull(raw.boot),
+        size: numberOrNull(raw.size),
+      };
+    }
+    case 'DISK': {
+      const disk = held as AttributesOf<'DISK'>;
+      return {
+        ...diskFileAttributes(disk),
+        path: textOrNull(disk.path),
+        create_zvol: booleanOrNull(disk.create_zvol),
+        zvol_name: textOrNull(disk.zvol_name),
+        zvol_volsize: numberOrNull(disk.zvol_volsize),
+      };
+    }
+    case 'USB': {
+      const usb = held as AttributesOf<'USB'>;
+      // The identifiers are one level down, in a record the client declares
+      // optional and nullable. Both are null where it held none, which is the
+      // same answer this file gives for every unreadable field.
+      const identifiers = recordOrNull(usb.usb) ?? {};
+      return {
+        controller_type: textOrNull(usb.controller_type),
+        device: textOrNull(usb.device),
+        vendor_id: textOrNull(identifiers['vendor_id']),
+        product_id: textOrNull(identifiers['product_id']),
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * One device row.
+ *
+ * The envelope is read back as a partial of the derived entity so the four
+ * field names are checked against the generated client, and through
+ * `recordOrNull` first so a row that is not an object at all reports four nulls
+ * rather than throwing and taking every other device down with it.
+ *
+ * A row this tool could not read is still listed. Dropping it would shorten the
+ * list towards "the VM has no such device", which is a claim about the VM's
+ * hardware that the read never established (#93) — and on this tool it is the
+ * claim most likely to be acted on, since an absent device is exactly what a
+ * caller is looking for when a VM will not start.
+ */
+function readDevice(entry: unknown): VmDeviceRow {
+  const row = (recordOrNull(entry) ?? {}) as Partial<VmDeviceEntry>;
+  const held = recordOrNull(row.attributes);
+  const dtype = held === null ? null : textOrNull(held['dtype']);
+  return {
+    id: numberOrNull(row.id),
+    vm: numberOrNull(row.vm),
+    order: numberOrNull(row.order),
+    dtype,
+    attributes: dtype === null || held === null ? null : readAttributes(dtype, held),
+  };
+}
+
+/** What a read that answered with something other than a list is reported as. */
+const NOT_A_DEVICE_LIST = 'the system answered with something other than a list of devices';
+
+export const vmDevices: ReadOnlyTool = {
+  name: 'vm_devices',
+  description:
+    'The virtual hardware attached to each virtual machine on a TrueNAS ' +
+    'system: disks, CD-ROMs, network interfaces, display devices, and USB and ' +
+    'PCI hardware passed through from the host. `vms_list` reports what a VM ' +
+    'has been given — its state, its CPUs, its memory — and nothing about what ' +
+    'is attached to it, which is what this answers. ONE DEVICE PER ENTRY, ' +
+    'ACROSS EVERY VM ON THE SYSTEM: this is not grouped by machine, and `vm` ' +
+    'is the numeric id of the machine the device belongs to, WHICH IS THE `id` ' +
+    "`vms_list` REPORTS FOR AN ENTRY WHOSE `source` IS `vm` — that is how a " +
+    'device is attributed to a machine, and there is no other join. `vm` is ' +
+    'null where the system reported no id this tool could read, and such a ' +
+    'device cannot be attributed to any machine. ONLY THE OLDER LIBVIRT-BACKED ' +
+    'VMs HAVE DEVICES HERE, the ones `vms_list` reports with `source` `vm`. ' +
+    'TrueNAS also runs newer incus-backed instances — `source` `virt_instance` ' +
+    '— and THIS TOOL REPORTS NO DEVICE FOR ANY OF THEM, because the devices of ' +
+    'those machines are not on this API surface at all. An empty result on a ' +
+    'system whose VMs are all incus-backed is that, and not a fleet of ' +
+    'machines with no hardware attached. `id` is the device\'s own identifier ' +
+    'and `order` the position TrueNAS attaches it in, both null where the ' +
+    'system reported none this tool could read. `dtype` IS WHAT KIND OF DEVICE ' +
+    'IT IS and decides which fields `attributes` carries: `DISK` and `RAW` are ' +
+    'disks, `CDROM` an image, `NIC` a network interface, `DISPLAY` the ' +
+    'graphical console, `PCI` and `USB` host hardware passed through. EACH ' +
+    'KIND IS REPORTED THROUGH ITS OWN SET OF FIELDS and no field of one kind ' +
+    'appears on another, so read `dtype` before reading `attributes`. For ' +
+    '`DISK`: `path` is what backs it, `zvol_name` and `zvol_volsize` the zvol ' +
+    'where one does, `create_zvol` whether TrueNAS made that zvol itself. For ' +
+    '`RAW`: `path` is the image file, `exists` whether the system says that ' +
+    'file is there, `boot` whether the VM boots from it, `size` how big it is. ' +
+    'Both also carry `type`, the emulated controller (`AHCI`, `VIRTIO`), which ' +
+    'IS NOT `dtype`; `logical_sectorsize` and `physical_sectorsize`, which the ' +
+    'API declares as 512 or 4096; `iotype`; and `serial`, the serial number ' +
+    'the guest sees. NO UNIT IS ASSERTED FOR `size` OR `zvol_volsize`: this API ' +
+    'declares them as bare numbers, nothing in it states what they count, and ' +
+    'they are reported under the names the system uses and must not be ' +
+    'converted. For `CDROM`: `path` is the image. For `NIC`: `nic_attach` is ' +
+    'the host interface or bridge it is attached to — A NIC WHOSE ' +
+    '`nic_attach` NAMES AN INTERFACE `network_interfaces` DOES NOT LIST IS A ' +
+    'COMMON REASON A VM WILL NOT START — `mac` its MAC address, `type` the ' +
+    'emulated card (`E1000`, `VIRTIO`), `trust_guest_rx_filters` whether the ' +
+    'guest may set receive filters. For `DISPLAY`: `type` is `SPICE` or `VNC`, ' +
+    '`bind` the address the console listens on, `port` and `web_port` where, ' +
+    '`web` whether the browser console is offered, `resolution` the configured ' +
+    'size. THE CONSOLE PASSWORD IS NOT REPORTED IN ANY FORM, not even as ' +
+    'whether one is set, and this tool gives no way to reach a running ' +
+    'console. For `PCI`: `pptdev` is the host device passed through. For ' +
+    '`USB`: `device` is the host device, `vendor_id` and `product_id` identify ' +
+    'it, `controller_type` is the emulated USB controller. `attributes` IS ' +
+    'NULL WHERE `dtype` IS A KIND THIS TOOL HAS NO MAPPING FOR — TrueNAS ' +
+    'already defines at least one more kind (`ISCSI_DISK`) than this API ' +
+    'surface answers queries with — SO A NULL `attributes` BESIDE A NON-NULL ' +
+    '`dtype` IS A DEVICE THAT IS THERE AND CONFIGURED, whose configuration ' +
+    'this tool does not read, and never a device with nothing configured. ' +
+    '`attributes` and `dtype` are BOTH null where the device\'s configuration ' +
+    'could not be read at all; such a row is still listed rather than dropped, ' +
+    'because a shorter list would say the machine does not have that device, ' +
+    'which is exactly the wrong answer to give about a VM that will not start. ' +
+    'Every field is null where the system reported no value this tool could ' +
+    'read, which is never the same as a device configured without one. AN ' +
+    'EMPTY `devices` LIST IS A SYSTEM WITH NO LIBVIRT-BACKED VM DEVICES AT ' +
+    'ALL, which includes a system with no libvirt-backed VMs; a machine that ' +
+    'appears in `vms_list` and in no row here has no devices attached. This ' +
+    'tool reports configuration and not liveness: it does not say whether a ' +
+    'device is currently in use, whether the host still has the hardware, or ' +
+    'why a VM failed to start — `vm_logs` is what carries that. It does not ' +
+    'attach, detach or reconfigure anything. NO field beyond those named here ' +
+    'is returned, whatever a later TrueNAS release adds to any device kind.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }) {
+    let rows: unknown;
+    try {
+      rows = await firstValueFrom(system.client.api.query('vm.device.query'));
+    } catch (reason) {
+      // Raised rather than reported beside an empty list, which is the
+      // difference from `vms_list`: there is one read here and no second
+      // answer to preserve, and an empty `devices` list means something
+      // definite — no VM on this system has any device attached — that a read
+      // which never happened has not established.
+      throw new Error(`The virtual machine devices could not be listed: ${errorText(reason)}`, {
+        cause: reason,
+      });
+    }
+    // `query` types its answer as a list of rows, and that is a claim about
+    // what the middleware sends rather than the value received: the call
+    // directory declares this method as answering a union that also admits a
+    // bare row and a count. Checked here so a non-list is that message rather
+    // than a `.map` throwing out of the handler.
+    if (!Array.isArray(rows)) throw new Error(NOT_A_DEVICE_LIST);
+    return { devices: rows.map(readDevice) };
+  },
+};

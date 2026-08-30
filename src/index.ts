@@ -93,6 +93,7 @@ export {
   appsList,
   vmsList,
   vmLogs,
+  vmDevices,
   alertsList,
   alertSettings,
   snapshotsList,

@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the forty-five sketch tools', () => {
+  it('registers the forty-six sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -21,6 +21,7 @@ describe('createDefaultCatalog', () => {
       'apps_list',
       'vms_list',
       'vm_logs',
+      'vm_devices',
       'alerts_list',
       'snapshots_list',
       'replication_status',
@@ -143,6 +144,10 @@ describe('createDefaultCatalog', () => {
 
   it('advertises vms_list to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('vms_list');
+  });
+
+  it('advertises vm_devices to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('vm_devices');
   });
 
   it('advertises vm_logs to a read-only credential', () => {
