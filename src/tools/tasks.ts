@@ -840,7 +840,7 @@ interface InitShutdownScriptRow {
   script: string | null;
   when: string | null;
   enabled: boolean | null;
-  timeout_seconds: number | null;
+  timeout: number | null;
 }
 
 /**
@@ -865,7 +865,11 @@ function mapInitShutdownScript(row: unknown): InitShutdownScriptRow {
     script: textOrNull(held['script']),
     when: textOrNull(held['when']),
     enabled: booleanOrNull(held['enabled']),
-    timeout_seconds: numberOrNull(held['timeout']),
+    // The middleware's own name, kept unsuffixed: the pinned surface declares a
+    // bare number and states no unit for it, and nothing about a timeout fixes
+    // one. Suffixing it would assert a unit this tool never read — see the
+    // decision in `CLAUDE.md`.
+    timeout: numberOrNull(held['timeout']),
   };
 }
 
@@ -924,13 +928,21 @@ export const automatedTasksList: ReadOnlyTool = {
     'output is discarded or mailed is NOT reported. ' +
     'In `rsync_tasks`: `path` is the local end and `direction` is `PUSH`, ' +
     'copying from this system out to the remote, or `PULL`, copying onto it. ' +
-    '`mode` is `SSH` or `MODULE`, which is what says whether `remote_host`, ' +
-    '`remote_port` and `remote_path` or `remote_module` describe the far end; ' +
-    'the fields that do not apply to a task\'s mode are null, and that null is ' +
-    'not a failure to read them. `ssh_credential_id` and `ssh_credential_name` ' +
+    '`mode` is `SSH` or `MODULE` — how the task reaches the remote end. ' +
+    '`remote_host`, `remote_port`, `remote_module` and `remote_path` are the ' +
+    'remote end as the TASK ITSELF records it, and WHICH OF THEM A TASK ' +
+    'CARRIES DEPENDS ON ITS MODE; each is null where the task records no ' +
+    'value, which for a field its mode does not use is the normal case and is ' +
+    'not a failure to read it. `ssh_credential_id` and `ssh_credential_name` ' +
     'identify the stored SSH credential and are the ONLY account of it: no ' +
-    'private key or passphrase appears anywhere in this result. `description` ' +
-    'is the name the task was given. ' +
+    'private key, passphrase or host key appears anywhere in this result. THAT ' +
+    "CREDENTIAL CAN ITSELF HOLD THE REMOTE SYSTEM'S HOSTNAME AND PORT, and " +
+    'this tool does not read inside it — so a null `remote_host` on a task ' +
+    'that names a credential is NOT evidence that the task has no remote host. ' +
+    'NOTHING IN THIS CATALOG DESCRIBES A STORED SSH CREDENTIAL beyond the id ' +
+    'and name here — `cloud_credentials_list` covers the cloud provider ' +
+    'credentials a cloud sync or cloud backup task uses, which are a different ' +
+    'store. `description` is the name the task was given. ' +
     'In `cloud_backup_tasks`: `path` is the local end, `bucket` and `folder` ' +
     'the remote one, and `bucket` is null on a provider that has no buckets. ' +
     '`credential_id` and `credential_name` identify the stored cloud ' +
@@ -964,11 +976,12 @@ export const automatedTasksList: ReadOnlyTool = {
     'run that ended and null under every other state including `RUNNING`. ' +
     '`error` is the text recorded with that run and is null where none was ' +
     'recorded, so a task in `FAILED` with a null `error` failed for a reason ' +
-    'the system did not record; it has not succeeded. CRON JOBS AND ' +
-    'INIT/SHUTDOWN SCRIPTS CARRY NO RUN RECORD AT ALL — the middleware does ' +
-    'not run them as jobs — so those two sections report no `state`, ' +
-    '`finished_at` or `error`, and nothing here says whether a cron job has ' +
-    'ever succeeded. ' +
+    'the system did not record; it has not succeeded. A CRON JOB ROW AND AN ' +
+    'INIT/SHUTDOWN SCRIPT ROW CARRY NO RUN RECORD AT ALL, so those two ' +
+    'sections report no `state`, `finished_at` or `error`, and NOTHING HERE ' +
+    'SAYS WHETHER A CRON JOB HAS EVER SUCCEEDED — an entry in either section ' +
+    'is a statement that the work is arranged and none at all about how it ' +
+    'went. ' +
     'In `init_shutdown_scripts`: THESE ARE NOT SCHEDULED AND CARRY NO ' +
     'SCHEDULE. They run at a point in the system\'s lifecycle, which `when` ' +
     'names — `PREINIT` and `POSTINIT` are two points during startup and ' +
@@ -978,8 +991,10 @@ export const automatedTasksList: ReadOnlyTool = {
     'is a shell command inlined into the entry, carrying the same caveat as a ' +
     'cron job\'s, and `script` is the PATH to a script file on the system, ' +
     'whose CONTENTS ARE NOT READ OR RETURNED. The one that does not apply is ' +
-    'null. `comment` is the free-text label the entry was given. ' +
-    '`timeout_seconds` is how long the system waits for it before moving on. ' +
+    'null. `comment` is the free-text label the entry was given. `timeout` is ' +
+    'how long the system waits for the entry before moving on, as the bare ' +
+    'number the system reports. NO UNIT IS REPORTED FOR IT — the API states ' +
+    'none — so read it as itself and ask rather than converting it. ' +
     'This tool only reports. It does not create, edit, run, enable, disable or ' +
     'delete any task, and it does not report the output of one.',
   inputSchema: { type: 'object', properties: {} },
@@ -1215,9 +1230,10 @@ export const tasksRecentRuns: ReadOnlyTool = {
     'secret passes through this tool. This lists jobs, which are operations ' +
     'the system ran; what is arranged to start some of them is ' +
     '`snapshot_tasks_list`, `cloudsync_tasks_list` and `automated_tasks_list`, ' +
-    'and a task that has never run has no job here at all. Note that a cron ' +
-    'job and an init/shutdown script are not run as jobs, so neither appears ' +
-    'here however often it has run.',
+    'and a task that has never run has no job here at all. Note that the ' +
+    'SCHEDULED runs of a cron job, and an init/shutdown script running at boot ' +
+    'or shutdown, do not go through the job system and so DO NOT APPEAR HERE ' +
+    'AT ALL — an empty result says nothing about either.',
   inputSchema: {
     type: 'object',
     properties: {

@@ -266,14 +266,18 @@ file a reviewer of that tool will open.
 Two things that rule does not decide on its own:
 
 - **A module whose spec would exceed 1,500 lines splits by tool, not by
-  bin-packing.** `reporting.ts` was the first: its five blocks come to 2,405
+  bin-packing.** `reporting.ts` is the only one: its five blocks come to 2,405
   lines, so each takes a spec named for the tool — `reporting-utilisation.spec.ts`,
-  `system-health-report.spec.ts`, and so on. `tasks.ts` split the same way when
-  `automated_tasks_list` (#97) would have pushed `tasks.spec.ts` past the line,
-  so `automated-tasks-list.spec.ts` is that tool's and `tasks.spec.ts` keeps the
-  other three. A split takes the tools it has to and leaves the rest where they
-  are; every filename then still says exactly what is in it, which a
-  `reporting-2.spec.ts` would not.
+  `system-health-report.spec.ts`, and so on. Every filename then still says
+  exactly what is in it, which a `reporting-2.spec.ts` would not.
+
+  **1,500 is the trigger, and it is checked rather than felt.** #97 added a
+  fourth tool to `tasks.ts` and started by giving it its own spec, which read as
+  following this bullet and was not: `tasks.spec.ts` was 816 lines and the new
+  block 495, so the merged file is about 1,311 and the exception was never met.
+  The tests went back into `tasks.spec.ts`. A spec that is merely long is not a
+  spec that has to split, and the default above — a new tool's tests go in its
+  module's spec — is what governs until the number says otherwise.
 - **The catalog-wide test is not any tool's.** The exact-list assertion over
   `createDefaultCatalog()` is about `src/tools/index.ts`, so it lives in
   `index.spec.ts` under the same rule as everything else. Registering a tool
@@ -422,13 +426,27 @@ concerns arguments rather than response data. The description says so instead.
 The one place this repository *does* treat response data as credential-shaped is
 the minted download URL in #72, which is a string this code produces.
 
-**The source stays in `tasks.ts` and only the spec is a new file.** The cron
+**Everything stays in the tasks family, source and spec alike.** The cron
 rendering (`describeSchedule` and the helpers under it) and the last-run reading
 (`lastRunState`, `jobFinishedAt`, `jobError`) are this family's own vocabulary,
 not `common.ts`'s, and re-deriving a second opinion about what a cron expression
 means was the failure mode most worth avoiding — so the tool is written beside
-them and calls them in place. `tasks.spec.ts` would have passed 1,500 lines, so
-the tests are `automated-tasks-list.spec.ts` under the split rule in #87.
+them and calls them in place. The tests are in `tasks.spec.ts` under #87's
+default; the merged file is about 1,311 lines, so the split exception there does
+not apply and was not taken.
+
+**One field this tool does NOT group is the rsync remote end.** A task carries
+`remotehost`, `remoteport`, `remotemodule` and `remotepath` beside a `mode` of
+`SSH` or `MODULE`, and the obvious description — "mode says which of these
+describe the far end" — is a claim the pinned surface does not make: nothing in
+`RsyncTaskEntry` ties a field to a mode, and an SSH task's hostname and port can
+instead live inside the `SSHCredentials` this tool deliberately does not read.
+So each field is described as what the TASK ITSELF records, a null is "the task
+records no value", and the description says outright that a null `remote_host`
+beside a named credential is not evidence the task has no remote host.
+**Grouping fields under a discriminator is the same defect as a description
+promising more than the normalization delivers** — check that the payload states
+the grouping before writing one.
 
 ## Conventions
 
