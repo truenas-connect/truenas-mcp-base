@@ -82,6 +82,7 @@ export {
   rebootInfo,
   auditLogQuery,
   auditConfig,
+  securityConfig,
   poolStatus,
   poolTopology,
   scrubHistory,

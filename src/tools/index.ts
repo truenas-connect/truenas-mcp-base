@@ -18,6 +18,7 @@ import {
   reportingUtilisation,
   systemHealthReport,
 } from '@/tools/reporting';
+import { securityConfig } from '@/tools/security';
 import { servicesStatus } from '@/tools/services';
 import { shareAccess, sharesList } from '@/tools/shares';
 import { createSnapshot, snapshotsList } from '@/tools/snapshots';
@@ -26,7 +27,7 @@ import { auditConfig, auditLogQuery, rebootInfo, systemInfo, updateStatus } from
 import { cloudsyncTasksList, snapshotTasksList, tasksRecentRuns } from '@/tools/tasks';
 import { vmLogs, vmsList } from '@/tools/vms';
 
-/** The sketch's catalog: forty-one read-only tools plus one mutating tool. */
+/** The sketch's catalog: forty-two read-only tools plus one mutating tool. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -34,6 +35,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(rebootInfo);
   catalog.register(auditLogQuery);
   catalog.register(auditConfig);
+  catalog.register(securityConfig);
   catalog.register(poolStatus);
   catalog.register(poolTopology);
   catalog.register(scrubHistory);
@@ -105,6 +107,7 @@ export {
   reportingSpaceTrends,
   reportingUtilisation,
   scrubHistory,
+  securityConfig,
   servicesStatus,
   shareAccess,
   sharesList,
