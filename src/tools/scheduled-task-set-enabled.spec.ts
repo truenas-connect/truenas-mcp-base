@@ -162,6 +162,11 @@ describe('scheduled_task_set_enabled', () => {
     }
     expect(description).toContain('INIT/SHUTDOWN SCRIPTS ARE NOT COVERED');
     expect(description).toContain('ONLY THE `enabled` FIELD IS SENT');
+    // The gap this tool names has to name the tool that fills it. This
+    // description said no tool here switched one on or off, which stopped being
+    // true the moment `automated_task_set_enabled` landed — a caller routing on
+    // it would refuse a request the catalog can serve.
+    expect(description).toContain('`automated_task_set_enabled`');
   });
 
   it('does not let `changed: false` claim the task was already in the requested state', () => {

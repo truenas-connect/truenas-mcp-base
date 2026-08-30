@@ -131,4 +131,5 @@ export {
   alertsRestore,
   scheduledTaskSetEnabled,
   cloudsyncRun,
+  automatedTaskSetEnabled,
 } from '@/tools/index';

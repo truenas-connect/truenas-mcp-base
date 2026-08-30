@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the fifty-four sketch tools', () => {
+  it('registers the fifty-five sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -59,6 +59,7 @@ describe('createDefaultCatalog', () => {
       'alerts_restore',
       'scheduled_task_set_enabled',
       'cloudsync_run',
+      'automated_task_set_enabled',
     ]);
   });
 
@@ -77,6 +78,12 @@ describe('createDefaultCatalog', () => {
   it('does not advertise cloudsync_run to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(
       'cloudsync_run',
+    );
+  });
+
+  it('does not advertise automated_task_set_enabled to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(
+      'automated_task_set_enabled',
     );
   });
 

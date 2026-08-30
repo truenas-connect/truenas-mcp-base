@@ -1105,6 +1105,67 @@ following the job is named in the step's *description* instead, because a step's
 `params` are the exact params a call runs with and the job id does not exist
 until the approved call has been made.
 
+### A name broader than the tool is paid for in the description and the plan (#126)
+
+`automated_task_set_enabled` switches an init/shutdown script on or off, and
+that is the ONLY thing it does — while `automated_tasks_list`, the tool it takes
+its name and its ids from, has four sections and three of them are switched by
+`scheduled_task_set_enabled` instead. The name is therefore broader than the
+tool, which is ordinarily the finding rather than the design: it is
+`storage_scrub_history` promising history the data cannot hold, moved up from a
+field to a tool name.
+
+**It was taken deliberately, and what makes it survivable is worth naming
+because a later tool will face the same choice.** #121 established that a tool
+named for a category may not accept a member of another one, which left the
+excluded kind needing a name that claims no schedule; `automated_task_set_enabled`
+is that name, and the alternative — `init_shutdown_script_set_enabled` — says
+exactly what the tool does and would need renaming the day a second
+non-scheduled kind arrives. Breadth was chosen over precision, so three things
+carry the scope the name does not:
+
+- **The description states the boundary FIRST**, before anything about the
+  outcome: which of the four sections the id comes from, and which tool takes
+  the other three.
+- **The `id` argument's own description repeats it**, because that is what a
+  caller reads when it is choosing a number.
+- **The plan is what actually stops a mis-aimed id.** Task ids are per-table
+  integers, so a cron job's id 3 is also a script's id 3, and unlike #121 there
+  is no discriminator to require — one kind means nothing to discriminate. What
+  remains is that an approver reading *"the init/shutdown script with comment
+  ..."* sees something that is not the cron job they meant. **Where a tool
+  cannot detect the wrong argument, the plan has to make it recognisable**, and
+  that is a reason for the plan to name an entity in human terms over and above
+  #121's.
+
+**Ask which way a name is wrong before accepting it.** A name promising a
+category it does not cover is recoverable this way; a name promising a
+GUARANTEE the normalization does not deliver is not, because no description
+undoes a field that reads as established.
+
+### Where a listing's own vocabulary runs out, point rather than re-gloss (#126)
+
+The plan for this tool cannot end with `describeTask`'s schedule phrase — an
+init/shutdown script carries no cron record, and rendering one would be the
+tool's own fiction about when the work happens (#97). What replaces it is the
+`when` the row actually carries, passed through as the system spelled it, plus a
+pointer at `automated_tasks_list` as the place each lifecycle point is
+described.
+
+**The three points are deliberately NOT glossed a second time here.**
+`automated_tasks_list`'s description already says what `PREINIT`, `POSTINIT` and
+`SHUTDOWN` name; a second account written into a plan is a second opinion that
+can drift from the first, which is the same argument `TRANSFER_ENDS` makes for
+restating `cloudsync_tasks_list`'s reading of `direction` rather than deriving
+its own, and the same argument `schedulePhrase` makes for pointing at the tool
+that reports the cron fields it will not put into English.
+
+**A lifecycle point that could not be read is stated, and NOT defaulted to
+startup.** An approver told nothing reads the silence as "it runs at boot" — and
+a `SHUTDOWN` script is the one where switching it off at the wrong moment costs
+most, which is `transferModeSentence`'s refusal to default to the harmless mode
+in a second family.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
