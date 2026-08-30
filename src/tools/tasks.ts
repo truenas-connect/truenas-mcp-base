@@ -1359,8 +1359,11 @@ export const tasksRecentRuns: ReadOnlyTool = {
  * scheduled: it runs at a point in the system's lifecycle, carries no cron
  * fields and reports no `schedule` at all, which is why `automated_tasks_list`
  * is not called `scheduled_tasks_list`. Accepting one under a tool named
- * `scheduled_task_set_enabled` would put that promise back one level down. It
- * needs a tool whose name does not claim a schedule, which is its own ticket.
+ * `scheduled_task_set_enabled` would put that promise back one level down. The
+ * tool whose name does not claim a schedule is
+ * {@link automatedTaskSetEnabled}, below, and both descriptions name the other
+ * — a caller routing on this one alone would otherwise refuse a request the
+ * catalog can serve.
  *
  * ONLY `enabled` IS SENT. These are partial updates, so a tool that round-trips
  * more of the row than it was asked to change can silently revert a concurrent
@@ -1616,16 +1619,40 @@ interface TaskSwitch {
 }
 
 /**
- * The caller's arguments, or the error naming what is wrong with them.
+ * The two arguments every switching tool here takes, or the error naming what
+ * is wrong with them.
  *
- * Strict on all three, as `snapshots_create` is about `recursive` and for a
- * sharper version of the same reason: coercing `"false"` to true would switch
- * ON a backup task the caller asked to switch off, and a kind read loosely
- * would act on a different table's id `3`. There is nothing here a wrong
+ * Strict on both, as `snapshots_create` is about `recursive` and for a sharper
+ * version of the same reason: coercing `"false"` to true would switch ON a
+ * backup task the caller asked to switch off. There is nothing here a wrong
  * reading answers a narrower question — it answers a different one.
  *
- * `id` must be a whole number: the middleware holds these under integer
- * primary keys, and `3.5` is not one of them.
+ * `id` must be a whole number: the middleware holds these under integer primary
+ * keys, and `3.5` is not one of them.
+ *
+ * Shared by {@link parseSwitch} and {@link automatedTaskSetEnabled} rather than
+ * written twice. Two copies of a validation are two wordings of one refusal the
+ * moment either is edited, which is the drift `common.ts` was cut to stop; it
+ * is not in `common.ts` because the argument names are this family's own.
+ */
+function parseIdAndEnabled(args: Record<string, unknown>): { id: number; enabled: boolean } {
+  const id = args['id'];
+  if (typeof id !== 'number' || !Number.isInteger(id)) {
+    throw new Error('"id" is required and must be a whole number');
+  }
+  const enabled = args['enabled'];
+  if (typeof enabled !== 'boolean') {
+    throw new Error('"enabled" is required and must be a boolean');
+  }
+  return { id, enabled };
+}
+
+/**
+ * The caller's arguments, or the error naming what is wrong with them.
+ *
+ * The kind is checked first and separately, because a kind read loosely would
+ * act on a different table's id `3` — and it is checked before the other two so
+ * that the message a caller gets names the argument that is most likely wrong.
  */
 function parseSwitch(args: Record<string, unknown>): TaskSwitch {
   const kind = args['kind'];
@@ -1635,15 +1662,7 @@ function parseSwitch(args: Record<string, unknown>): TaskSwitch {
       `"kind" is required and must be one of ${TASK_KINDS.map((one) => one.kind).join(', ')}`,
     );
   }
-  const id = args['id'];
-  if (typeof id !== 'number' || !Number.isInteger(id)) {
-    throw new Error('"id" is required and must be a whole number');
-  }
-  const enabled = args['enabled'];
-  if (typeof enabled !== 'boolean') {
-    throw new Error('"enabled" is required and must be a boolean');
-  }
-  return { spec, id, enabled };
+  return { spec, ...parseIdAndEnabled(args) };
 }
 
 /**
@@ -1698,6 +1717,75 @@ function readParams(id: number): unknown {
   return [[['id', '=', id]], {}];
 }
 
+/**
+ * The plan's first step: the read `execute` makes before the mutation.
+ *
+ * One wording for both switching tools. A step that said "changes nothing" in
+ * one tool and something subtly different in the other would be two accounts of
+ * one call, and this is the sentence a person reads before approving.
+ */
+function readStep(method: string, noun: string, id: number): PlanStep {
+  return {
+    method,
+    params: readParams(id),
+    description:
+      `Read this system's ${noun} with id ${id}, to report whether it was ` +
+      'already in the state this call moves it to. Changes nothing.',
+  };
+}
+
+/**
+ * What a switching tool reports about the change it just made, given the read
+ * before the call and the response to it.
+ *
+ * Shared by both switching tools because every field is derived the same way,
+ * and derived wrongly in ways that are easy to reintroduce one copy at a time:
+ * `changed` compares the two READINGS rather than the request, `confirmed` is
+ * the separate fact that the response agrees with the request, and both are
+ * null wherever a reading behind them is. What is NOT here is anything naming
+ * the thing switched — the caller adds its own `id` and, where it has one,
+ * `kind`.
+ *
+ * The read is caught rather than thrown for {@link scheduledTaskSetEnabled}'s
+ * reason: it exists to describe the outcome, and letting it fail the call would
+ * lose an approval the user has already given for a mutation that is still safe
+ * to make. The update is then issued unconditionally, whatever the read said —
+ * skipping it for a row the read no longer lists would be `execute` branching
+ * on state read at execution time, which is what the confirmation token cannot
+ * bind.
+ */
+async function switchOutcome(
+  read: () => Promise<unknown>,
+  update: () => Promise<unknown>,
+  id: number,
+  enabled: boolean,
+): Promise<Record<string, unknown>> {
+  let row: Record<string, unknown> | null = null;
+  let lookupError: string | null = null;
+  try {
+    row = rowWithId(await read(), id);
+  } catch (reason) {
+    lookupError = errorText(reason);
+  }
+  const updated = await update();
+  const previous = row === null ? null : booleanOrNull(row['enabled']);
+  // The update methods answer with the updated entity, so what the response
+  // says about `enabled` is the state that actually resulted — read back
+  // through the same guard rather than echoing what was asked for.
+  const resulting = booleanOrNull(recordOrNull(updated)?.['enabled']);
+  return {
+    lookup: lookupError !== null ? 'UNREADABLE' : row === null ? 'NOT_FOUND' : 'FOUND',
+    lookup_error: lookupError,
+    previously_enabled: previous,
+    resulting_enabled: resulting,
+    // Both readings or nothing. A `changed` derived from the request rather
+    // than from the response would report a call the system did not apply as
+    // having changed something.
+    changed: previous === null || resulting === null ? null : previous !== resulting,
+    confirmed: resulting === null ? null : resulting === enabled,
+  };
+}
+
 export const scheduledTaskSetEnabled: MutatingTool = {
   name: 'scheduled_task_set_enabled',
   description:
@@ -1714,8 +1802,10 @@ export const scheduledTaskSetEnabled: MutatingTool = {
     '`cloud_backup`, from its `cloud_backup_tasks` section. Every one of those ' +
     'listing tools reports the `id` this tool takes, so no second lookup is ' +
     'needed. INIT/SHUTDOWN SCRIPTS ARE NOT COVERED: they are not scheduled — ' +
-    'they run at a point in the system\'s lifecycle — and no tool here ' +
-    'switches one on or off. `enabled` is the state to move the task to, true ' +
+    'they run at a point in the system\'s lifecycle — and ' +
+    '`automated_task_set_enabled` is the tool that switches one of those on or ' +
+    'off, taking its ids from the `init_shutdown_scripts` section of ' +
+    '`automated_tasks_list`. `enabled` is the state to move the task to, true ' +
     'or false, and is required: there is no toggle, because a toggle acts on a ' +
     'state read after the plan was approved. ONLY THE `enabled` FIELD IS SENT. ' +
     'The schedule, paths, retention, credentials and every other setting are ' +
@@ -1813,13 +1903,7 @@ export const scheduledTaskSetEnabled: MutatingTool = {
       );
     }
     return [
-      {
-        method: spec.readMethod,
-        params: readParams(id),
-        description:
-          `Read this system's ${spec.noun} with id ${id}, to report whether it was ` +
-          'already in the state this call moves it to. Changes nothing.',
-      },
+      readStep(spec.readMethod, spec.noun, id),
       {
         method: spec.updateMethod,
         params: [id, { enabled }],
@@ -1831,39 +1915,16 @@ export const scheduledTaskSetEnabled: MutatingTool = {
   },
   async execute(ctx, rawArgs) {
     const { spec, id, enabled } = parseSwitch(rawArgs);
-    // Caught rather than thrown: this read exists to describe the outcome, and
-    // letting it fail the call would lose an approval the user has already
-    // given for a mutation that is still safe to make. The result then says the
-    // prior state could not be established.
-    let row: Record<string, unknown> | null = null;
-    let lookupError: string | null = null;
-    try {
-      row = rowWithId(await spec.read(ctx, id), id);
-    } catch (reason) {
-      lookupError = errorText(reason);
-    }
-    // Unconditional, whatever the read said. Skipping the update for a task the
-    // read no longer lists would be `execute` branching on state read at
-    // execution time, which is what the confirmation token cannot bind.
-    const updated = await spec.update(ctx, id, enabled);
-    const previous = row === null ? null : booleanOrNull(row['enabled']);
-    // The method answers with the updated task, so what it says about `enabled`
-    // is the state that actually resulted — read back through the same guard
-    // rather than echoing what was asked for.
-    const resulting = booleanOrNull(recordOrNull(updated)?.['enabled']);
     return {
       kind: spec.kind,
       id,
       requested_enabled: enabled,
-      lookup: lookupError !== null ? 'UNREADABLE' : row === null ? 'NOT_FOUND' : 'FOUND',
-      lookup_error: lookupError,
-      previously_enabled: previous,
-      resulting_enabled: resulting,
-      // Both readings or nothing. A `changed` derived from the request rather
-      // than from the response would report a call the system did not apply as
-      // having changed something.
-      changed: previous === null || resulting === null ? null : previous !== resulting,
-      confirmed: resulting === null ? null : resulting === enabled,
+      ...(await switchOutcome(
+        () => spec.read(ctx, id),
+        () => spec.update(ctx, id, enabled),
+        id,
+        enabled,
+      )),
     };
   },
 };
@@ -2460,29 +2521,23 @@ function describeInitShutdownScript(row: Record<string, unknown>, id: number): s
   return `the init/shutdown script with ${named.join(', ')} (id ${id})`;
 }
 
-/**
- * The caller's two arguments, or the error naming what is wrong with them.
- *
- * Strict on both, as {@link parseSwitch} is and word for word for the same
- * reason: coercing `"false"` to true would switch ON a script the caller asked
- * to switch off, which is not a narrower answer to the question asked but the
- * opposite one. There is no `kind` to resolve — this tool has one — so what
- * {@link parseSwitch} does in three checks this does in two.
- */
-function parseScriptSwitch(args: Record<string, unknown>): { id: number; enabled: boolean } {
-  const id = args['id'];
-  if (typeof id !== 'number' || !Number.isInteger(id)) {
-    throw new Error('"id" is required and must be a whole number');
-  }
-  const enabled = args['enabled'];
-  if (typeof enabled !== 'boolean') {
-    throw new Error('"enabled" is required and must be a boolean');
-  }
-  return { id, enabled };
-}
-
 /** Where the ids this tool takes come from, in the one wording used throughout. */
 const SCRIPT_IDS_FROM = 'the `init_shutdown_scripts` section of `automated_tasks_list`';
+
+/**
+ * Whatever `initshutdownscript.query` answered with for this id, unread.
+ *
+ * The filter is written here once and the call is the same in `plan` and in
+ * `execute`, which is what {@link TaskKind.read} does for the six kinds. It is
+ * bandwidth and not the control: {@link rowWithId} checks the id on the
+ * response, because an unrecognised query parameter is dropped rather than
+ * refused and a filter that did not apply comes back as the whole table.
+ */
+function readScript(ctx: ToolContext, id: number): Promise<unknown> {
+  return firstValueFrom(
+    ctx.system.client.api.query('initshutdownscript.query', [['id', '=', id]]),
+  );
+}
 
 export const automatedTaskSetEnabled: MutatingTool = {
   name: 'automated_task_set_enabled',
@@ -2584,15 +2639,12 @@ export const automatedTaskSetEnabled: MutatingTool = {
   // this tool neither reads nor changes it.
   destructiveness: 'reversible',
   normalizeArgs(rawArgs) {
-    const { id, enabled } = parseScriptSwitch(rawArgs);
+    const { id, enabled } = parseIdAndEnabled(rawArgs);
     return { id, enabled };
   },
   async plan(ctx, rawArgs): Promise<PlanStep[]> {
-    const { id, enabled } = parseScriptSwitch(rawArgs);
-    const rows = await firstValueFrom(
-      ctx.system.client.api.query('initshutdownscript.query', [['id', '=', id]]),
-    );
-    const row = rowWithId(rows, id);
+    const { id, enabled } = parseIdAndEnabled(rawArgs);
+    const row = rowWithId(await readScript(ctx, id), id);
     // Naming where the ids come from matters more here than it does for the
     // six kinds: there is no `kind` to have got wrong, so a caller that reaches
     // this failure has most likely handed over an id from one of the other
@@ -2604,13 +2656,7 @@ export const automatedTaskSetEnabled: MutatingTool = {
       );
     }
     return [
-      {
-        method: 'initshutdownscript.query',
-        params: readParams(id),
-        description:
-          `Read this system's init/shutdown script with id ${id}, to report whether it was ` +
-          'already in the state this call moves it to. Changes nothing.',
-      },
+      readStep('initshutdownscript.query', 'init/shutdown script', id),
       {
         method: 'initshutdownscript.update',
         params: [id, { enabled }],
@@ -2623,45 +2669,19 @@ export const automatedTaskSetEnabled: MutatingTool = {
     ];
   },
   async execute(ctx, rawArgs) {
-    const { id, enabled } = parseScriptSwitch(rawArgs);
-    const api = ctx.system.client.api;
-    // Caught rather than thrown, as {@link scheduledTaskSetEnabled}'s is: this
-    // read exists to describe the outcome, and letting it fail the call would
-    // lose an approval the user has already given for a mutation that is still
-    // safe to make.
-    let row: Record<string, unknown> | null = null;
-    let lookupError: string | null = null;
-    try {
-      row = rowWithId(
-        await firstValueFrom(api.query('initshutdownscript.query', [['id', '=', id]])),
-        id,
-      );
-    } catch (reason) {
-      lookupError = errorText(reason);
-    }
-    // Unconditional, whatever the read said. Skipping the update for a script
-    // the read no longer lists would be `execute` branching on state read at
-    // execution time, which is what the confirmation token cannot bind.
-    const updated = await firstValueFrom(
-      api.call('initshutdownscript.update', [id, { enabled }]),
-    );
-    const previous = row === null ? null : booleanOrNull(row['enabled']);
-    // The method answers with the updated script, so what it says about
-    // `enabled` is the state that actually resulted — read back through the
-    // same guard rather than echoing what was asked for.
-    const resulting = booleanOrNull(recordOrNull(updated)?.['enabled']);
+    const { id, enabled } = parseIdAndEnabled(rawArgs);
     return {
       id,
       requested_enabled: enabled,
-      lookup: lookupError !== null ? 'UNREADABLE' : row === null ? 'NOT_FOUND' : 'FOUND',
-      lookup_error: lookupError,
-      previously_enabled: previous,
-      resulting_enabled: resulting,
-      // Both readings or nothing, for the reason its sibling gives: a `changed`
-      // derived from the request rather than from the response would report a
-      // call the system did not apply as having changed something.
-      changed: previous === null || resulting === null ? null : previous !== resulting,
-      confirmed: resulting === null ? null : resulting === enabled,
+      ...(await switchOutcome(
+        () => readScript(ctx, id),
+        () =>
+          firstValueFrom(
+            ctx.system.client.api.call('initshutdownscript.update', [id, { enabled }]),
+          ),
+        id,
+        enabled,
+      )),
     };
   },
 };
