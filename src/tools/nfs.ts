@@ -350,8 +350,13 @@ export const nfsClients: ReadOnlyTool = {
     'would send every value as text. Report that rather than reading the nulls ' +
     'as a client the server knows nothing about. A NULL FIELD BESIDE AN EMPTY ' +
     'LIST IS THE OTHER ANSWER: the record was read and carried nothing under ' +
-    'that name. Both lists are null where the record was not a record at all, ' +
-    'and empty where it was read and every key it carried is reported. ' +
+    'that name. `unreported_info_fields` is null where `info` was not a record ' +
+    'at all, and empty where it was read and every key it carried is reported. ' +
+    '`unreported_state_fields` IS THE SAME DISTINCTION OVER A LIST AND NOT OVER ' +
+    'ONE RECORD: it is null where `states` was not a list, and otherwise names ' +
+    'the keys across every entry that was itself a record — an entry that was ' +
+    'not one names no key at all and is visible only as `state_count` ' +
+    'exceeding what `state_types` and this list account for. ' +
     '`nfsv3` AND `nfsv4` ARE NULL ' +
     'WHEN THAT VERSION COULD NOT BE READ and empty when it was read and no ' +
     'client was found — never the same answer. The two reads are independent, ' +
