@@ -548,6 +548,53 @@ since a tool result is recorded verbatim in the audit trail (S3.3). Naming the
 arm's fields one by one is what keeps it out, and what keeps out a second
 credential-shaped field a later release adds to any arm.
 
+### Two tools that make a third interpretable are still two tools (#101)
+
+`app_engine_status` and `apps_update_summary` arrived on one ticket, land in one
+file, and exist for the same reason — `apps_list` alone is misread without them.
+That is the whole case for folding them into one tool with two sections, and it
+is not enough.
+
+**The section test is #97's, and it is about the CALLER's answer rather than
+about where the tools came from.** `automated_tasks_list` returns four sections
+because a caller reaching three of them gets a confident answer with a category
+silently missing — the missing kind is the finding. Neither of these completes
+the other that way: a caller reading only the engine status is not given a wrong
+answer about updates, and a caller reading only the updates is not given a wrong
+answer about the engine. Shared motivation, one file and one pull request are
+not the test. **Ask whether a caller who reads only one of them is misled by
+what the other would have said.**
+
+What settles the remainder is the name, under #97's first bullet. A single tool
+over both would have to be named for the engine or for the applications, and
+either name promises what only the other half delivers.
+
+**What they owe each other instead is a POINTER, and both descriptions carry
+one.** Twelve applications reporting as stopped because the engine is down is
+the misreading this family is most likely to produce, and splitting the tools is
+only safe because each description names the other. A split that leaves a caller
+unable to discover the second tool reintroduces the defect the section seam
+exists to prevent.
+
+**A CAP can be worse than an omission, which is #44's rule deciding against
+truncation rather than for it.** `apps_update_summary` reports no changelog: it
+is unbounded upstream prose returned once per application, and the cap that
+would bound it could drop the line naming a breaking change while the field
+still presented itself as the answer to what the update alters — a cap dropping
+the finding rather than the line describing it. The list of other versions
+available to upgrade to goes for the same reason at lower stakes. What that buys
+is an entry fixed in size, so the response grows only with the number of
+applications that have an update; both omissions are named in the description,
+as `boot_pool_status` names the boot pool's scan record.
+
+**A status word this catalog has not read is UNKNOWN, never the negative.**
+`app_engine_status`'s `running` is derived through a total `Record` over the
+client's own status union, so a TrueNAS release adding a word breaks the build
+rather than being answered `false` — and `false` there is the positive claim
+that nothing on the system can run. The membership test is `Object.hasOwn` and
+not `in`, which walks the prototype: `'constructor'` is `in` every object
+literal and would have been read back as a boolean the field cannot hold.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

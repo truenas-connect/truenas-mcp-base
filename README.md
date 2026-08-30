@@ -19,6 +19,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `storage_pool_status`, `storage_pool_topology`, `storage_scrub_history`,
   `boot_pool_status`,
   `storage_list_datasets`, `datasets_quota_report`, `disks_list`, `apps_list`,
+  `app_engine_status`, `apps_update_summary`,
   `vms_list`, `vm_logs`, `vm_devices`, `alerts_list`, `snapshots_list`,
   `replication_status`,
   `snapshot_tasks_list`, `cloudsync_tasks_list`, `automated_tasks_list`,
