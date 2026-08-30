@@ -270,7 +270,8 @@ export const vmsList: ReadOnlyTool = {
     'machines: incus containers are excluded and applications are ' +
     "`apps_list`. A VM's log output is `vm_logs`, which reads one machine on " +
     'the `vm` stack. This does not report a VM\'s disks, network interfaces, ' +
-    'display or passthrough devices, and it does not create, start, stop or ' +
+    'display or passthrough devices, which are `vm_devices` and are likewise ' +
+    'only reported for the `vm` stack, and it does not create, start, stop or ' +
     'change one. NO field beyond those named here ' +
     'is returned, whatever a later TrueNAS release adds to either record.',
   inputSchema: { type: 'object', properties: {} },
@@ -680,9 +681,9 @@ export const vmLogs: ReadOnlyTool = {
  * `vms_list` reports what a VM has been given — its state, its CPUs, its memory
  * — and nothing about what is attached to it, so "what disk is it booting
  * from", "which bridge is its NIC on" and "what PCI device is passed through to
- * it" have no answer in this catalog. They are also where "why will this VM not
- * start" usually bottoms out: a missing disk, a NIC on an interface that no
- * longer exists, a passthrough device the host has claimed.
+ * it" are what this answers and `vms_list` cannot. They are also where "why
+ * will this VM not start" usually bottoms out: a missing disk, a NIC on an
+ * interface that no longer exists, a passthrough device the host has claimed.
  *
  * ONE STACK, NOT TWO, which is the same split `vm_logs` has and for the same
  * reason. `vm.device.query` is the libvirt surface, so this reports devices for
@@ -699,9 +700,10 @@ export const vmLogs: ReadOnlyTool = {
  *
  * `attributes` is null for a `dtype` this tool has no mapping for, and that is
  * a case to expect rather than a defensive branch: the pinned client already
- * declares an eighth kind, `ISCSI_DISK`, on the shape a device is CREATED with
- * while leaving it out of the shape a query answers. A caller that treats a
- * null `attributes` as "this device has no configuration" would report an
+ * declares an eighth kind, `ISCSI_DISK`, on the device shape a `vm.query` row
+ * embeds and the `vm.device` added/changed events carry, while leaving it out
+ * of the one `vm.device.query` answers with. A caller that treats a null
+ * `attributes` as "this device has no configuration" would report an
  * iSCSI-backed disk as an empty device.
  */
 
@@ -997,8 +999,8 @@ export const vmDevices: ReadOnlyTool = {
     '`USB`: `device` is the host device, `vendor_id` and `product_id` identify ' +
     'it, `controller_type` is the emulated USB controller. `attributes` IS ' +
     'NULL WHERE `dtype` IS A KIND THIS TOOL HAS NO MAPPING FOR — TrueNAS ' +
-    'already defines at least one more kind (`ISCSI_DISK`) than this API ' +
-    'surface answers queries with — SO A NULL `attributes` BESIDE A NON-NULL ' +
+    'already defines at least one more kind (`ISCSI_DISK`) elsewhere than the ' +
+    'ones this query answers with — SO A NULL `attributes` BESIDE A NON-NULL ' +
     '`dtype` IS A DEVICE THAT IS THERE AND CONFIGURED, whose configuration ' +
     'this tool does not read, and never a device with nothing configured. ' +
     '`attributes` and `dtype` are BOTH null where the device\'s configuration ' +
@@ -1008,8 +1010,11 @@ export const vmDevices: ReadOnlyTool = {
     'Every field is null where the system reported no value this tool could ' +
     'read, which is never the same as a device configured without one. AN ' +
     'EMPTY `devices` LIST IS A SYSTEM WITH NO LIBVIRT-BACKED VM DEVICES AT ' +
-    'ALL, which includes a system with no libvirt-backed VMs; a machine that ' +
-    'appears in `vms_list` and in no row here has no devices attached. This ' +
+    'ALL, which includes a system with no libvirt-backed VMs. A machine ' +
+    '`vms_list` reports with `source` `vm` AND NO ROW HERE HAS NO DEVICES ' +
+    'ATTACHED; one it reports with `source` `virt_instance` HAS NO ROW HERE ' +
+    'WHATEVER IS ATTACHED TO IT, so the same absence means opposite things for ' +
+    'the two stacks and `source` is what tells them apart. This ' +
     'tool reports configuration and not liveness: it does not say whether a ' +
     'device is currently in use, whether the host still has the hardware, or ' +
     'why a VM failed to start — `vm_logs` is what carries that. It does not ' +

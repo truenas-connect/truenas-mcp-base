@@ -764,8 +764,9 @@ describe('vm_devices', () => {
   });
 
   it('names a device kind it cannot map and states no configuration for it', async () => {
-    // TrueNAS defines ISCSI_DISK on the shape a device is created with and not
-    // on the one a query answers, so an unmapped kind is a case to expect. The
+    // TrueNAS defines ISCSI_DISK on the device shape a `vm.query` row embeds
+    // and not on the one `vm.device.query` answers with, so an unmapped kind
+    // is a case to expect rather than a defensive branch. The
     // kind is still reported: a null `attributes` beside it is a device that is
     // there and configured, not one with nothing configured.
     expect(
