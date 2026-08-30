@@ -898,6 +898,84 @@ without it, and a plan is shown to a person and then recorded. Passing a field
 through in a listing whose description warns about it is not the same act as
 putting it in a mutating tool's approval text.
 
+### A job-backed tool watches for a bounded time and reports what it has (#122)
+
+`cloudsync_run` is the catalog's first tool that starts a job, and the shape it
+takes is the one later job-backed tools should copy.
+
+**The core needed nothing.** `ApiSurface` is `DefaultApiDirectory`, whose shape
+is `{ call, job, event }`, so `system.client.api.job(method, params)` was
+already available to every handler and already typed off the *job* directory —
+a key space disjoint from the call directory, so a job method is unreachable
+through `api.call` and vice versa. The client sends the request, correlates the
+job id off the job events, tracks the job and completes the observable at a
+terminal state. Earlier discussion here treated job support as a core
+prerequisite; it was not.
+
+**The duration decision is the one a job-backed tool actually has to make, and
+awaiting completion is the wrong default.** A cloud sync is unbounded — minutes
+for a delta, hours for a first upload — and awaiting it holds the MCP tool call
+open for the whole thing. The host times out, and the call it times out on is
+the only one that ever knew the job id, so the run continues with nothing able
+to name it afterwards. So: **watch for a bounded time, then report either how
+the job ended or that it is still going, with the job id either way.**
+
+Starting the job and returning the id immediately is what that degrades to when
+the bound passes, which makes it the floor rather than a third option — and it
+is not the wait-free route it looks like, because the id itself arrives from the
+first job event carrying the request's id and so waits on the network too. A
+bound is owed either way; this spends it on an answer that is sometimes
+complete.
+
+**The bound is a ceiling on the tool's patience, not an estimate of the job.**
+It has to sit comfortably inside the MCP host's own timeout, since a bound that
+outlives the host's never gets to report anything at all — and the host's is not
+readable from here, because `src/interfaces.ts` is the whole environment
+boundary and carries no deadline. Thirty seconds is chosen to be shorter than
+the shortest in ordinary use rather than tuned to any one of them, and it is
+returned as `watched_seconds` so a caller never infers which bound applied, the
+same way `snapshots_list` returns the `limit` it used.
+
+**Ending the watch must not end the job, and that was established before the
+route was taken.** `api.job` is `callAndGetJobId` piped into `trackJob`, and
+`trackJob` only observes — it filters the job event stream and reads
+`core.get_jobs`. Unsubscribing sends nothing to the middleware. A bound that
+silently aborted a half-finished upload would be the worst defect such a tool
+could have, so this is checked against the client rather than assumed of it.
+
+**Whether the job ended is read from the tracking COMPLETING, not from a state
+list.** The client completes the stream on its own `isJobFinished`, so
+completion moves with the middleware's terminal set instead of with a set
+written down here. A completion carrying no emission is the client having found
+no such job, which establishes nothing — so both halves are required before
+anything is called ended.
+
+**Terminal does not mean succeeded, and on this method there is nothing else to
+read.** `cloudsync.sync` declares `response: null`, so the job's `result` is
+null on success and on failure alike; the client says as much itself. The
+outcome is read from `state` against the same success vocabulary the tasks
+family already reads a run's state against, and `result` is not read at all — a
+tool that awaited completion and reported success would have reported every
+failed sync as a success. A terminal state this catalog does not recognise is
+**not** read as a success, which is `tasks_recent_runs`'s direction: a run that
+cannot be shown to have worked has not been shown to have worked.
+
+**Three answers, not two, and the description says which is which.** `ended`
+false is a sync still going and says nothing about whether it will work;
+`succeeded` null is that case or an unreadable state, and is neither a failure
+nor a success. The tool reports no progress percentage and no live status, and
+names `tasks_recent_runs` — whose `id` is this tool's `job_id` — as where a
+still-running sync is followed up.
+
+**The plan names one call, which is #119's distinction rather than a lapse.**
+`scheduled_task_set_enabled` names its read as a step because `execute` makes
+it; this tool reads only at plan time — to name the task, and to fail on an id
+no task has — and `execute` re-reads nothing, exactly as `snapshots_create` does
+not re-check its dataset. The `core.get_jobs` the client's tracking issues while
+following the job is named in the step's *description* instead, because a step's
+`params` are the exact params a call runs with and the job id does not exist
+until the approved call has been made.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
