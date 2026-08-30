@@ -706,6 +706,73 @@ so a tool that silently received every field looks identical to one that worked.
 The confirmation here was `QueryOptions<T>` in the pinned client's
 `dist/index.d.ts`, reached through `DefaultApiDirectory`.
 
+### A plan names the read `execute` makes, or the plan is not true (#119)
+
+`alerts_dismiss` and `alerts_restore` are the second and third mutating tools,
+and their plans return **two** steps — `alert.list`, then the mutation — where
+`snapshots_create` returns one. The difference is not the tool being more
+careful. It is where the read happens: `snapshots_create` reads at PLAN time
+(`assertDatasetExists`) and deliberately does not re-read at execute time, so its
+one step is the whole of what `execute` calls. These two must report whether the
+alert had ALREADY been dismissed, which is a fact only readable immediately
+before the call — so `execute` reads, and a plan naming only the mutation would
+be a plan that omits a call the user is approving.
+
+**A `PlanStep` is a call `execute` will make, not a summary of the change.** Ask
+what `execute` calls and name all of it; a read step says outright that it
+changes nothing.
+
+**The read is issued unconditionally and nothing branches on it.** The mutating
+call is made whatever the read said — including where the read failed, and where
+it completed and listed no alert with that uuid. That is what keeps `execute` a
+pure function of (args, system), which is the property the confirmation token
+depends on: skipping the mutation for an alert the read no longer lists would be
+branching on state the token cannot bind. The alternative — failing the call
+when the reporting read fails — would throw away an approval the user has
+already given for a mutation that is still safe.
+
+**A three-valued account of a read does not enumerate a four-valued outcome, and
+the description has to say so.** `lookup` reports what the read did — `FOUND`,
+`NOT_FOUND`, `UNREADABLE` — while `previously_dismissed` and `changed` are null
+under the last two AND under `FOUND` where the alert stated no `dismissed` this
+tool could read as a boolean. Three values, four causes: the descriptions name
+the fourth explicitly and say that `lookup` alone does not tell them apart. A
+status field named for one half of an outcome will not partition the other half,
+and claiming it does is the house's most common review finding wearing a
+different hat.
+
+**Already-in-the-target-state is not an error, and saying which it was is the
+tool's job.** Most alerts on a running system are already dismissed; the plan
+says which of the two it is about to do, and the result reports the state read
+immediately before the call. A mutating tool whose no-op is indistinguishable
+from its effect gives a caller nothing to act on.
+
+### The identifier a mutating tool takes is the one its method takes (#119)
+
+`alert.dismiss` and `alert.restore` take a `uuid`; the middleware's alert
+declares `uuid` and `id` as two separate required fields; and `alerts_list`
+reported only `id`, so **there was no way for a caller to name the alert the API
+wants**. The fix was to grow `alerts_list` a field, deliberately rather than as a
+side effect: it is reported BESIDE `id` and not instead of it, and the
+description states what it is for and that it is per-system.
+
+**Growing a read-only tool a field to make a mutating tool reachable is a change
+to that tool's contract**, so it is stated in that tool's description and tested
+there. What made it safe to do was #44's rule holding in the other direction:
+`system_health_report` composes `alertsList.handler` and re-reads every field
+through its own guard by name, so a field `alerts_list` grows does not reach the
+composite — checked rather than assumed before the field was added.
+
+**Do not key a tool on an identifier that is not per-system.** The ticket's live
+reading — the same `id` coming back from two different systems for one
+`CertificateExpired`/`freenas_default` condition — is why `id` is refused here: a
+tool keyed on it is ambiguous under the fan-out, which is the normal way these
+tools run. That reading was **not reproducible from this repository** (no live
+system in the test environment). What is confirmed is the surface: two declared
+fields, and a method whose parameter is the first of them. The description states
+the rule the surface supports — `uuid` is what these tools take, read it from the
+system being targeted — rather than an account of why the two differ.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

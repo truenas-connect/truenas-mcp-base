@@ -1,6 +1,7 @@
+import type { CallResponse } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
-import { ReadOnlyTool } from '@/catalog/tool';
+import { ApiSurface, MutatingTool, ReadOnlyTool, ToolContext } from '@/catalog/tool';
 import { booleanOrNull, errorText, recordOrNull, textOrNull } from '@/tools/common';
 
 /**
@@ -13,13 +14,26 @@ export const alertsList: ReadOnlyTool = {
   description:
     'Active alerts a TrueNAS system has raised: severity level, alert class, ' +
     'the message, when it fired, and whether it has been dismissed. Dismissed ' +
-    'alerts are still active conditions and are included.',
+    'alerts are still active conditions and are included. `uuid` is the ' +
+    'identifier `alerts_dismiss` and `alerts_restore` take, and IT IS ' +
+    'PER-SYSTEM: it names one alert on the one system it was read from, so a ' +
+    'uuid read from one system must not be passed to a tool call targeting ' +
+    'another. `id` is a second identifier the middleware reports on the same ' +
+    'alert, and IS NOT THAT ARGUMENT: nothing states that it ' +
+    "names one system's alert instance, so acting on it would be ambiguous " +
+    'wherever the same condition is raised on more than one system.',
   inputSchema: { type: 'object', properties: {} },
   requiredRole: Role.ReadOnly,
   mutating: false,
   async handler({ system }) {
     const alerts = await firstValueFrom(system.client.api.call('alert.list'));
     return alerts.map((alert) => ({
+      // The identifier `alert.dismiss` and `alert.restore` take, added by #119
+      // so that a caller can name the alert those tools want. It is reported
+      // beside `id` rather than instead of it: the two are separate required
+      // fields of the middleware's own alert, and only this one addresses an
+      // alert on one system.
+      uuid: alert.uuid,
       id: alert.id,
       // The middleware's own class identifier, e.g. `ZpoolCapacityWarning`.
       klass: alert.klass,
@@ -278,3 +292,293 @@ export const alertSettings: ReadOnlyTool = {
     };
   },
 };
+
+/**
+ * `alerts_dismiss` and `alerts_restore`: the mutating pair, and the first
+ * mutation in the catalog that is not a snapshot.
+ *
+ * They flip one boolean on one notification record. No data, configuration or
+ * storage changes, no job runs, and `alert.restore` is the exact inverse of
+ * `alert.dismiss` in the same API — so `destructiveness: 'reversible'` is a
+ * literal statement here rather than a judgement about how hard the undo is.
+ *
+ * THE IDENTIFIER IS `uuid` AND NOT `id`. `alert.dismiss` and `alert.restore`
+ * both take a `uuid`, and the middleware's alert declares `uuid` and `id` as two
+ * separate required fields. `alerts_list` reported only `id` until #119, so
+ * there was no way for a caller to name the alert the API wants; it now reports
+ * both. The ticket's live reading — the same `id` coming back from two
+ * different systems for one `CertificateExpired`/`freenas_default` condition —
+ * is why `id` is not accepted here: a tool keyed on it would be ambiguous under
+ * the fan-out, which is the normal way these tools run. That reading was not
+ * reproducible from this repository (there is no live system in the test
+ * environment), so what is CONFIRMED is the surface — two declared fields, and a
+ * method whose parameter is the first of them — and what is not is the account
+ * of why they differ.
+ *
+ * WHAT THE PLAN NAMES IS WHAT `execute` CALLS, INCLUDING THE READ. Both plans
+ * return two steps, `alert.list` then the mutation, because `execute` makes both
+ * calls: the read is what lets the result say whether the alert had already been
+ * dismissed, which `snapshots_create` needs no equivalent of. `snapshots_create`
+ * reads at PLAN time and deliberately does not re-read at execute time, so its
+ * one plan step is the whole of what it calls; a plan here that named only the
+ * mutation would be a plan that is not true. The read is issued unconditionally
+ * and nothing branches on it — the mutating call is made whatever it says — so
+ * `execute` is still a pure function of (args, system) in the sense the
+ * confirmation token depends on.
+ *
+ * ALREADY-DISMISSED IS NOT AN ERROR. Most alerts on a running system are
+ * already dismissed, and dismissing one again is a no-op the middleware accepts.
+ * The plan says which of the two it is about to do, and the result reports the
+ * state read immediately before the call, so a caller can tell "this call
+ * dismissed it" from "it was dismissed already".
+ */
+
+/** The one argument either tool takes. */
+interface AlertTarget {
+  uuid: string;
+}
+
+/**
+ * The caller's argument, or the error naming what is missing.
+ *
+ * Strict, as `snapshots_create`'s `dataset` is: an identifier that is not a
+ * non-empty string cannot be read as anything else without acting on an alert
+ * nobody named.
+ */
+function parseTarget(args: Record<string, unknown>): AlertTarget {
+  const uuid = args['uuid'];
+  if (typeof uuid !== 'string' || uuid.length === 0) {
+    throw new Error('"uuid" is required');
+  }
+  return { uuid };
+}
+
+/** One alert as `alert.list` sends it, named off the call rather than the entity (#91). */
+type AlertRow = CallResponse<ApiSurface, 'alert.list'>[number];
+
+/** The two methods this pair calls, which differ only in direction. */
+type AlertStateMethod = 'alert.dismiss' | 'alert.restore';
+
+/** The alert carrying this uuid, or null where the system listed none that did. */
+async function findAlert(ctx: ToolContext, uuid: string): Promise<AlertRow | null> {
+  const alerts = await firstValueFrom(ctx.system.client.api.call('alert.list'));
+  return alerts.find((alert) => alert.uuid === uuid) ?? null;
+}
+
+/**
+ * The alert in the terms `alerts_list` shows it, for the human approving the
+ * plan. A uuid is not a thing anyone recognises, so the plan step has to name
+ * the level, the class and the message.
+ *
+ * Each of the three is stated as absent rather than dropped where the system
+ * reported none: a plan that silently omits the message reads as an alert
+ * without one, and the person approving cannot tell which.
+ */
+function describeAlert(alert: AlertRow): string {
+  const level = textOrNull(alert.level);
+  const klass = textOrNull(alert.klass);
+  const formatted = textOrNull(alert.formatted);
+  const none = '(the system reported none)';
+  return (
+    `level ${level ?? none}, class ${klass ?? none}, ` +
+    `message ${formatted === null ? none : `"${formatted}"`}`
+  );
+}
+
+/** What one of the pair is, beyond the wording it presents itself with. */
+interface AlertStateAction {
+  name: string;
+  description: string;
+  method: AlertStateMethod;
+  /** The `dismissed` state this tool moves an alert to. */
+  target: boolean;
+  /** Imperative for the plan step — `Dismiss`, `Restore`. */
+  verb: string;
+}
+
+/**
+ * What the plan says the call will do, given the state the alert is in now.
+ *
+ * Three cases and not two: an alert whose `dismissed` could not be read as a
+ * boolean is neither already there nor about to move, and saying either would
+ * be a claim the read did not establish.
+ */
+function effectSentence(action: AlertStateAction, current: boolean | null): string {
+  if (current === null) {
+    return 'Whether it is dismissed could not be read, so this may change nothing.';
+  }
+  if (current === action.target) {
+    return `It is ${current ? 'already dismissed' : 'not dismissed'}, so this changes ` +
+      'nothing and is not an error.';
+  }
+  return `It is ${current ? 'dismissed' : 'not dismissed'}, so this will ` +
+    `${action.verb.toLowerCase()} it.`;
+}
+
+/**
+ * One of the pair. Written once because the two differ only in the method they
+ * call, the state they move an alert to and the words they say — the eleven
+ * copies of `textOrNull` behind `common.ts` are what a second hand-written copy
+ * of this would become.
+ */
+function alertStateTool(action: AlertStateAction): MutatingTool {
+  return {
+    name: action.name,
+    description: action.description,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        uuid: {
+          type: 'string',
+          minLength: 1,
+          description:
+            "The alert's `uuid` as `alerts_list` reports it, on the system " +
+            'being targeted. Not its `id`, which does not name one system\'s alert.',
+        },
+      },
+      required: ['uuid'],
+    },
+    requiredRole: Role.Full,
+    mutating: true,
+    destructiveness: 'reversible',
+    normalizeArgs(rawArgs) {
+      return { uuid: parseTarget(rawArgs).uuid };
+    },
+    async plan(ctx, rawArgs) {
+      const { uuid } = parseTarget(rawArgs);
+      const alert = await findAlert(ctx, uuid);
+      // The failure names the identifier the caller supplied, because that is
+      // the only part of it the caller can check. `assertDatasetExists` fails
+      // the same way for `snapshots_create`.
+      if (alert === null) {
+        throw new Error(`No alert with uuid "${uuid}" on this system`);
+      }
+      return [
+        {
+          method: 'alert.list',
+          params: [],
+          description:
+            'Read this system\'s alerts, to report whether the alert was already ' +
+            'in the state this call moves it to. Changes nothing.',
+        },
+        {
+          method: action.method,
+          params: [uuid],
+          description:
+            `${action.verb} the alert with ${describeAlert(alert)} (uuid ${uuid}). ` +
+            effectSentence(action, booleanOrNull(alert.dismissed)),
+        },
+      ];
+    },
+    async execute(ctx, rawArgs) {
+      const { uuid } = parseTarget(rawArgs);
+      // Caught rather than thrown: this read exists to describe the outcome,
+      // and letting it fail the call would lose an approval the user has
+      // already given for a mutation that is still perfectly safe to make.
+      // The result then says the prior state could not be established.
+      let alert: AlertRow | null = null;
+      let lookupError: string | null = null;
+      try {
+        alert = await findAlert(ctx, uuid);
+      } catch (reason) {
+        lookupError = errorText(reason);
+      }
+      // Unconditional, whatever the read said. Skipping the call for an alert
+      // the read no longer lists would be `execute` branching on state read at
+      // execution time, which is what the confirmation token cannot bind.
+      await firstValueFrom(ctx.system.client.api.call(action.method, [uuid]));
+      const previous = alert === null ? null : booleanOrNull(alert.dismissed);
+      return {
+        uuid,
+        lookup: lookupError !== null ? 'UNREADABLE' : alert === null ? 'NOT_FOUND' : 'FOUND',
+        lookup_error: lookupError,
+        previously_dismissed: previous,
+        changed: previous === null ? null : previous !== action.target,
+      };
+    },
+  };
+}
+
+export const alertsDismiss: MutatingTool = alertStateTool({
+  name: 'alerts_dismiss',
+  method: 'alert.dismiss',
+  target: true,
+  verb: 'Dismiss',
+  description:
+    'Dismisses one active alert on one TrueNAS system: the acknowledgement an ' +
+    'operator makes in the UI, and nothing more. Two-phase: called without a ' +
+    'confirmation_token it returns a plan for user approval; called with one it ' +
+    'dismisses the alert. DISMISSING AN ALERT DOES NOT FIX WHAT RAISED IT — the ' +
+    'condition is still active, `alerts_list` still reports the alert with ' +
+    '`dismissed: true`, and the middleware may raise it again. `uuid` is the ' +
+    'alert\'s `uuid` as `alerts_list` reports it, ON THE SYSTEM BEING TARGETED: ' +
+    'it names one alert on one system, so read it from that system rather than ' +
+    'reusing one read elsewhere. The `id` `alerts_list` also reports is NOT this ' +
+    'argument and must not be passed as it. Planning against a uuid no alert on ' +
+    'that system matches FAILS, naming the uuid supplied, so an approved plan is ' +
+    'always a plan about an alert that existed when it was made. DISMISSING AN ' +
+    'ALREADY-DISMISSED ALERT IS NOT AN ERROR, and is the ordinary case — most ' +
+    'alerts on a running system are already dismissed. The plan says which of ' +
+    'the two it is about to do, and the result reports it: `previously_dismissed` ' +
+    'is the alert\'s state as read immediately before the call, `changed` is ' +
+    'true where that state was the other one and the call did not reject, and ' +
+    'false where the alert was already dismissed and this call therefore moved ' +
+    'nothing. BOTH ARE NULL WHERE THE PRIOR STATE COULD NOT BE ESTABLISHED, ' +
+    'WHICH IS NOT "NOTHING CHANGED". `lookup` says what the read did: `FOUND` ' +
+    'is a read that named this alert, `NOT_FOUND` a read that completed and ' +
+    'listed no alert with this uuid (it cleared between the plan and the ' +
+    'confirmation), and `UNREADABLE` a read that failed, with `lookup_error` ' +
+    'naming why. IT HAS THREE VALUES AND THE NULL PAIR HAS FOUR CAUSES: the two ' +
+    'above, and ALSO `FOUND` where the alert reported no `dismissed` this tool ' +
+    'could read as a boolean — an alert that was there and did not state ' +
+    'whether it had been dismissed. So `lookup` alone does not tell them apart, ' +
+    'and `FOUND` beside a null `previously_dismissed` is that fourth case. THE ' +
+    'DISMISSAL IS ATTEMPTED IN ALL THREE CASES, because what runs must be what ' +
+    'was approved; wherever `previously_dismissed` is null this tool cannot say ' +
+    'whether anything was dismissed, only that the call did not reject. ' +
+    '`alerts_restore` is the exact inverse and un-dismisses an alert this tool ' +
+    'dismissed. It changes no data, no configuration and no storage, it starts ' +
+    'no job, and it silences nothing for the future — `alert_settings` reports ' +
+    'the per-class policies that do that, and no tool here changes them.',
+});
+
+export const alertsRestore: MutatingTool = alertStateTool({
+  name: 'alerts_restore',
+  method: 'alert.restore',
+  target: false,
+  verb: 'Restore',
+  description:
+    'Un-dismisses one active alert on one TrueNAS system, the exact inverse of ' +
+    '`alerts_dismiss`: the alert goes back to reporting `dismissed: false`, as ' +
+    'though it had never been acknowledged. Two-phase: called without a ' +
+    'confirmation_token it returns a plan for user approval; called with one it ' +
+    'restores the alert. RESTORING AN ALERT CHANGES NOTHING ABOUT THE CONDITION ' +
+    'THAT RAISED IT — a dismissed alert was already an active condition that ' +
+    '`alerts_list` reported, and this only clears the acknowledgement. `uuid` is ' +
+    'the alert\'s `uuid` as `alerts_list` reports it, ON THE SYSTEM BEING ' +
+    'TARGETED: it names one alert on one system, so read it from that system ' +
+    'rather than reusing one read elsewhere. The `id` `alerts_list` also reports ' +
+    'is NOT this argument and must not be passed as it. Planning against a uuid ' +
+    'no alert on that system matches FAILS, naming the uuid supplied, so an ' +
+    'approved plan is always a plan about an alert that existed when it was ' +
+    'made. RESTORING AN ALERT THAT WAS NEVER DISMISSED IS NOT AN ERROR. The plan ' +
+    'says which of the two it is about to do, and the result reports it: ' +
+    '`previously_dismissed` is the alert\'s state as read immediately before the ' +
+    'call, `changed` is true where the alert was dismissed and the call did not ' +
+    'reject, and false where it was not dismissed and this call therefore moved ' +
+    'nothing. BOTH ARE NULL WHERE THE PRIOR STATE COULD NOT BE ESTABLISHED, ' +
+    'WHICH IS NOT "NOTHING CHANGED". `lookup` says what the read did: `FOUND` ' +
+    'is a read that named this alert, `NOT_FOUND` a read that completed and ' +
+    'listed no alert with this uuid (it cleared between the plan and the ' +
+    'confirmation), and `UNREADABLE` a read that failed, with `lookup_error` ' +
+    'naming why. IT HAS THREE VALUES AND THE NULL PAIR HAS FOUR CAUSES: the two ' +
+    'above, and ALSO `FOUND` where the alert reported no `dismissed` this tool ' +
+    'could read as a boolean — an alert that was there and did not state ' +
+    'whether it had been dismissed. So `lookup` alone does not tell them apart, ' +
+    'and `FOUND` beside a null `previously_dismissed` is that fourth case. THE ' +
+    'RESTORE IS ATTEMPTED IN ALL THREE CASES, because what runs must be what was ' +
+    'approved; wherever `previously_dismissed` is null this tool cannot say ' +
+    'whether anything was restored, only that the call did not reject. It ' +
+    'changes no ' +
+    'data, no configuration and no storage, and it starts no job.',
+});

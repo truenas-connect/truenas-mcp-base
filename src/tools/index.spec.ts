@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the forty-nine sketch tools', () => {
+  it('registers the fifty-one sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -54,7 +54,15 @@ describe('createDefaultCatalog', () => {
       'fleet_compliance_report',
       'fleet_health_rollup',
       'snapshots_create',
+      'alerts_dismiss',
+      'alerts_restore',
     ]);
+  });
+
+  it('does not advertise the mutating alert pair to a read-only credential', () => {
+    const readOnly = createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name);
+    expect(readOnly).not.toContain('alerts_dismiss');
+    expect(readOnly).not.toContain('alerts_restore');
   });
 
   it('advertises fleet_health_rollup to a read-only credential', () => {
