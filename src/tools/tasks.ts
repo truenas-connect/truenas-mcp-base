@@ -2085,22 +2085,28 @@ export const cloudsyncRun: MutatingTool = {
     'already under way. A failure BEFORE anything was seen of the job fails ' +
     'this call instead, and even then MAY STILL HAVE STARTED THE SYNC: check ' +
     '`cloudsync_tasks_list` rather than assuming nothing ran. ' +
-    '`ended` is whether the job was established to have reached a state it will ' +
-    'not move out of. TRUE MEANS THE RUN IS OVER; FALSE IS THREE ANSWERS AND ' +
-    'NOT ONE — the sync is still going (which includes a watch cut short by ' +
-    'either of those), or the job reported a state this tool ' +
-    'could not read, or no job was seen at all — and `state` and `job_id` are ' +
-    'what tell those apart: a state beside `ended: false` is a sync still ' +
-    'under way, a null `state` beside a `job_id` is a job whose state was ' +
-    'unreadable, and both null is a job this tool never saw OR one whose state ' +
-    'and id were both unreadable. IN NONE OF THE ' +
-    'THREE HAS ANYTHING FAILED. `succeeded` is the answer to "did it work": ' +
-    'true where the job ended in a state this catalog reads as success, false ' +
-    'where it ended in any other state — including one added by a later ' +
-    'TrueNAS release, so an unfamiliar terminal state is never read as a ' +
-    'success — and NULL WHERE NOTHING ESTABLISHED IT, which is the job still ' +
-    'running or a state this tool could not read. A null `succeeded` IS NOT A ' +
-    'FAILURE AND IS NOT A SUCCESS. `state` is the state the system last ' +
+    '`ended` is whether the job was ESTABLISHED to have reached a state it ' +
+    'will not move out of. TRUE MEANS THE RUN IS OVER. FALSE MEANS NOTHING WAS ' +
+    'ESTABLISHED AND IS NOT ONE ANSWER — the sync is still going, or the watch ' +
+    'was cut short by either of the failures above, or the job reached a state ' +
+    'the system does not treat as ending a run and so may or may not be over, ' +
+    'or the job reported a state this tool could not read, or no job was seen ' +
+    'at all. `state` and `job_id` narrow that and DO NOT PARTITION IT: a ' +
+    'non-null `state` beside `ended: false` is any of the first three and this ' +
+    'tool cannot say which, a null `state` beside a `job_id` is a job whose ' +
+    'state was unreadable, and both null is a job this tool never saw OR one ' +
+    'whose state and id were both unreadable. IN NONE OF THEM HAS ANYTHING ' +
+    'FAILED. `succeeded` is the answer to "did it work": true where the run ' +
+    'ENDED in a state this catalog reads as success, false where it ENDED in ' +
+    'any other state, and NULL WHERE NOTHING ESTABLISHED IT — which is every ' +
+    'case above where `ended` is false. A null `succeeded` IS NOT A FAILURE ' +
+    'AND IS NOT A SUCCESS, and A STATE THAT LOOKS LIKE A SUCCESS DOES NOT MAKE ' +
+    'ONE: `succeeded` is null beside a `state` of `SUCCESS` where the run was ' +
+    'not established to be over, since a job can still move out of a state ' +
+    'this tool merely saw. NO STATE THIS CATALOG DOES NOT KNOW IS EVER READ AS ' +
+    'A SUCCESS, whether the run ended in it or the watch ended without the run ' +
+    'ending — so a state a later TrueNAS release adds reports as itself and ' +
+    'never as a success. `state` is the state the system last ' +
     'reported, passed through as the system spelled it and null where none was ' +
     'read; `SUCCESS` and `FINISHED` are the two this tool counts as success. ' +
     'The job\'s `result` is NOT read and could not settle any of this: ' +
@@ -2110,10 +2116,11 @@ export const cloudsyncRun: MutatingTool = {
     'with a null `error` failed for a reason the system did not record — it ' +
     'has not succeeded. `finished_at` is when the job ended, as an ISO 8601 ' +
     'UTC timestamp, REPORTED ONLY WHERE `ended` IS TRUE — so it moves with ' +
-    '`ended` and never contradicts it — and null everywhere else, INCLUDING A ' +
-    'JOB STILL RUNNING, whose record can already carry the finish time of an ' +
-    'earlier run. It is also null where the job ended and recorded no time ' +
-    'this tool could read. `job_id` is the job\'s numeric identity and ' +
+    '`ended` and never contradicts it — and NULL EVERYWHERE ELSE EVEN IF THE ' +
+    'JOB RECORD CARRIES A TIME, since a run that was not established to be ' +
+    'over has not been established to have ended then. It is also null where ' +
+    'the job ended and recorded no time this tool could read. `job_id` is the ' +
+    'job\'s numeric identity and ' +
     'MATCHES `id` IN `tasks_recent_runs`, WHICH IS HOW A SYNC THAT WAS STILL ' +
     'RUNNING IS FOLLOWED UP — this tool reports no progress percentage and no ' +
     'live status, and that tool reports both. `job_id` is null where no job ' +

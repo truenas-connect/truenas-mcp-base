@@ -375,8 +375,9 @@ describe('cloudsync_run', () => {
           // Still running is neither a success nor a failure.
           succeeded: null,
           state: 'RUNNING',
-          // Nothing is a finish time until the run has ended, and this one has
-          // not — the row carries a time anyway, which is the earlier run's.
+          // The record carries a time and it is still not a finish time: a run
+          // that was not established to be over was not established to have
+          // ended then.
           finished_at: null,
         });
       } finally {

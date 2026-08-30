@@ -990,12 +990,25 @@ failed sync as a success. A terminal state this catalog does not recognise is
 **not** read as a success, which is `tasks_recent_runs`'s direction: a run that
 cannot be shown to have worked has not been shown to have worked.
 
-**Three answers, not two, and the description says which is which.** `ended`
-false is a sync still going and says nothing about whether it will work;
-`succeeded` null is that case or an unreadable state, and is neither a failure
-nor a success. The tool reports no progress percentage and no live status, and
-names `tasks_recent_runs` — whose `id` is this tool's `job_id` — as where a
-still-running sync is followed up.
+**`ended: false` is "not established", and the description must not enumerate
+it as a partition.** It covers a sync still going, a watch cut short by an
+error, a state the client does not treat as terminal, an unreadable state, and
+no job seen at all — and `state` and `job_id` narrow that without separating the
+first three. Two review rounds were spent here on one sentence promising three
+answers over four causes and then telling a caller which was which. **A
+not-established field is not a status enum**; say what it rules out and name
+what cannot be told apart. `succeeded` null is every one of those cases, and is
+neither a failure nor a success. The tool reports no progress percentage and no
+live status, and names `tasks_recent_runs` — whose `id` is this tool's `job_id`
+— as where a still-running sync is followed up.
+
+**A state that looks like a success does not make one, and that is the same
+rule.** `succeeded` is null beside a `state` of `SUCCESS` where the run was not
+established to be over, because the outcome is read off `ended` and a job can
+move out of a state this tool merely saw. **Do not describe an unrecognised
+terminal state as reporting `succeeded: false`** — the honest claim is the
+weaker one this tool actually makes, that no state the catalog does not know is
+ever read as a success, whichever way the watch ended.
 
 **A plan names what the operation does to the data, not what the tool's name
 suggests it does.** `cloudsync_run` starts a task whose own `transfer_mode` — a
