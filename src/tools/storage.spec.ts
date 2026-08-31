@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { fakeSystem } from '@/testing/fake-systems';
-import { listDatasets, poolStatus, quotaReport } from '@/tools/index';
+import { listDatasets, poolStatus, quotaReport, systemDatasetConfig } from '@/tools/index';
 
 describe('storage_pool_status', () => {
   it('trims pool.query to health and capacity', async () => {
@@ -252,5 +252,94 @@ describe('datasets_quota_report', () => {
         properties: ['used', 'referenced', 'quota', 'refquota'],
       },
     });
+  });
+});
+
+describe('system_dataset_config', () => {
+  const config = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    pool: 'tank',
+    pool_set: true,
+    uuid: '2b3c4d5e6f708192a3b4c5d6e7f80912',
+    basename: 'tank/.system',
+    path: '/var/db/system',
+    ...over,
+  });
+
+  const readFrom = async (answer: unknown): Promise<Record<string, unknown>> => {
+    const { ctx } = fakeSystem({ ['systemdataset.config']: answer });
+    return (await systemDatasetConfig.handler(ctx, {})) as Record<string, unknown>;
+  };
+
+  it('reports the pool, whether it was chosen, and where the dataset is mounted', async () => {
+    expect(await readFrom(config())).toEqual({
+      pool: 'tank',
+      pool_set: true,
+      path: '/var/db/system',
+    });
+  });
+
+  it('reads systemdataset.config through the plain call seam', async () => {
+    const { ctx, call } = fakeSystem({ ['systemdataset.config']: config() });
+    await systemDatasetConfig.handler(ctx, {});
+    expect(call).toHaveBeenCalledWith('systemdataset.config');
+  });
+
+  it("drops middleware's internal naming and surfaces no field a later release adds", async () => {
+    // `id`, `uuid` and `basename` are declared on the payload and deliberately
+    // absent from the result (#102), and the allowlist is what keeps a field a
+    // later TrueNAS release adds out of it.
+    const row = await readFrom(config({ dataset_quota: 'added by a later TrueNAS release' }));
+    expect(Object.keys(row)).toEqual(['pool', 'pool_set', 'path']);
+  });
+
+  it('keeps a pool middleware selected distinct from one an administrator chose', async () => {
+    // The distinction the tool exists for: the first is a decision, the second
+    // is a default that need not stay where it is.
+    const chosen = await readFrom(config({ pool_set: true }));
+    const automatic = await readFrom(config({ pool: 'boot-pool', pool_set: false }));
+    expect(chosen['pool_set']).toBe(true);
+    expect(automatic['pool_set']).toBe(false);
+    expect(automatic['pool']).toBe('boot-pool');
+  });
+
+  it('reports an unreadable pool_set as null rather than as nobody having chosen', async () => {
+    // Reading a value that is not a boolean as `false` would report an
+    // administrator's decision as an accident.
+    for (const unreadable of [undefined, null, 'true', 1]) {
+      const row = await readFrom(config({ pool_set: unreadable }));
+      expect(row['pool_set']).toBeNull();
+    }
+  });
+
+  it('reports an unreadable pool as null rather than as a pool named nothing', async () => {
+    const row = await readFrom(config({ pool: '' }));
+    expect(row['pool']).toBeNull();
+  });
+
+  it('answers null for a path the system reported as null and for one it could not read', async () => {
+    // Both land on one null on purpose: what the explicit null MEANS could not
+    // be established, so separating it from an unreadable value would hand a
+    // caller a distinction it still could not act on. The description names
+    // both causes instead.
+    const explicit = await readFrom(config({ path: null }));
+    const unreadable = await readFrom(config({ path: 42 }));
+    expect(explicit['path']).toBeNull();
+    expect(unreadable['path']).toBeNull();
+    // The rest of the row still stands — a null path is not the read failing.
+    expect(explicit['pool']).toBe('tank');
+    expect(unreadable['pool']).toBe('tank');
+  });
+
+  it('fails naming the read where the system did not answer with a configuration', async () => {
+    // A list, a bare value or nothing at all is the read failing rather than a
+    // configuration of nulls, and the caller is shown the read rather than the
+    // name of a property that could not be indexed.
+    for (const answer of [undefined, null, 'unavailable', [config()]]) {
+      const { ctx } = fakeSystem({ ['systemdataset.config']: answer });
+      await expect(systemDatasetConfig.handler(ctx, {})).rejects.toThrow(
+        'systemdataset.config did not answer with a system dataset configuration',
+      );
+    }
   });
 });

@@ -23,7 +23,7 @@ import { securityConfig } from '@/tools/security';
 import { servicesStatus } from '@/tools/services';
 import { shareAccess, sharesList } from '@/tools/shares';
 import { createSnapshot, snapshotsList } from '@/tools/snapshots';
-import { listDatasets, poolStatus, quotaReport } from '@/tools/storage';
+import { listDatasets, poolStatus, quotaReport, systemDatasetConfig } from '@/tools/storage';
 import {
   auditConfig,
   auditLogQuery,
@@ -44,7 +44,7 @@ import {
 } from '@/tools/tasks';
 import { vmDevices, vmLogs, vmsList } from '@/tools/vms';
 
-/** The sketch's catalog: fifty-three read-only tools plus six mutating tools. */
+/** The sketch's catalog: fifty-four read-only tools plus six mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -61,6 +61,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(bootPoolStatus);
   catalog.register(listDatasets);
   catalog.register(quotaReport);
+  catalog.register(systemDatasetConfig);
   catalog.register(disksList);
   catalog.register(disksTemperature);
   catalog.register(appsList);
@@ -159,6 +160,7 @@ export {
   sharesList,
   snapshotsList,
   snapshotTasksList,
+  systemDatasetConfig,
   systemGeneralConfig,
   systemHealthReport,
   systemInfo,
