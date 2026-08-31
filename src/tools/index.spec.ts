@@ -349,4 +349,10 @@ describe('createDefaultCatalog', () => {
       'system_ntp_status',
     );
   });
+
+  it('advertises privileges_list to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'privileges_list',
+    );
+  });
 });

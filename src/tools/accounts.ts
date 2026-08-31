@@ -232,7 +232,11 @@ export const usersList: ReadOnlyTool = {
     'whatever else a later TrueNAS release adds to an account record. This is ' +
     'the account listing rather than live state — it does not say who is ' +
     'logged in — and it does not report what an account is permitted to do: ' +
-    'who may reach a share is `share_access`. BOTH LISTS ARE BOUNDED: `users` ' +
+    'who may reach a share is `share_access`, and which groups hold which ' +
+    'ADMINISTRATIVE ROLES is `privileges_list`. A privilege is granted to a ' +
+    'GROUP AND NEVER TO AN ACCOUNT, so what a named account may administer is ' +
+    'this tool read together with that one — the memberships here, the roles ' +
+    'there. BOTH LISTS ARE BOUNDED: `users` ' +
     'holds at most `limit` accounts and `groups` at most `limit` groups — 100 ' +
     'by default and 1000 at most, and the `limit` returned is the bound ' +
     'actually applied. `users_truncated` and `groups_truncated` are true where ' +

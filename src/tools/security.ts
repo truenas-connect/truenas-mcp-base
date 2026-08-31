@@ -319,9 +319,12 @@ export const securityConfig: ReadOnlyTool = {
     'not send a caller there for it. What an account is permitted to do is not ' +
     'reported here either, and `users_list` says outright that it does not ' +
     'report it; who may reach a SHARE, and with what rights, is `share_access`, ' +
-    'asked one share at a time rather than one account at a time, and nothing ' +
-    'in this catalog reports the privileges an account holds more broadly than ' +
-    'that. Whether the hardware is CAPABLE of FIPS, ' +
+    'asked one share at a time rather than one account at a time, and which ' +
+    'groups hold which ADMINISTRATIVE ROLES is `privileges_list`, which is ' +
+    'keyed on a GROUP AND NEVER ON AN ACCOUNT — so it is read together with ' +
+    '`users_list`, which reports which account is in which group, and neither ' +
+    'of the two alone says what one named account may administer. ' +
+    'Whether the hardware is CAPABLE of FIPS, ' +
     'as opposed to whether it is on, is not reported. This tool only reports. ' +
     'It does not enable or disable FIPS or STIG mode, change any password ' +
     'policy setting, or turn two-factor authentication on or off — those are ' +
