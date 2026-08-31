@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the fifty-seven sketch tools', () => {
+  it('registers the fifty-eight sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -42,6 +42,7 @@ describe('createDefaultCatalog', () => {
       'nvmeof_list',
       'users_list',
       'directory_services_status',
+      'privileges_list',
       'network_interfaces',
       'network_config',
       'certificates_list',

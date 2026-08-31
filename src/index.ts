@@ -115,6 +115,7 @@ export {
   nvmeofList,
   usersList,
   directoryServicesStatus,
+  privilegesList,
   networkInterfaces,
   networkConfig,
   certificatesList,

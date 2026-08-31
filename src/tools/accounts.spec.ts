@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { failingSystem } from '@/testing/fake-systems';
-import { directoryServicesStatus, usersList } from '@/tools/index';
+import { directoryServicesStatus, privilegesList, usersList } from '@/tools/index';
 
 describe('users_list', () => {
   /**
@@ -589,5 +589,241 @@ describe('directory_services_status', () => {
       'directoryservices.config',
     ]);
     await pending;
+  });
+});
+
+describe('privileges_list', () => {
+  /**
+   * A group as a privilege embeds one. `roles`, `users`, `sudo_commands` and
+   * `sudo_commands_nopasswd` are real fields of the payload and are here to be
+   * dropped: this fixture is what makes the allowlist assertable rather than
+   * assumed. The group's own `roles` matter most — they are a different fact
+   * from the privilege's, and forwarding them would put two role lists in one
+   * result.
+   */
+  const group = (over: Record<string, unknown> = {}) => ({
+    id: 101,
+    gid: 3001,
+    name: 'admins',
+    group: 'admins',
+    local: true,
+    builtin: false,
+    sid: 'S-1-5-21-1004336348-1177238915-682003330-1013',
+    immutable: false,
+    smb: true,
+    roles: ['SHARING_ADMIN'],
+    users: [41],
+    sudo_commands: ['/usr/bin/systemctl'],
+    sudo_commands_nopasswd: [],
+    ...over,
+  });
+
+  /** A group the system could not resolve, as `privilege.query` reports one. */
+  const unmapped = (over: Record<string, unknown> = {}) => ({
+    gid: 5000,
+    sid: null,
+    group: null,
+    ...over,
+  });
+
+  /** A privilege as `privilege.query` reports one. */
+  const privilege = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    builtin_name: 'FULL_ADMIN',
+    name: 'Full Admin',
+    local_groups: [group()],
+    ds_groups: [],
+    roles: ['FULL_ADMIN'],
+    web_shell: true,
+    ...over,
+  });
+
+  /**
+   * A fixture with one key taken away, which an override cannot do: the
+   * overrides above merge onto the fixture, so a field can only be made absent
+   * by building the row without it. Absence is a distinct answer from null for
+   * both fields this is used on.
+   */
+  const without = (record: Record<string, unknown>, key: string): Record<string, unknown> => {
+    const copy = { ...record };
+    delete copy[key];
+    return copy;
+  };
+
+  type Listing = { privileges: Record<string, unknown>[] };
+
+  const listed = async (
+    rows: Partial<Record<string, unknown>> = {},
+    failures: Partial<Record<string, unknown>> = {},
+  ): Promise<Listing> => {
+    const { ctx } = failingSystem({ ['privilege.query']: [privilege()], ...rows }, failures);
+    return (await privilegesList.handler(ctx, {})) as Listing;
+  };
+
+  /** The single privilege of a listing, for the cases about one's fields. */
+  const only = async (over: Record<string, unknown> = {}): Promise<Record<string, unknown>> =>
+    (await listed({ ['privilege.query']: [privilege(over)] })).privileges[0];
+
+  it('reports each privilege with its roles, its shell access and its groups', async () => {
+    expect(await listed()).toEqual({
+      privileges: [
+        {
+          id: 1,
+          name: 'Full Admin',
+          builtin_name: 'FULL_ADMIN',
+          operator_defined: false,
+          web_shell: true,
+          roles_reported: true,
+          roles: ['FULL_ADMIN'],
+          local_groups: [
+            {
+              kind: 'RESOLVED',
+              group: {
+                id: 101,
+                gid: 3001,
+                name: 'admins',
+                local: true,
+                builtin: false,
+                sid: 'S-1-5-21-1004336348-1177238915-682003330-1013',
+              },
+              unmapped: null,
+            },
+          ],
+          ds_groups: [],
+        },
+      ],
+    });
+  });
+
+  it('returns no field of an embedded group record beyond the ones it names', async () => {
+    const held = (await only())['local_groups'] as { group: Record<string, unknown> }[];
+    // Asserted as the exact key set rather than field by field: what this is
+    // about is the fields nobody chose, which a per-field check cannot see.
+    expect(Object.keys(held[0].group).sort()).toEqual([
+      'builtin',
+      'gid',
+      'id',
+      'local',
+      'name',
+      'sid',
+    ]);
+    // The group's own roles are a different fact from the privilege's, and the
+    // fixture carries both so that this says something.
+    expect(JSON.stringify(await only())).not.toContain('SHARING_ADMIN');
+    expect(JSON.stringify(await only())).not.toContain('systemctl');
+  });
+
+  it('reads a privilege the system named no stock name for as operator-defined', async () => {
+    expect(await only({ builtin_name: null })).toMatchObject({
+      builtin_name: null,
+      operator_defined: true,
+    });
+  });
+
+  it('refuses to call a stock name it could not read an operator-defined privilege', async () => {
+    // Null for both causes would read as "somebody created this", which is a
+    // claim on a field that arrived as something unreadable rather than as null.
+    expect(await only({ builtin_name: 7 })).toMatchObject({
+      builtin_name: null,
+      operator_defined: null,
+    });
+    expect(await only({ builtin_name: '' })).toMatchObject({
+      builtin_name: null,
+      operator_defined: null,
+    });
+  });
+
+  it('reports shell access the system said nothing about as null, never as false', async () => {
+    expect(await only({ web_shell: 'yes' })).toMatchObject({ web_shell: null });
+    expect(await only({ web_shell: false })).toMatchObject({ web_shell: false });
+  });
+
+  it('tells a version that reports no roles from a privilege that confers none', async () => {
+    const listing = await listed({ ['privilege.query']: [without(privilege(), 'roles')] });
+    expect(listing.privileges[0]).toMatchObject({ roles_reported: false, roles: null });
+    expect(await only({ roles: [] })).toMatchObject({ roles_reported: true, roles: [] });
+  });
+
+  it('nulls the whole role list where any one name could not be read', async () => {
+    // Dropping the unreadable entry would say the group holds less authority
+    // than it does, which is the claim this refuses to make.
+    expect(await only({ roles: ['FULL_ADMIN', 3] })).toMatchObject({
+      roles_reported: true,
+      roles: null,
+    });
+    expect(await only({ roles: 'FULL_ADMIN' })).toMatchObject({
+      roles_reported: true,
+      roles: null,
+    });
+  });
+
+  it('reports a group the system could not resolve, with what the privilege named', async () => {
+    expect(await only({ local_groups: [unmapped()], ds_groups: [unmapped({ sid: 'S-1-5-32' })] }))
+      .toMatchObject({
+        local_groups: [{ kind: 'UNMAPPED', group: null, unmapped: { gid: 5000, sid: null } }],
+        ds_groups: [{ kind: 'UNMAPPED', group: null, unmapped: { gid: 5000, sid: 'S-1-5-32' } }],
+      });
+  });
+
+  it('keeps an entry it could not read at all, rather than shortening the list', async () => {
+    // A list one entry shorter understates who holds the privilege, so the
+    // entry stays and says what it is.
+    expect(await only({ local_groups: [group(), 'admins', null] })).toMatchObject({
+      local_groups: [
+        { kind: 'RESOLVED' },
+        { kind: 'UNREADABLE', group: null, unmapped: null },
+        { kind: 'UNREADABLE', group: null, unmapped: null },
+      ],
+    });
+  });
+
+  it('reads a record carrying no group alias as a group that resolved', async () => {
+    // `group` is a legacy alias for the name, and only an explicit null means
+    // the unmapped arm — a record without the field at all is an ordinary group.
+    expect(await only({ local_groups: [without(group(), 'group')] })).toMatchObject({
+      local_groups: [{ kind: 'RESOLVED', group: { id: 101, name: 'admins' } }],
+    });
+  });
+
+  it('reports each unreadable field of a group that resolved as null', async () => {
+    expect(
+      await only({ local_groups: [group({ gid: 'x', name: '', local: 1, builtin: null, sid: '' })] }),
+    ).toMatchObject({
+      local_groups: [
+        {
+          kind: 'RESOLVED',
+          group: { id: 101, gid: null, name: null, local: null, builtin: null, sid: null },
+        },
+      ],
+    });
+  });
+
+  it('tells a group list the system did not report from a privilege granted to none', async () => {
+    expect(await only({ local_groups: null, ds_groups: [] })).toMatchObject({
+      local_groups: null,
+      ds_groups: [],
+    });
+  });
+
+  it('reports an unreadable id or name as null', async () => {
+    expect(await only({ id: null, name: '' })).toMatchObject({ id: null, name: null });
+  });
+
+  it('reports a system with no privileges as an empty list', async () => {
+    expect(await listed({ ['privilege.query']: [] })).toEqual({ privileges: [] });
+  });
+
+  it('reads the privileges unbounded, because an operator wrote them', async () => {
+    const { ctx, query } = failingSystem({ ['privilege.query']: [privilege()] });
+    await privilegesList.handler(ctx, {});
+    expect(query.mock.calls).toEqual([['privilege.query']]);
+  });
+
+  it('raises when the privileges cannot be read', async () => {
+    // The one read answers the whole question, so there is nothing to report a
+    // failure beside.
+    await expect(listed({}, { ['privilege.query']: new Error('denied') })).rejects.toThrow(
+      'denied',
+    );
   });
 });
