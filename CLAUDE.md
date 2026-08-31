@@ -1457,6 +1457,64 @@ read and where the system sent the empty address the middleware accepts on a
 TCP port — stated, since **this catalog does not establish what an empty
 address means** (#120), and a null there is not evidence a port listens nowhere.
 
+### Two credentials on one payload, and what still gets passed through (#139)
+
+`ups_config` reads `ups.config`, whose `UPSEntry` carries `monpwd` — the UPS
+monitor password, declared a plain `string` with nothing in the type saying it is
+a secret — and `extrausers`, free-form `upsd` user configuration, which is the
+other place a monitoring credential is written. Naming the twelve reported fields
+one by one is what keeps both out, and it is #97's rule rather than caution: a
+tool result is recorded verbatim in the audit trail (S3.3), so a mapping written
+by trimming would put both in one.
+
+**`monpwd` is not reported as WHETHER ONE IS SET either**, which is the answer
+#100 gave for `VMDisplayDevice.password` and is taken here deliberately rather
+than reached by omission. `monuser` goes out with it: it is a username rather
+than a secret and could be reported, but it answers nothing a reader would act
+on, and **both halves of one credential outside the boundary is a line a later
+edit is less likely to widen by accident than a line drawn through the middle of
+one.**
+
+**What decides the remaining fields is whether they answer the tool's own
+question, and that cuts both ways on the same payload.** `shutdowncmd` is
+operator-supplied shell text and it IS reported — it is the most direct answer
+this tool has to "what does this system do on the way down", and #97 already
+passes a cron job's `command` through in a listing whose description warns about
+it, drawing the line at a mutating tool's approval text. `options` and
+`optionsupsd` are operator-supplied text too and are NOT reported: they answer no
+question this tool is asked, the surface states nothing about what goes in
+either, and an option string is where a device credential gets inlined. **Two
+free-form operator strings on one payload, opposite answers — the warning in a
+description buys a field its place only where the field is load-bearing.**
+
+`rmonitor`, `hostsync` and `complete_identifier` are left out under #102: a bare
+boolean, a bare number, and a name that says "complete" with nothing on the
+surface saying complete relative to what. Every one of those omissions is named
+in the description, per that decision's corollary.
+
+### A payload that answers whether or not the thing exists (#139)
+
+`ups.config` returns a full configuration on a system that has never had a UPS —
+every field declared and typed, none of them an `enabled`, defaults where nothing
+was set. **No field distinguishes "configured" from "never set up"**, checked
+against the declared entry rather than assumed, so the description says outright
+that the tool reports configuration and does not establish that a UPS is
+attached, reachable, or being monitored. That is #133's shape — the measured half
+of the question is not on this surface — with `services_status` named as the
+nearest answerable part rather than the caller being left to infer it.
+
+**The consequence a description must state is that an empty-looking result is the
+ORDINARY answer**, not a fault and not a failed read. Which is also why a payload
+that is not a record is fatal here rather than mapped to nulls: a result of nulls
+would be indistinguishable from the unconfigured system, and only one of the two
+was actually read.
+
+**`remote_host` and `remote_port` are not grouped under `mode`.** The obvious
+description — "these describe the far end when the system is a slave" — is a
+claim the surface does not make, exactly as `RsyncTaskEntry` ties no field to its
+`mode` (#97). Each is described as what the configuration records, and a null in
+them is not evidence the system owns its own UPS.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

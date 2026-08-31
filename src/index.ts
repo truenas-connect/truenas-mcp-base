@@ -85,6 +85,7 @@ export {
   securityConfig,
   systemGeneralConfig,
   systemNtpStatus,
+  upsConfig,
   poolStatus,
   poolTopology,
   scrubHistory,
