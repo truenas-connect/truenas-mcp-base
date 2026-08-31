@@ -665,3 +665,74 @@ describe('ToolExecutor — result guidance', () => {
     expect((await run(build())).guidance).toBe('fresh');
   });
 });
+
+describe('ToolExecutor — result guidance on the mutating paths', () => {
+  /**
+   * A mutating tool whose plan can be made to fail everywhere. The read-only
+   * block above covers the SUCCESS gate; these cover the two other routes that
+   * reach a RESULTS outcome, one of which `results()` names in its comment as
+   * falling out of that gate rather than being handled separately.
+   */
+  function mutatingSetup(options: { planFails?: boolean } = {}) {
+    const registry = new SystemRegistry();
+    for (const name of ['a', 'b']) {
+      registry.add({ name, client: {} as TrueNasApiClient } as SystemHandle);
+    }
+    const tool: MutatingTool = {
+      name: 'guided_write',
+      description: 'selection text',
+      resultGuidance: 'how to read what came back',
+      inputSchema: { type: 'object', properties: {} },
+      requiredRole: Role.Full,
+      mutating: true,
+      destructiveness: 'reversible',
+      plan: async ({ system }) => {
+        if (options.planFails) {
+          throw new Error(`cannot plan on ${system.name}`);
+        }
+        return [{ method: 'write', params: {}, description: `write on ${system.name}` }];
+      },
+      execute: async ({ system }) => ({ written: system.name }),
+    };
+    const catalog = new ToolCatalog();
+    catalog.register(tool);
+    const confirmations = new ConfirmationService();
+    return {
+      confirmations,
+      executor: new ToolExecutor({ catalog, registry, confirmations }),
+    };
+  }
+
+  it('does not spend the delivery on a plan that failed on every system', async () => {
+    // The all-ERROR gate reaching the path that returns steps as RESULTS.
+    const { executor } = mutatingSetup({ planFails: true });
+    const outcome = await executor.execute('guided_write', { systems: 'all' });
+    expect(outcome.type).toBe('RESULTS');
+    if (outcome.type !== 'RESULTS') {
+      throw new Error('expected RESULTS');
+    }
+    expect(outcome.results.every((r) => r.status === 'ERROR')).toBe(true);
+    expect(outcome.guidance).toBeUndefined();
+  });
+
+  it('attaches it to the confirmed execution, and not to the plan before it', async () => {
+    const { executor, confirmations } = mutatingSetup();
+    const planned = await executor.execute('guided_write', { systems: 'all' });
+    if (planned.type !== 'PLAN') {
+      throw new Error('expected PLAN');
+    }
+    // A plan is approval text, not data — guidance is about reading a result,
+    // and the PLAN arm has nowhere to carry it.
+    expect(planned).not.toHaveProperty('guidance');
+
+    const token = confirmations.mint(planned.key);
+    const executed = await executor.execute('guided_write', {
+      systems: 'all',
+      confirmation_token: token,
+    });
+    if (executed.type !== 'RESULTS') {
+      throw new Error('expected RESULTS');
+    }
+    expect(executed.guidance).toBe('how to read what came back');
+  });
+});
