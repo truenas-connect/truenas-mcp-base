@@ -1,12 +1,74 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { EMPTY, Observable, of, throwError } from 'rxjs';
 import { fakeSystem } from '@/testing/fake-systems';
+import { SystemHandle, ToolContext } from '@/catalog/tool';
 import { listDatasets, poolStatus, quotaReport, systemDatasetConfig } from '@/tools/index';
 
 describe('storage_pool_status', () => {
+  /** One row of `pool.query`, with the fields this tool reads. */
+  const pool = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    name: 'tank',
+    status: 'ONLINE',
+    healthy: true,
+    size: 100,
+    allocated: 40,
+    free: 60,
+    ...over,
+  });
+
+  interface Row {
+    name: string | null;
+    feature_flags_current: boolean | null;
+  }
+
+  interface Options {
+    pools?: unknown[];
+    /** What `pool.is_upgraded` answers, per pool id. */
+    upgraded?: Record<number, unknown>;
+    /** Keyed `pool.is_upgraded:<id>`, for one pool's read failing on its own. */
+    failures?: Record<string, unknown>;
+  }
+
+  /**
+   * A SystemHandle answering `pool.is_upgraded` PER POOL ID, which neither
+   * `fakeSystem` nor `failingSystem` can do: both key on the method alone, and
+   * every pool's flag comes back from the same method distinguished only by the
+   * id asked for.
+   */
+  const poolSystem = (options: Options = {}) => {
+    const failures = options.failures ?? {};
+    const upgraded = options.upgraded ?? {};
+    const query = vi.fn(() => of(options.pools ?? [pool()]));
+    // The client takes a call's parameters as one tuple, so the id arrives
+    // wrapped: `call('pool.is_upgraded', [1])`.
+    const call = vi.fn((method: string, params: [number]) => {
+      const key = `${method}:${params[0]}`;
+      return key in failures ? throwError(() => failures[key]) : of(upgraded[params[0]]);
+    });
+    const system = { name: 'nas', client: { api: { call, query } } } as unknown as SystemHandle;
+    return { ctx: { system } as ToolContext, call, query };
+  };
+
+  const rows = async (options: Options = {}): Promise<Row[]> =>
+    (await poolStatus.handler(poolSystem(options).ctx, {})) as Row[];
+
+  const flag = async (options: Options = {}): Promise<boolean | null> =>
+    (await rows(options))[0].feature_flags_current;
+
   it('trims pool.query to health and capacity', async () => {
     const { ctx } = fakeSystem({
       ['pool.query']: [
-        { name: 'tank', status: 'ONLINE', healthy: true, size: 100, allocated: 40, free: 60 },
+        {
+          id: 1,
+          name: 'tank',
+          status: 'ONLINE',
+          healthy: true,
+          size: 100,
+          allocated: 40,
+          free: 60,
+          is_upgraded: true,
+        },
       ],
     });
     expect(await poolStatus.handler(ctx, {})).toEqual([
@@ -17,8 +79,135 @@ describe('storage_pool_status', () => {
         size_bytes: 100,
         allocated_bytes: 40,
         free_bytes: 60,
+        feature_flags_current: true,
       },
     ]);
+  });
+
+  it('reports the feature-flag state the pool row carried, and asks nothing further', async () => {
+    const fake = poolSystem({ pools: [pool({ is_upgraded: true })] });
+    const [row] = (await poolStatus.handler(fake.ctx, {})) as Row[];
+    expect(row.feature_flags_current).toBe(true);
+    // The row already answered, so the separate verb is a call nothing needs.
+    expect(fake.call).not.toHaveBeenCalled();
+  });
+
+  it('reports a false the pool row carried rather than reading it again', async () => {
+    // `false` is the answer this tool exists to surface and it is also falsy,
+    // so a fallback written as `carried || read()` would ask the middleware a
+    // second question about a pool that had already answered.
+    const fake = poolSystem({ pools: [pool({ is_upgraded: false })], upgraded: { 1: true } });
+    const [row] = (await poolStatus.handler(fake.ctx, {})) as Row[];
+    expect(row.feature_flags_current).toBe(false);
+    expect(fake.call).not.toHaveBeenCalled();
+  });
+
+  it('reads the flag by the pool own id where the row did not carry one', async () => {
+    const fake = poolSystem({ pools: [pool({ id: 7 })], upgraded: { 7: false } });
+    const [row] = (await poolStatus.handler(fake.ctx, {})) as Row[];
+    expect(row.feature_flags_current).toBe(false);
+    expect(fake.call.mock.calls).toEqual([['pool.is_upgraded', [7]]]);
+  });
+
+  it('reads each pool by its own id, so two pools do not share one answer', async () => {
+    const fake = poolSystem({
+      pools: [pool({ id: 1 }), pool({ id: 2, name: 'vault' })],
+      upgraded: { 1: true, 2: false },
+    });
+    const result = (await poolStatus.handler(fake.ctx, {})) as Row[];
+    expect(result.map((row) => row.feature_flags_current)).toEqual([true, false]);
+    expect(fake.call.mock.calls).toEqual([
+      ['pool.is_upgraded', [1]],
+      ['pool.is_upgraded', [2]],
+    ]);
+  });
+
+  it('issues every fallback read together rather than one pool after another', async () => {
+    // Nothing answers until it is released, so a sequential fan-out would have
+    // subscribed to the first read and stopped there. Both being outstanding at
+    // once is what says the reads were issued together.
+    const release: ((value: boolean) => void)[] = [];
+    const call = vi.fn(
+      () =>
+        new Observable<unknown>((subscriber) => {
+          release.push((value) => {
+            subscriber.next(value);
+            subscriber.complete();
+          });
+        }),
+    );
+    const query = vi.fn(() => of([pool({ id: 1 }), pool({ id: 2, name: 'vault' })]));
+    const system = { name: 'nas', client: { api: { call, query } } } as unknown as SystemHandle;
+    const answered = poolStatus.handler({ system } as ToolContext, {});
+    await vi.waitFor(() => expect(release).toHaveLength(2));
+    release[0](true);
+    release[1](false);
+    expect(((await answered) as Row[]).map((row) => row.feature_flags_current)).toEqual([
+      true,
+      false,
+    ]);
+  });
+
+  it('reports no flag, and asks nothing, for a pool with no id to ask about', async () => {
+    const fake = poolSystem({ pools: [pool({ id: null })] });
+    const [row] = (await poolStatus.handler(fake.ctx, {})) as Row[];
+    expect(row.feature_flags_current).toBeNull();
+    expect(fake.call).not.toHaveBeenCalled();
+  });
+
+  it('reports no flag where the separate read was refused', async () => {
+    expect(await flag({ failures: { ['pool.is_upgraded:1']: { reason: 'no such pool' } } })).toBeNull();
+  });
+
+  it('reports no flag where the read answered with something that is not a boolean', async () => {
+    expect(await flag({ upgraded: { 1: 'yes' } })).toBeNull();
+  });
+
+  it('reports no flag where the read completed without answering at all', async () => {
+    // `firstValueFrom` raises on an observable that completes without emitting.
+    // That is neither a refusal nor a non-boolean answer, which is why the
+    // description says what a null rules out rather than listing its causes.
+    const call = vi.fn(() => EMPTY);
+    const query = vi.fn(() => of([pool({ id: 1 })]));
+    const system = { name: 'nas', client: { api: { call, query } } } as unknown as SystemHandle;
+    const [row] = (await poolStatus.handler({ system } as ToolContext, {})) as Row[];
+    expect(row.feature_flags_current).toBeNull();
+  });
+
+  it('reports no flag where the row carried one that is not a boolean', async () => {
+    // The row's value is unreadable rather than absent, and the verb is still
+    // asked — it is the authoritative source for this question either way.
+    const fake = poolSystem({ pools: [pool({ is_upgraded: 'yes' })], upgraded: { 1: true } });
+    const [row] = (await poolStatus.handler(fake.ctx, {})) as Row[];
+    expect(row.feature_flags_current).toBe(true);
+    expect(fake.call.mock.calls).toEqual([['pool.is_upgraded', [1]]]);
+  });
+
+  it('keeps every other field of a pool whose flag could not be read', async () => {
+    // This tool is composed by `system_health_report` and, through it, by
+    // `fleet_health_rollup`. A flag that cannot be read must not be able to
+    // take down the catalog's most load-bearing read.
+    const { ctx } = poolSystem({ failures: { ['pool.is_upgraded:1']: new Error('refused') } });
+    expect(await poolStatus.handler(ctx, {})).toEqual([
+      {
+        name: 'tank',
+        status: 'ONLINE',
+        healthy: true,
+        size_bytes: 100,
+        allocated_bytes: 40,
+        free_bytes: 60,
+        feature_flags_current: null,
+      },
+    ]);
+  });
+
+  it('does not let one pool unreadable flag reach another pool', async () => {
+    const result = await rows({
+      pools: [pool({ id: 1 }), pool({ id: 2, name: 'vault' })],
+      upgraded: { 2: true },
+      failures: { ['pool.is_upgraded:1']: new Error('refused') },
+    });
+    expect(result.map((row) => row.feature_flags_current)).toEqual([null, true]);
   });
 });
 

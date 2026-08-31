@@ -116,6 +116,31 @@ describe('system_health_report', () => {
     });
   });
 
+  it('raises nothing for a pool still on an older set of ZFS feature flags', async () => {
+    // `storage_pool_status` reports `feature_flags_current`, and this report
+    // neither carries it nor scores it. That is a decision rather than an
+    // omission: the verdict here is about HEALTH, and a pool that has not been
+    // upgraded is a NOTICE-level configuration fact — it keeps working, and
+    // upgrading it is one-way. #46's rule is to summarise by dropping fields
+    // and never by re-judging them, so the field stops at the composed tool.
+    const result = await report(healthy({ ['pool.query']: [pool({ is_upgraded: false })] }));
+    expect(result.verdict).toBe('OK');
+    expect(result.reasons).toEqual([]);
+    // Asserted as the exact key list rather than as an absence. Nothing can
+    // arrive here on its own — `poolEntries` names its six fields by hand,
+    // which is #44's guard and is what kept the new field out without a line
+    // changing there — so what this pins is the DECISION: an edit that added
+    // the field to the composite would have to fail a test to land.
+    expect(Object.keys((result['pools']['entries'] as object[])[0])).toEqual([
+      'name',
+      'status',
+      'healthy',
+      'size_bytes',
+      'allocated_bytes',
+      'used_percent',
+    ]);
+  });
+
   it('states how full a pool is to one decimal place', async () => {
     const result = await report(
       healthy({ ['pool.query']: [pool({ size: 3000, allocated: 1000 })] }),

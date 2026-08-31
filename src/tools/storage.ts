@@ -1,7 +1,7 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
-import { ReadOnlyTool } from '@/catalog/tool';
-import { booleanOrNull, recordOrNull, textOrNull } from '@/tools/common';
+import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+import { booleanOrNull, numberOrNull, recordOrNull, textOrNull } from '@/tools/common';
 
 /** A ZFS property as the middleware reports it. The client declares the property
  * object on the dataset fields it names, but types its `parsed` value `unknown`
@@ -14,23 +14,106 @@ interface ZfsProperty {
 
 /** Storage-health family: read-only inspection of pools and datasets. */
 
+/**
+ * Whether a pool's ZFS feature flags match what the running TrueNAS version
+ * offers — read from wherever the system actually answered it.
+ *
+ * The question has two sources on the pinned surface, and they are the same
+ * fact. A `pool.query` row declares `is_upgraded?: boolean`, OPTIONAL, so a
+ * system may or may not send it; `pool.is_upgraded` is a separate verb taking
+ * one pool id and answering a bare boolean. The row is read first and the verb
+ * is called only where the row carried no boolean this file could read — #102's
+ * rule that a reading both shapes satisfy is worth more than a guard written to
+ * one of them, and #132's lazily-made fallback, since a supporting read nothing
+ * needed should not be issued at all.
+ *
+ * **Null is "not established", and it is never read as either verdict.** A pool
+ * reported current when the read failed understates a finding and the reverse
+ * invents one, which is the direction #93 turns on. Several causes reach it and
+ * this result separates none of them: a row carrying no readable flag beside no
+ * readable pool id, so there was nothing to aim the verb at; a verb that
+ * rejected; a verb that answered with something that is not a boolean; and a
+ * verb whose observable completed without emitting at all, which `firstValueFrom`
+ * raises as an error and this catch takes with the rest. The description says
+ * what a null RULES OUT rather than enumerating a partition it does not have.
+ *
+ * **The rejection is caught here rather than reported.** `storage_pool_status`
+ * is composed by `system_health_report` and, through it, by
+ * `fleet_health_rollup`, so a flag this tool cannot read must not be able to
+ * take down every other field of the catalog's most load-bearing read. The
+ * reason text is dropped rather than carried in a companion field: #134's bar
+ * is that a companion earns its place where the causes behind one null are ones
+ * a caller would act on differently, and every cause above leaves the same
+ * course of action — read the pool's flag some other way.
+ */
+async function featureFlagsCurrent(
+  system: SystemHandle,
+  id: unknown,
+  stated: unknown,
+): Promise<boolean | null> {
+  const carried = booleanOrNull(stated);
+  if (carried !== null) return carried;
+  const poolId = numberOrNull(id);
+  if (poolId === null) return null;
+  try {
+    const answer = await firstValueFrom(system.client.api.call('pool.is_upgraded', [poolId]));
+    return booleanOrNull(answer);
+  } catch {
+    return null;
+  }
+}
+
 export const poolStatus: ReadOnlyTool = {
   name: 'storage_pool_status',
   description:
     'Health and capacity of ZFS storage pools: status, whether the pool is ' +
-    'healthy, and size/allocated/free in bytes.',
+    'healthy, and size/allocated/free in bytes. ' +
+    "`feature_flags_current` is whether the pool's ZFS FEATURE FLAGS match " +
+    'what the running TrueNAS version offers. True is a pool holding every ' +
+    'feature this release has. False is a pool still on an older set, which ' +
+    'keeps working — nothing fails, which is why an un-upgraded pool goes ' +
+    'unnoticed — and simply never gets whatever the newer features were for. ' +
+    "UPGRADING A POOL'S FEATURE FLAGS IS ONE-WAY AND CANNOT BE UNDONE. An " +
+    'upgraded pool can no longer be read by an older ZFS, so upgrading it can ' +
+    'PREVENT ROLLING THE SYSTEM BACK to an earlier TrueNAS version — which is ' +
+    'why a false here is a fact to report and never a defect to fix ' +
+    'implicitly. NOTHING IN THIS CATALOG UPGRADES A POOL: `pool.upgrade` is ' +
+    'not a tool here, and the decision belongs to a person in the UI. ' +
+    'A NULL `feature_flags_current` IS NOT A FALSE. Null is "this was not ' +
+    'established", and SEVERAL causes reach it that this result separates ' +
+    'NONE of: the system reported no flag on the pool row and no pool id to ' +
+    'ask about separately, a separate read that was refused, a separate read ' +
+    'that answered with something this tool could not take as a boolean, and ' +
+    'any other way that read ended without producing one. What a null DOES ' +
+    'rule out is that this tool read a boolean: it is not evidence that the ' +
+    'pool is behind, and not evidence that it is current. ' +
+    '`system_health_report` DOES NOT RAISE A FINDING FOR THIS, and its verdict ' +
+    'says nothing about it either way: feature-flag currency is a ' +
+    'configuration fact rather than a health problem. The system also reports ' +
+    'it as a NOTICE-level `PoolUpgraded` alert, which `alerts_list` carries as ' +
+    'prose — dismissed or not, since that tool includes dismissed alerts — for ' +
+    'as long as the system raises it; this field is the same fact as a state ' +
+    'per pool. A pool that is behind is therefore not a reason that report is ' +
+    'anything other than OK, and this field is where the answer lives.',
   inputSchema: { type: 'object', properties: {} },
   requiredRole: Role.ReadOnly,
   mutating: false,
   async handler({ system }) {
     const pools = await firstValueFrom(system.client.api.query('pool.query'));
-    return pools.map((pool) => ({
+    // One read per pool whose row did not already carry the flag, and all of
+    // them issued together — the listing is what supplies the ids, so the whole
+    // fan-out costs one further round trip rather than one per pool.
+    const current = await Promise.all(
+      pools.map((pool) => featureFlagsCurrent(system, pool.id, pool.is_upgraded)),
+    );
+    return pools.map((pool, position) => ({
       name: pool.name,
       status: pool.status,
       healthy: pool.healthy,
       size_bytes: pool.size,
       allocated_bytes: pool.allocated,
       free_bytes: pool.free,
+      feature_flags_current: current[position],
     }));
   },
 };
