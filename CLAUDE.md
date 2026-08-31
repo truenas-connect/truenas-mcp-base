@@ -313,7 +313,9 @@ Two things that rule does not decide on its own:
 - **The catalog-wide test is not any tool's.** The exact-list assertion over
   `createDefaultCatalog()` is about `src/tools/index.ts`, so it lives in
   `index.spec.ts` under the same rule as everything else. Registering a tool
-  means editing that file and the module's own spec, and nothing else.
+  means editing `src/tools/index.ts` and that spec, the module's own source and
+  its spec, and `src/index.ts` — which this bullet used to leave out, and a tool
+  duly shipped registered and unexported. See #151 for what pins it now.
 
 **`src/testing/` is test support, and is neither the library nor code under
 test.** `fakeSystem` and `failingSystem` were declared once at the top of the
@@ -1631,6 +1633,58 @@ the description because the name is the middleware's to spell. That is
 `storage_scrub_history`'s finding arriving through a field this repository did
 not name, and it is why the description says what the flag does NOT mean before
 it says anything else about it.
+
+### The public barrel is pinned by identity, and its spec sits beside it (#151)
+
+`src/index.ts` names every tool by hand and an export there is a contract, and
+until #151 **nothing asserted that it did**. #141 registered a tool, re-exported
+it from `src/tools/index.ts`, and left it out of the public barrel: typecheck,
+lint, 1427 tests, the coverage floors and the build were all green, because the
+exact-list assertion in `src/tools/index.spec.ts` reads
+`createDefaultCatalog().list()` and that says nothing about what the package
+exports. The failure is invisible from inside the repository and lands on a
+consumer.
+
+**The spec is `src/index.spec.ts`, beside the module, not a third block in
+`src/tools/index.spec.ts`.** That is #87's own rule — a spec sits beside the
+module it covers and is named for it — reaching the one module the rule had not
+been applied to. `src/index.ts` being excluded from coverage is not a reason to
+put its spec elsewhere: the exclusion is about a re-export barrel having no
+lines worth counting, and the contract it carries is still a thing to pin.
+
+**Every assertion is by IDENTITY, and that is what makes it worth having.**
+`list()` advertises schema and metadata only, so it cannot answer an identity
+question; `get()` returns the registered `Tool` itself. A name-string comparison
+would pass on a barrel re-exporting a different tool under the right name, which
+is the next shape of the same failure and the one a bulk refactor produces.
+
+**Three assertions, because the catalog cannot answer the third.** Every
+registered tool is exported (missing tools reported by catalog name); no
+tool-shaped export is unregistered; and each tool export NAME is bound to the
+same object `src/tools/index.ts` binds it to. The catalog holds no record of
+which export name a tool belongs under — `poolStatus` is `storage_pool_status`
+and nothing derives one from the other — so a pairwise SWAP of two export names
+satisfies both directions of the catalog comparison. `src/tools/index.ts` is
+where that mapping lives and is the module the barrel re-exports from, so
+pinning the two by name and identity is what closes it.
+
+**A tool export is told apart from the rest by `mutating`.** A tool is the only
+non-null OBJECT in the barrel carrying a string `name`, a string `description`,
+an object `inputSchema` and a boolean `mutating`; `Role`, `RESERVED_ARGS`,
+`fullAccessRoleMapper`, `noopAuditSink` and `consoleAuditSink` are the other
+object-valued exports and none declares it, and everything else is a function or
+a class, which `typeof value === 'object'` excludes — a class would otherwise
+slip past a `name` test, since every class has one. **The predicate must read
+both arms of `Tool`**: one that tested for `handler` would silently stop checking
+the mutating tools rather than fail. A predicate matching something that is not
+a tool fails loudly instead — it lands in the unregistered list by name.
+
+**The non-tool half is pinned by hand, because nothing else can pin it.** The
+tool half has the catalog as its source of truth; the rest of the barrel has
+none, so the export names are listed in the spec and compared sorted. Sorted
+rather than in the file's own order: the key order of a module namespace object
+is a property of the module system, not of `src/index.ts`, and pinning it would
+assert something this repository does not decide.
 
 ## Conventions
 
