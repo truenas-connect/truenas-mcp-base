@@ -1583,6 +1583,55 @@ alerts are still active conditions and are included. A pointer between tools is
 a claim about the other tool, and it can be false the same way any description
 can.
 
+### Match a numbering by stating it, not by importing the family that renders it (#141)
+
+`pool_resilver_config` reports `weekday` as the NUMBERS the middleware sent,
+and the ticket asked for the numbering `tasks.ts` already settled for cron
+day-of-week fields. Two things were in tension: #95 refuses to copy a family's
+vocabulary into a second family — the cron rendering (`dayName`,
+`describeSchedule`) is the tasks family's own — while a second, disagreeing
+account of what day `1` is would be exactly the drift `common.ts` was cut to
+stop.
+
+**The way out was that there was nothing to choose between.** The surface
+declares `weekday?: number[]` and states no numbering, so the reading is a
+guess in the #98 sense; what makes it a checkable one is that the two candidate
+numberings AGREE ON EVERY VALUE BOTH DEFINE. Cron runs 0 and 7 for Sunday with
+1 Monday through 6 Saturday (`dayName` maps `n % 7` over a Sunday-first list);
+ISO-8601 runs 1 Monday through 7 Sunday and has no 0. So 1–7 name the same day
+under both, and 0 is cron's alone. The description states that agreement and
+stops there — it does not claim the field IS cron-numbered — and `pools.ts`
+imports nothing from `tasks.ts`. **Matching a convention is stating it; it is
+not re-siting the code that implements it**, and where two readings coincide,
+saying so is a stronger claim than picking one (#102's reduction that both
+shapes satisfy, reached from the numbering instead of from the payload).
+
+**The range check is what keeps that statement true**, which is why it is
+all-or-nothing. An entry outside 0–7 is a day neither numbering names, so the
+list has been misread rather than partially read — the same reading
+`numberList` gives an out-of-range cron field — and under #93 a `weekday` one
+day shorter would say the window does not apply on that day, which is a claim.
+`[]` stays `[]`: the system reported a list and it names no day.
+
+**"System-local" is itself an unconfirmed reading, and the ticket asking for it
+does not make it a confirmed one.** `begin` and `end` are clock times with no
+zone in them, and the surface states the zone for these no more than it does
+for any other schedule the catalog reports. What is established is the
+negative — nothing in the strings says which zone, so the instant either names
+is not fixed by this read — and the local-time reading is carried as
+`(unconfirmed)`, in `ups_config`'s form, with `system_general_config` named as
+where to confirm it. **A ticket can ask for a sentence and still not supply the
+evidence for it**; state what the read establishes, and mark the rest.
+
+**A middleware field name inherits none of the tool's care, and `enabled` is
+the case to watch.** `enabled: false` on this payload means the priority window
+is not in force — the system still resilvers, at ordinary priority — so the
+name promises a great deal more than it delivers, and the correction lives in
+the description because the name is the middleware's to spell. That is
+`storage_scrub_history`'s finding arriving through a field this repository did
+not name, and it is why the description says what the flag does NOT mean before
+it says anything else about it.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

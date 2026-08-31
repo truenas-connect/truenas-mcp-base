@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the sixty-one sketch tools', () => {
+  it('registers the sixty-two sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -17,6 +17,7 @@ describe('createDefaultCatalog', () => {
       'storage_pool_status',
       'storage_pool_topology',
       'storage_scrub_history',
+      'pool_resilver_config',
       'boot_pool_status',
       'storage_list_datasets',
       'datasets_quota_report',

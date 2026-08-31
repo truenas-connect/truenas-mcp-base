@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { fakeSystem } from '@/testing/fake-systems';
-import { poolTopology, scrubHistory } from '@/tools/index';
+import { Role } from '@/interfaces';
+import { failingSystem, fakeSystem } from '@/testing/fake-systems';
+import { poolResilverConfig, poolTopology, scrubHistory } from '@/tools/index';
 
 /** The shape `storage_pool_topology` returns, for the assertions below. */
 interface MappedDevice {
@@ -634,5 +635,144 @@ describe('storage_scrub_history', () => {
   it('returns [] for a system with no pools', async () => {
     const { ctx } = fakeSystem({ ['pool.query']: [] });
     expect(await scrubHistory.handler(ctx, {})).toEqual([]);
+  });
+});
+
+describe('pool_resilver_config', () => {
+  /** The configuration as `pool.resilver.config` reports one. */
+  const config = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    enabled: true,
+    begin: '18:00',
+    end: '09:00',
+    weekday: [1, 2, 3, 4, 5, 6, 7],
+    ...over,
+  });
+
+  const read = async (payload: unknown): Promise<Record<string, unknown>> => {
+    const { ctx } = fakeSystem({ ['pool.resilver.config']: payload });
+    return (await poolResilverConfig.handler(ctx, {})) as Record<string, unknown>;
+  };
+
+  it('is advertised as a read-only, non-mutating tool taking no arguments', () => {
+    expect(poolResilverConfig.name).toBe('pool_resilver_config');
+    expect(poolResilverConfig.mutating).toBe(false);
+    expect(poolResilverConfig.requiredRole).toBe(Role.ReadOnly);
+    expect(poolResilverConfig.inputSchema).toEqual({ type: 'object', properties: {} });
+  });
+
+  it('reads the one system-wide configuration, with no parameters', async () => {
+    const { ctx, call } = fakeSystem({ ['pool.resilver.config']: config() });
+    expect(await poolResilverConfig.handler(ctx, {})).toEqual({
+      enabled: true,
+      begin: '18:00',
+      end: '09:00',
+      weekday: [1, 2, 3, 4, 5, 6, 7],
+    });
+    expect(call).toHaveBeenCalledWith('pool.resilver.config');
+  });
+
+  it('reports the four fields and nothing else, whatever the payload adds', async () => {
+    // `id` is dropped deliberately — there is one such configuration — and the
+    // allowlist is what keeps a field a later release adds out of the result.
+    const result = await read(
+      config({ future_field: 'added by a later TrueNAS release', weekday: [2] }),
+    );
+    expect(Object.keys(result)).toEqual(['enabled', 'begin', 'end', 'weekday']);
+  });
+
+  it('keeps an unreported field distinct from a configured-off one', async () => {
+    // The whole difficulty of this payload: every field is optional, so
+    // `enabled` absent must not read as `enabled: false`, and a `weekday` the
+    // system did not send must not read as a window applying on no day.
+    const absent = await read({ id: 1 });
+    expect(absent).toEqual({ enabled: null, begin: null, end: null, weekday: null });
+
+    const off = await read(config({ enabled: false, weekday: [] }));
+    expect(off).toEqual({ enabled: false, begin: '18:00', end: '09:00', weekday: [] });
+  });
+
+  it('reads a window that wraps midnight as the two times the system recorded', async () => {
+    // 22:00 to 06:00 is eight hours across the night. Nothing here subtracts
+    // one end from the other, so there is no way for it to read as empty or
+    // negative — this test is what pins that the times are passed through.
+    const result = await read(config({ begin: '22:00', end: '06:00' }));
+    expect(result['begin']).toBe('22:00');
+    expect(result['end']).toBe('06:00');
+  });
+
+  it('reports `enabled: true` beside an empty weekday as that combination', async () => {
+    // Not resolved into either reading: nothing on this surface says what the
+    // system does with a window that names no day.
+    expect(await read(config({ enabled: true, weekday: [] }))).toEqual({
+      enabled: true,
+      begin: '18:00',
+      end: '09:00',
+      weekday: [],
+    });
+  });
+
+  it('keeps every day number the two candidate numberings agree on', async () => {
+    // 0 is cron's Sunday and 7 is Sunday under both numberings, so the whole
+    // 0-7 range is readable and none of it is dropped.
+    const result = await read(config({ weekday: [0, 1, 2, 3, 4, 5, 6, 7] }));
+    expect(result['weekday']).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+  });
+
+  it('nulls the whole weekday list rather than returning a shorter one', async () => {
+    // A list one day shorter would say the window does not apply on that day,
+    // which is a claim the read did not establish (#93). Every entry that is
+    // not a whole number in range takes the list with it.
+    const unreadable = [[1, 8], [1, -1], [1, 2.5], [1, 'monday'], [1, null], [1, NaN]];
+    for (const weekday of unreadable) {
+      expect((await read(config({ weekday })))['weekday']).toBeNull();
+    }
+  });
+
+  it('nulls weekday where the field is not a list at all', async () => {
+    expect((await read(config({ weekday: 'MONDAY' })))['weekday']).toBeNull();
+    expect((await read(config({ weekday: { 1: true } })))['weekday']).toBeNull();
+  });
+
+  it('nulls a field the system sent as something other than its declared type', async () => {
+    // A declared type is a claim about what the middleware sends, not the value
+    // received (#91), so each field is read through a guard even though the
+    // client declares all four.
+    const result = await read(config({ enabled: 'yes', begin: 18, end: '' }));
+    expect(result['enabled']).toBeNull();
+    expect(result['begin']).toBeNull();
+    expect(result['end']).toBeNull();
+  });
+
+  it('fails naming the read when the system answers with something else', async () => {
+    // Fatal rather than a result of nulls: a configuration of nulls would be
+    // indistinguishable from a system that has configured no window, and only
+    // one of the two was actually read.
+    await expect(read('not a configuration')).rejects.toThrow(
+      'pool.resilver.config did not answer with a resilver configuration',
+    );
+    await expect(read([config()])).rejects.toThrow(
+      'pool.resilver.config did not answer with a resilver configuration',
+    );
+    await expect(read(null)).rejects.toThrow(
+      'pool.resilver.config did not answer with a resilver configuration',
+    );
+  });
+
+  it('lets a failed read fail the tool, naming what the system said', async () => {
+    const { ctx } = failingSystem({}, { ['pool.resilver.config']: new Error('connection reset') });
+    await expect(poolResilverConfig.handler(ctx, {})).rejects.toThrow('connection reset');
+  });
+
+  it('says in its description what `enabled: false` does and does not mean', async () => {
+    // The one reading that costs an operator something: a caller taking the
+    // flag for "resilvering is disabled" would conclude a replaced disk is not
+    // being rebuilt. Pinned, because it lives in prose and nothing else asserts
+    // it (#128).
+    expect(poolResilverConfig.description).toContain(
+      'IT DOES NOT MEAN RESILVERING IS DISABLED',
+    );
+    expect(poolResilverConfig.description).toContain('system_general_config');
+    expect(poolResilverConfig.description).toContain('SPANS MIDNIGHT');
   });
 });

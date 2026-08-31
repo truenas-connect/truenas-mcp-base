@@ -19,7 +19,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `audit_log_query`, `audit_config`, `security_config`, `system_general_config`,
   `system_ntp_status`, `ups_config`,
   `storage_pool_status`, `storage_pool_topology`, `storage_scrub_history`,
-  `boot_pool_status`,
+  `pool_resilver_config`, `boot_pool_status`,
   `storage_list_datasets`, `datasets_quota_report`, `system_dataset_config`,
   `disks_list`, `disks_temperature`, `apps_list`,
   `app_engine_status`, `apps_update_summary`,

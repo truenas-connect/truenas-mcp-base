@@ -89,6 +89,7 @@ export {
   poolStatus,
   poolTopology,
   scrubHistory,
+  poolResilverConfig,
   bootPoolStatus,
   listDatasets,
   quotaReport,
