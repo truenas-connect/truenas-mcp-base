@@ -470,8 +470,12 @@ export const replicationTopology: ReadOnlyTool = {
     'port of 22 and a reported port is not necessarily a non-default one. A ' +
     'port beside a null host is a credential that recorded one and no ' +
     'readable host. `credential_id` and `credential_name` identify the stored ' +
-    'SSH credential the peer was read from, and `credential_name` is null ' +
-    'wherever the credential was not reached. NO KEY MATERIAL APPEARS IN THIS ' +
+    'SSH credential the peer was read from. Either is null where the ' +
+    'credential was not reached AND where it was reached and recorded no ' +
+    'value this tool could read, so both can be null beside a `NAMED` peer ' +
+    'whose host was read perfectly well; the two causes are not separable ' +
+    'from these fields, and `peer_status` is what says whether a credential ' +
+    'was reached at all. NO KEY MATERIAL APPEARS IN THIS ' +
     'RESULT UNDER ANY INPUT. The stored credential holds an SSH private key ' +
     'or a reference to one, and this tool reads four fields off it — id, ' +
     'name, host and port — by name; nothing else of the credential, and no ' +
