@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the fifty-six sketch tools', () => {
+  it('registers the fifty-seven sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -12,6 +12,7 @@ describe('createDefaultCatalog', () => {
       'audit_config',
       'security_config',
       'system_general_config',
+      'system_ntp_status',
       'storage_pool_status',
       'storage_pool_topology',
       'storage_scrub_history',
@@ -339,6 +340,12 @@ describe('createDefaultCatalog', () => {
   it('advertises system_general_config to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
       'system_general_config',
+    );
+  });
+
+  it('advertises system_ntp_status to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'system_ntp_status',
     );
   });
 });
