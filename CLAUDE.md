@@ -1515,6 +1515,62 @@ claim the surface does not make, exactly as `RsyncTaskEntry` ties no field to it
 `mode` (#97). Each is described as what the configuration records, and a null in
 them is not evidence the system owns its own UPS.
 
+### One question with two sources on the surface reads the cheaper one first (#140)
+
+`storage_pool_status` reports `feature_flags_current`, and the pinned surface
+answers that question **twice**. A `pool.query` row declares
+`is_upgraded?: boolean` — optional, so a system may or may not send it — and
+`pool.is_upgraded` is a separate verb taking one pool id and answering a bare
+boolean. The ticket named only the verb, and reading only the verb would have
+been an N+1 fan-out over an answer that had usually already arrived; reading
+only the row would have reported "not established" for every pool on a system
+that omits an optional field, when a call could have settled it.
+
+**So the row is read first and the verb is called only where the row carried no
+boolean this file could read.** That is #102's rule — where a fact can arrive in
+more than one shape, a reading that both shapes satisfy is worth more than a
+guard written to one of them — plus #132's lazily-made fallback, where a
+supporting read nothing needs is not issued at all. The fallbacks that ARE
+needed go out together under one `Promise.all`, so the whole thing costs one
+further round trip rather than one per pool, which is `reporting_app_vm_usage`'s
+per-entity shape.
+
+**An unreadable row value falls through to the verb rather than short-circuiting
+to null.** A row that sent `is_upgraded` as something that is not a boolean has
+not answered, and the verb is the authoritative source for this question either
+way — so the fallback condition is "the row produced no boolean", never "the row
+had no key". `false` is a value and not an absence, and the test pinning that is
+the one worth keeping: `false` is the answer this tool exists to surface and it
+is also falsy, so a fallback written as `carried || read()` asks a second
+question about a pool that had already answered.
+
+**Null is not a false, and the three causes behind it are not separable.** No
+readable flag beside no readable pool id (nothing to aim the verb at), a verb
+that rejected, and a verb that answered with something that is not a boolean.
+The description says what a null rules out and names what it cannot tell apart,
+per #122, rather than enumerating a partition it does not have. **No companion
+field splits it**: #134's bar is that a companion earns its place where the
+causes behind one null are ones a caller would act on differently, and every
+cause here leaves the same course of action. The rejection text is dropped for
+the same reason, and the rejection itself is caught per pool — this tool is
+composed by `system_health_report` and, through it, by `fleet_health_rollup`, so
+a flag it cannot read must not take down the catalog's most load-bearing read.
+
+**`system_health_report` deliberately neither carries nor scores the field, and
+that is stated rather than left to omission.** Its verdict is about health, which
+this repository defines (#47); feature-flag currency is a NOTICE-level
+configuration fact — the pool keeps working, which is why an un-upgraded one goes
+unnoticed — and upgrading is ONE-WAY and can prevent a TrueNAS rollback, so it is
+a fact to report and never a defect to fix implicitly. #46's rule is to summarise
+by dropping fields and never by re-judging them, and #44's is that a composite
+re-reads every field through its own guard by name — which is what kept the new
+field out of `poolEntries` without a line changing there. The composite's spec
+now asserts the pools entry's **exact key list**, so a field reaching it
+unannounced fails a test rather than shipping. `storage_pool_status`'s own
+description carries the pointer both ways: a pool that is behind is not a reason
+that report is anything other than `OK`, and this field is where the answer
+lives.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
