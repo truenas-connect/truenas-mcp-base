@@ -24,21 +24,30 @@ import {
  * subsystems, namespaces and hosts on the second, host adapters, ports and
  * WWPNs on the third, with no field meaning the same thing in any two.
  *
- * iSCSI takes four middleware namespaces to answer, and none of them nests
+ * iSCSI takes five middleware namespaces to answer, and none of them nests
  * inside another. `iscsi.target.query` names the targets; `iscsi.extent.query`
  * names the backing stores; `iscsi.targetextent.query` is the join table that
- * maps an extent onto a target at a LUN; and `iscsi.global.sessions` is live
+ * maps an extent onto a target at a LUN; `iscsi.portal.query` names the
+ * addresses the service listens on; and `iscsi.global.sessions` is live
  * state from the running service rather than configuration at all — it is the
  * only one that says whether anything is actually connected. The last is the
  * reason the tool exists: a target with no session is the shape of a hypervisor
- * that quietly dropped its storage, and nothing in the first three can tell that
+ * that quietly dropped its storage, and nothing in the others can tell that
  * from a target nobody has ever used.
  *
- * NVMe-oF takes three, and unlike the iSCSI four they do nest: a namespace
- * carries the subsystem it belongs to, and the host/subsystem join carries both
- * sides whole. None of them is live state — the middleware exposes no
- * equivalent of `iscsi.global.sessions` for NVMe-oF in this client, so
- * `nvmeof_list` answers what is configured and cannot say what is attached.
+ * NVMe-oF takes five, and unlike the iSCSI five three of them nest: a namespace
+ * carries the subsystem it belongs to, and the host/subsystem and
+ * port/subsystem joins carry both sides whole. None of them is live state — the
+ * middleware exposes no equivalent of `iscsi.global.sessions` for NVMe-oF in
+ * this client, so `nvmeof_list` answers what is configured and cannot say what
+ * is attached.
+ *
+ * Both families read where the service listens, and neither read is allowed to
+ * fail its tool: a portal and a port are facts about the protocol rather than
+ * parts of a target or a subsystem, which is #135's test answered the way
+ * `fc_list` answers it. A target's own record carries the portal group it is
+ * published in and this tool does not read it, so where a system has more than
+ * one portal, which target is reachable at which address is not answered here.
  *
  * Fibre Channel takes three that do not nest at all, and unlike the other two
  * families one of them is untyped: `fc.fc_host.query` and `fcport.query` are
@@ -50,11 +59,11 @@ import {
  * tool.
  */
 
-/** Which of the two secondary iSCSI reads failed. */
-type IscsiSource = 'extents' | 'initiators';
+/** Which of the three secondary iSCSI reads failed. */
+type IscsiSource = 'extents' | 'initiators' | 'portals';
 
-/** Which of the two secondary NVMe-oF reads failed. */
-type NvmeofSource = 'namespaces' | 'hosts';
+/** Which of the four secondary NVMe-oF reads failed. */
+type NvmeofSource = 'namespaces' | 'hosts' | 'ports' | 'port_subsystems';
 
 /**
  * One read that failed, and why, for the caller to act on.
@@ -181,6 +190,59 @@ async function readExtents(system: SystemHandle): Promise<Map<number, Extent[]>>
 }
 
 /**
+ * One address a portal accepts connections on, and the TCP port on it.
+ *
+ * Both fields are read rather than trusted, and either is null on its own: an
+ * address with no readable port still says which interface the service is bound
+ * to, which is the half of the answer a caller most often needs.
+ */
+interface Listen {
+  ip: string | null;
+  port: number | null;
+}
+
+/**
+ * One portal: the set of addresses the iSCSI service accepts connections on,
+ * under the tag a target's portal group names it by.
+ *
+ * `listen` is null where the portal reported no list at all and an empty list
+ * where it reported one naming nothing — a portal listening nowhere, which is a
+ * real configuration and not a failed read. An entry inside a list that could
+ * not be read is KEPT as a row of nulls rather than dropped, per #93's direction
+ * rule: a listen list one entry shorter says the service is not reachable at an
+ * address it is in fact bound to, which is a claim, while the kept row of nulls
+ * says only that this tool could not read one of them.
+ */
+interface Portal {
+  id: number | null;
+  tag: number | null;
+  comment: string | null;
+  listen: Listen[] | null;
+}
+
+/** Every portal the system reported, each reduced to named fields. */
+async function readPortals(system: SystemHandle): Promise<Portal[]> {
+  const portals = await firstValueFrom(system.client.api.query('iscsi.portal.query'));
+  return portals.map((portal) => ({
+    id: numberOrNull(portal.id),
+    // The portal group number a target's `groups[].portal` names it by. It is
+    // reported because it is what such a mapping would be read against; this
+    // tool does not make that join, and says so in its description.
+    tag: numberOrNull(portal.tag),
+    comment: textOrNull(portal.comment),
+    listen: Array.isArray(portal.listen)
+      ? portal.listen.map((entry) => {
+          const record = recordOrNull(entry);
+          return {
+            ip: record === null ? null : textOrNull(record['ip']),
+            port: record === null ? null : numberOrNull(record['port']),
+          };
+        })
+      : null,
+  }));
+}
+
+/**
  * One entry per initiator, rather than one per session.
  *
  * A multipathed initiator opens a session down each path — that is what
@@ -299,9 +361,34 @@ export const iscsiList: ReadOnlyTool = {
     '`BOTH` target is one nothing is currently using; null means the sessions ' +
     'could not be read at all, and ' +
     'says nothing about whether anything is connected. `extents` is null in the ' +
-    'same way and for the same reason. `failures` names each read that failed, ' +
-    'as `source` — `extents` or `initiators` — and `error`, and is empty when ' +
-    'both were read. `unattributed_initiators` holds initiators whose sessions ' +
+    'same way and for the same reason. `portals` are the portals the iSCSI ' +
+    'service listens on, and are reported BESIDE the targets rather than under ' +
+    'them: THIS TOOL DOES NOT SAY WHICH PORTAL SERVES WHICH TARGET, so on a ' +
+    'system with more than one portal, which address a given target is reachable ' +
+    'at is not answered here. `id` is the portal\'s numeric identity, `tag` the ' +
+    'portal group number the system knows it by, and `comment` the label it was ' +
+    'given, null where it has none. `listen` is where that portal accepts ' +
+    'connections, one entry per address, with `ip` the address and `port` the ' +
+    'TCP port; either is null where the system reported no readable value. A ' +
+    'LISTEN ADDRESS OF `0.0.0.0` IS NOT AN ADDRESS: it is the wildcard, and ' +
+    'means the portal accepts connections on EVERY IPv4 address the system has, ' +
+    'as `::` does for IPv6. A specific address is the opposite claim — the ' +
+    'service is bound to that address alone, and an initiator pointed at any ' +
+    'other address of the same appliance will not connect, which is the shape ' +
+    'that reads as a working configuration and is not. An entry the system sent ' +
+    'that could not be read is KEPT as a row of nulls rather than dropped, ' +
+    'because a shorter list would say the service is unreachable at an address ' +
+    'it is bound to. AN EMPTY `listen` AND A NULL ONE ARE DIFFERENT ANSWERS: ' +
+    'empty is a portal that listens nowhere, which is a real configuration; ' +
+    'null is a portal that reported no list. AN EMPTY `portals` AND A NULL ONE ' +
+    'ARE DIFFERENT ANSWERS in the same way: empty means the portals were read ' +
+    'and the system has none, so the iSCSI service accepts nothing wherever its ' +
+    'targets point; null means the read failed, which `failures` names, and ' +
+    'says nothing about where the service listens. `failures` names each read ' +
+    'that failed, as `source` — `extents`, `initiators` or `portals` — and ' +
+    '`error`, and is empty when all three were read. NONE OF THOSE THREE FAILS ' +
+    'THE TOOL — the target read is the one that does, and a tool that answered ' +
+    'at all read the targets. `unattributed_initiators` holds initiators whose sessions ' +
     'named a `target` matching none of the targets listed, or matching more ' +
     'than one; each carries that string as `target` so the mismatch is ' +
     'visible, and is grouped by initiator in the same way. WHILE IT IS NOT EMPTY THE ' +
@@ -320,12 +407,16 @@ export const iscsiList: ReadOnlyTool = {
     // describes a target, and with no targets there is nothing for either to
     // describe — while a system whose targets listed and whose sessions did not
     // still has a partial answer worth returning, which is what `failures` is.
-    const [targets, extents, sessions] = await Promise.all([
+    const [targets, extents, sessions, portals] = await Promise.all([
       firstValueFrom(system.client.api.query('iscsi.target.query')),
       attempt('extents', () => readExtents(system)),
       attempt('initiators', () =>
         firstValueFrom(system.client.api.query('iscsi.global.sessions')),
       ),
+      // A portal is where the service listens rather than a fact about any one
+      // target, so it is caught like the other two: a system whose portals did
+      // not read still has targets and sessions worth reporting.
+      attempt('portals', () => readPortals(system)),
     ]);
 
     const byName = new Map(targets.map((target) => [target.name, target.id]));
@@ -345,6 +436,7 @@ export const iscsiList: ReadOnlyTool = {
     const failures: Failure<IscsiSource>[] = [];
     if (extents.failure !== null) failures.push(extents.failure);
     if (sessions.failure !== null) failures.push(sessions.failure);
+    if (portals.failure !== null) failures.push(portals.failure);
 
     return {
       targets: targets.map((target) => ({
@@ -363,6 +455,11 @@ export const iscsiList: ReadOnlyTool = {
         initiators:
           sessions.value === null ? null : groupInitiators(byTarget.get(target.id) ?? []),
       })),
+      // Null for a read that failed and a list for one that succeeded, as the
+      // per-target lists above are — a system with no portal accepts no
+      // connection anywhere, and that must not read the same as a portal read
+      // that did not happen.
+      portals: portals.value,
       failures,
       unattributed_initiators: groupUnattributed(unattributed),
     };
@@ -499,6 +596,144 @@ async function readHosts(system: SystemHandle): Promise<Claim<string | null>[]> 
   }));
 }
 
+/**
+ * One subsystem a port publishes, reduced from the record the join embeds.
+ *
+ * Named for what it is rather than for the entity it came from, and carrying
+ * the same pair the unattributable rows above carry, so the two accounts of a
+ * subsystem cannot be read as two facts. The NQN an initiator connects to is
+ * NOT repeated here: it is reported once, on the subsystem itself, and a caller
+ * reaches it through `subsystem_id`.
+ */
+interface PortSubsystem {
+  subsystem_id: number | null;
+  subsystem: string | null;
+}
+
+/** One row of the port/subsystem join, with the port its record named. */
+interface PortClaim {
+  value: PortSubsystem;
+  port_id: number | null;
+}
+
+/**
+ * The service identifier a port answers on, as the system spelled it.
+ *
+ * `addr_trsvcid` is declared `number | string | null`, which is the surface
+ * refusing to fix a meaning: it is a TCP port number on a TCP port and
+ * something else on an FC one. Both spellings are passed through as themselves
+ * and NEITHER IS COERCED — reading a string as a number would be this
+ * repository asserting a meaning it never read, which is #96's rule about a
+ * unit reaching a value.
+ */
+function serviceId(value: unknown): string | number | null {
+  return typeof value === 'number' ? numberOrNull(value) : textOrNull(value);
+}
+
+/**
+ * One NVMe-oF port: an address the system accepts NVMe-oF connections on, and
+ * the subsystems published through it.
+ *
+ * `enabled` is optional on the declared entity, so `enabled_reported` splits
+ * its null the way `npiv_reported` splits an FC adapter's (#134) — a release
+ * that does not report the field at all from one that reported something this
+ * tool could not read as a boolean. Both read the row's own key, so a value can
+ * never sit beside a `false` there.
+ */
+interface Port {
+  id: number | null;
+  index: number | null;
+  transport: 'TCP' | 'RDMA' | 'FC' | null;
+  address_family: 'IPV4' | 'IPV6' | 'FC' | null;
+  address: string | null;
+  service_id: string | number | null;
+  enabled: boolean | null;
+  enabled_reported: boolean;
+  subsystems: PortSubsystem[] | null;
+}
+
+/** Every port the system reported, before any join row has been attributed. */
+async function readPorts(system: SystemHandle): Promise<Omit<Port, 'subsystems'>[]> {
+  const ports = await firstValueFrom(system.client.api.query('nvmet.port.query'));
+  return ports.map((port) => {
+    const reported = Object.hasOwn(port, 'enabled');
+    return {
+      id: numberOrNull(port.id),
+      // The system's own ordinal for the port, which is not its record id and
+      // does not follow it — the same pairing a namespace's `nsid` and `id`
+      // have above.
+      index: numberOrNull(port.index),
+      transport: port.addr_trtype ?? null,
+      address_family: port.addr_adrfam ?? null,
+      address: textOrNull(port.addr_traddr),
+      service_id: serviceId(port.addr_trsvcid),
+      enabled: reported ? booleanOrNull(port.enabled) : null,
+      enabled_reported: reported,
+    };
+  });
+}
+
+/**
+ * Every port/subsystem publication the system reported, each with the port its
+ * record named.
+ *
+ * `nvmet.port_subsys.query` embeds BOTH sides whole — a full port record and a
+ * full subsystem record on every row — and neither is forwarded (#100): each is
+ * reduced to the identifiers that let a caller attach one to the other, which
+ * is what keeps a field a later release adds to either entity out of a tool
+ * result. Both are read through `recordOrNull` first, so a row that embedded
+ * something other than a record is a row that names nothing rather than a read
+ * that throws and takes the whole publication list with it.
+ */
+async function readPortSubsystems(system: SystemHandle): Promise<PortClaim[]> {
+  const joins = await firstValueFrom(system.client.api.query('nvmet.port_subsys.query'));
+  return joins.map((join) => {
+    const port = recordOrNull(join.port);
+    const subsys = recordOrNull(join.subsys);
+    return {
+      value: {
+        subsystem_id: subsys === null ? null : numberOrNull(subsys['id']),
+        subsystem: subsys === null ? null : textOrNull(subsys['name']),
+      },
+      port_id: port === null ? null : numberOrNull(port['id']),
+    };
+  });
+}
+
+/** Publications filed under the port each named, and the ones that could not be. */
+interface PortAttribution {
+  byPort: Map<number, PortSubsystem[]>;
+  unattributed: (PortSubsystem & { port_id: number | null })[];
+}
+
+/**
+ * The join rows filed under the port each named, where that names a port this
+ * listing reports, and set aside where it does not.
+ *
+ * Set aside rather than dropped, for `attribute`'s reason one read over: a
+ * dropped row leaves an empty `subsystems` behind that says the port publishes
+ * nothing, which is a claim this read did not make. A row naming a port and no
+ * readable subsystem is KEPT UNDER THAT PORT as a pair of nulls, because
+ * dropping it moves the same list towards empty and says the same wrong thing;
+ * what it costs is a row a caller cannot join against `subsystems[]`, which the
+ * description states.
+ */
+function attributePorts(rows: PortClaim[], listed: Set<number>): PortAttribution {
+  const byPort = new Map<number, PortSubsystem[]>();
+  const unattributed: PortAttribution['unattributed'] = [];
+  for (const row of rows) {
+    const id = row.port_id;
+    if (id === null || !listed.has(id)) {
+      unattributed.push({ ...row.value, port_id: id });
+      continue;
+    }
+    const filed = byPort.get(id);
+    if (filed === undefined) byPort.set(id, [row.value]);
+    else filed.push(row.value);
+  }
+  return { byPort, unattributed };
+}
+
 /** The JSON-RPC code for a method the server does not have. */
 const METHOD_NOT_FOUND = -32601;
 
@@ -612,8 +847,49 @@ export const nvmeofList: ReadOnlyTool = {
     'all. `hosts` is null in the same way and for the same reason. Both are ' +
     "also null where `id` is null, because the subsystem's own identity is " +
     'what each is joined on and there is then nothing to attribute to it. ' +
-    '`failures` names each read that failed, as `source` — `namespaces` or ' +
-    '`hosts` — and `error`, and is empty when both were read. ' +
+    '`ports` are the addresses the system accepts NVMe-oF connections on, ' +
+    'reported beside the subsystems rather than under them. `id` is the ' +
+    "port's numeric identity and `index` the system's own ordinal for it — " +
+    'different numbers, and neither follows the other. `transport` is `TCP`, ' +
+    '`RDMA` or `FC` (the payload\'s `addr_trtype`), `address_family` `IPV4`, ' +
+    '`IPV6` or `FC` (`addr_adrfam`), and `address` the address it listens on ' +
+    '(`addr_traddr`). `service_id` is what it answers on (`addr_trsvcid`): a ' +
+    'TCP port number on a TCP port and something else on an FC one, REPORTED ' +
+    'AS THE SYSTEM SPELLED IT — as a number or as text — and never converted ' +
+    'between the two, because the payload declares both and fixing one would ' +
+    'assert a meaning it does not state. `enabled` is whether the port is ' +
+    'switched on, and `enabled_reported` whether the system reported that field ' +
+    'at all: false there means this TrueNAS does not report it, and A PORT THAT ' +
+    'DID NOT REPORT `enabled` IS NOT A DISABLED PORT. True beside a null ' +
+    '`enabled` means it reported something that could not be read as a boolean. ' +
+    'A NULL `address` IS NOT EVIDENCE THAT A PORT LISTENS NOWHERE: the ' +
+    'middleware accepts an empty address on a TCP or RDMA port, this catalog ' +
+    'does not establish what an empty one means there, and an empty address and ' +
+    'a field that could not be read are both reported as null. A port whose ' +
+    '`transport` is `FC` is an NVMe-oF port carried over Fibre Channel, and ' +
+    'THAT IS THE PORT\'S TRANSPORT AND NOT A STATEMENT ABOUT THE FC HARDWARE — ' +
+    'the host adapters, the FC ports and their link state are `fc_list`, and ' +
+    'nothing here reports them. This tool does not report a port\'s tuning ' +
+    'fields — `inline_data_size`, `max_queue_size` and `pi_enable` — which the ' +
+    'system carries and which say nothing about where it listens. ' +
+    '`subsystems` on a port names which subsystems are published through it, ' +
+    'each as the `subsystem_id` and `subsystem` name the join\'s own record ' +
+    'spelled; `subsystem_id` is joinable against `subsystems[].id`, and the NQN ' +
+    'an initiator connects to is reported there rather than repeated here. An ' +
+    'entry whose `subsystem_id` is null is a publication naming a subsystem ' +
+    'this tool could not identify: it is kept, because dropping it would say ' +
+    'the port publishes less than it does, and it cannot be joined against the ' +
+    'listing. AN EMPTY `subsystems` AND A NULL ONE ARE DIFFERENT ANSWERS: empty ' +
+    'means the publications were read and none names this port, so nothing is ' +
+    'reachable through it; null means they could not be read at all, or that ' +
+    'this port carries no `id` for a publication to be joined on. AN EMPTY ' +
+    '`ports` AND A NULL ONE ARE DIFFERENT ANSWERS in the same way: empty is a ' +
+    'system with no NVMe-oF port configured, which is a system whose subsystems ' +
+    'are unreachable however they are configured; null is a read that failed, ' +
+    'which `failures` names. ' +
+    '`failures` names each read that failed, as `source` — `namespaces`, ' +
+    '`hosts`, `ports` or `port_subsystems` — and `error`, and is empty when all ' +
+    'four were read. ' +
     '`unattributed_namespaces` and `unattributed_hosts` hold the rows that ' +
     'WERE read and could not be placed on any subsystem listed here. Each ' +
     'carries the `subsystem_id` and `subsystem` name its own record named, so ' +
@@ -627,12 +903,21 @@ export const nvmeofList: ReadOnlyTool = {
     'the read that would fill it failed, because nothing was read to place, ' +
     'and the other list is unaffected — `failures` names which read that was, ' +
     'and is also what tells a list that could not be read from one that could ' +
-    'not be attributed. This tool reads only ' +
+    'not be attributed. `unattributed_port_subsystems` holds publications that ' +
+    'name a port not listed here, each carrying the `port_id` its record named ' +
+    'and null where it named none. WHILE IT IS NOT EMPTY THE PER-PORT ' +
+    '`subsystems` LISTS ARE INCOMPLETE, and an empty one there is not a port ' +
+    'publishing nothing. Where the port read itself failed there is nothing to ' +
+    'attribute against and every publication lands in it. This tool reads only ' +
     'NVMe-oF: iSCSI targets are `iscsi_list`, Fibre Channel host adapters and ' +
     'ports are `fc_list`, and SMB or NFS shares are ' +
-    '`shares_list`. It does not report which ports a subsystem is published ' +
-    'on, so a subsystem listed here is not necessarily reachable over the ' +
-    'network.',
+    '`shares_list`. WHICH PORTS A SUBSYSTEM IS PUBLISHED ON IS READ FROM ' +
+    '`ports[].subsystems` AND NOT FROM THE SUBSYSTEM ROW, which carries no port ' +
+    'field: a subsystem named in no port\'s `subsystems` is one nothing ' +
+    'publishes and so is not reachable over the network — but ONLY where the ' +
+    'port and publication reads both succeeded and no publication is ' +
+    'unattributed. Where either read failed, or a publication could not be ' +
+    'placed, that absence says nothing.',
   inputSchema: { type: 'object', properties: {} },
   requiredRole: Role.ReadOnly,
   mutating: false,
@@ -641,10 +926,15 @@ export const nvmeofList: ReadOnlyTool = {
     // as in `iscsi_list` only the first is allowed to fail the tool: a namespace
     // and a host describe a subsystem, and with no subsystems there is nothing
     // for either to describe.
-    const [subsystems, namespaces, hosts] = await Promise.all([
+    const [subsystems, namespaces, hosts, ports, publications] = await Promise.all([
       readSubsystems(system),
       attempt('namespaces', () => readNamespaces(system)),
       attempt('hosts', () => readHosts(system)),
+      // Caught like the other three, and for `iscsi_list`'s reason: a port is
+      // where the service listens rather than a part of any one subsystem, so a
+      // system whose ports did not read still has subsystems worth reporting.
+      attempt('ports', () => readPorts(system)),
+      attempt('port_subsystems', () => readPortSubsystems(system)),
     ]);
 
     if (subsystems.rows === null) {
@@ -656,18 +946,22 @@ export const nvmeofList: ReadOnlyTool = {
         supported: false,
         unsupported_reason: errorText(subsystems.reason),
         subsystems: null,
-        // The other two reads fail the same way on such a system. Naming them
-        // would report one absent feature three times, as three defects — and
+        ports: null,
+        // The other four reads fail the same way on such a system. Naming them
+        // would report one absent feature five times, as five defects — and
         // no row was read, so nothing was left out of a list either.
         failures: [],
         unattributed_namespaces: [],
         unattributed_hosts: [],
+        unattributed_port_subsystems: [],
       };
     }
 
     const failures: Failure<NvmeofSource>[] = [];
     if (namespaces.failure !== null) failures.push(namespaces.failure);
     if (hosts.failure !== null) failures.push(hosts.failure);
+    if (ports.failure !== null) failures.push(ports.failure);
+    if (publications.failure !== null) failures.push(publications.failure);
 
     // Read rather than trusted, and read once: the id is both the reported
     // identity and what the other two reads are attributed by, so a subsystem
@@ -683,6 +977,16 @@ export const nvmeofList: ReadOnlyTool = {
     const listed = new Set(identified.flatMap(({ id }) => (id === null ? [] : [id])));
     const attributed = namespaces.value === null ? null : attribute(namespaces.value, listed);
     const allowed = hosts.value === null ? null : attribute(hosts.value, listed);
+
+    // What a publication has to name to be filed under a port. Built from the
+    // ports that were read: where the port read failed there is nothing to file
+    // against, and every publication is reported unattributed instead — the
+    // same shape `fc_list` gives an unattributable status row.
+    const listedPorts = new Set(
+      (ports.value ?? []).flatMap((port) => (port.id === null ? [] : [port.id])),
+    );
+    const published =
+      publications.value === null ? null : attributePorts(publications.value, listedPorts);
 
     return {
       supported: true,
@@ -701,6 +1005,20 @@ export const nvmeofList: ReadOnlyTool = {
         namespaces:
           attributed === null || id === null ? null : (attributed.bySubsystem.get(id) ?? []),
       })),
+      ports:
+        ports.value === null
+          ? null
+          : ports.value.map((port) => ({
+              ...port,
+              // Null for a publication read that failed and for a port the
+              // system did not number, which is what a publication is joined
+              // on; an empty list for a read that succeeded and placed nothing
+              // here.
+              subsystems:
+                published === null || port.id === null
+                  ? null
+                  : (published.byPort.get(port.id) ?? []),
+            })),
       failures,
       // Flat rather than nested, as `iscsi_list` reports its own unattributable
       // rows: what the row said is beside what it named, so a caller reading one
@@ -715,6 +1033,7 @@ export const nvmeofList: ReadOnlyTool = {
         subsystem_id: row.subsystem_id,
         subsystem: row.subsystem,
       })),
+      unattributed_port_subsystems: published?.unattributed ?? [],
     };
   },
 };

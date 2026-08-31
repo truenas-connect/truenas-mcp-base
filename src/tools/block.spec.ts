@@ -1,541 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { failingSystem } from '@/testing/fake-systems';
-import { fcList, iscsiList, nvmeofList } from '@/tools/index';
+import { fcList, nvmeofList } from '@/tools/index';
 
-describe('iscsi_list', () => {
-  /**
-   * A target as `iscsi.target.query` reports one. `rel_tgt_id`, `mode`,
-   * `groups` and `auth_networks` are real fields of the payload the tool does
-   * not name, and are here to be dropped.
-   */
-  const target = (over: Record<string, unknown> = {}) => ({
-    id: 1,
-    name: 'tgt0',
-    alias: 'VMware datastore',
-    rel_tgt_id: 1,
-    mode: 'ISCSI',
-    groups: [{ portal: 1, initiator: 1 }],
-    auth_networks: [],
-    ...over,
-  });
-
-  /**
-   * An extent as `iscsi.extent.query` reports one. A `DISK` extent carries
-   * BOTH `disk` and `path` — the system reports the device node in `path` too,
-   * so `path` is not evidence that an extent is file-backed.
-   */
-  const extent = (over: Record<string, unknown> = {}) => ({
-    id: 7,
-    name: 'vmstore',
-    type: 'DISK',
-    disk: 'zvol/tank/vmstore',
-    path: '/dev/zvol/tank/vmstore',
-    enabled: true,
-    locked: false,
-    naa: '0x6589cfc000000',
-    vendor: 'TrueNAS',
-    serial: 'abc123',
-    ...over,
-  });
-
-  /** A row of the join table mapping an extent onto a target at a LUN. */
-  const mapping = (over: Record<string, unknown> = {}) => ({
-    id: 4,
-    target: 1,
-    extent: 7,
-    lunid: 0,
-    ...over,
-  });
-
-  /** A live session as `iscsi.global.sessions` reports one. */
-  const session = (over: Record<string, unknown> = {}) => ({
-    initiator: 'iqn.1998-01.com.vmware:esx1',
-    initiator_addr: '10.0.0.20',
-    initiator_alias: 'esx1',
-    target: 'tgt0',
-    target_alias: 'VMware datastore',
-    header_digest: null,
-    data_digest: null,
-    immediate_data: true,
-    iser: false,
-    offload: false,
-    ...over,
-  });
-
-  type Listing = {
-    targets: Record<string, unknown>[];
-    failures: Record<string, unknown>[];
-    unattributed_initiators: Record<string, unknown>[];
-  };
-
-  const listed = async (
-    rows: Partial<Record<string, unknown>> = {},
-    failures: Partial<Record<string, unknown>> = {},
-  ): Promise<Listing> => {
-    const { ctx } = failingSystem(
-      {
-        ['iscsi.target.query']: [target()],
-        ['iscsi.extent.query']: [extent()],
-        ['iscsi.targetextent.query']: [mapping()],
-        ['iscsi.global.sessions']: [session()],
-        ...rows,
-      },
-      failures,
-    );
-    return (await iscsiList.handler(ctx, {})) as Listing;
-  };
-
-  /** The single target of a listing, for the cases about one target's fields. */
-  const onlyTarget = async (
-    rows: Partial<Record<string, unknown>> = {},
-    failures: Partial<Record<string, unknown>> = {},
-  ): Promise<Record<string, unknown>> => (await listed(rows, failures)).targets[0];
-
-  it('reports each target with its extents and connected initiators', async () => {
-    expect(await listed()).toEqual({
-      targets: [
-        {
-          id: 1,
-          name: 'tgt0',
-          alias: 'VMware datastore',
-          mode: 'ISCSI',
-          extents: [
-            {
-              id: 7,
-              lun: 0,
-              name: 'vmstore',
-              type: 'DISK',
-              path: '/dev/zvol/tank/vmstore',
-              disk: 'zvol/tank/vmstore',
-              enabled: true,
-              locked: false,
-            },
-          ],
-          initiators: [
-            {
-              initiator: 'iqn.1998-01.com.vmware:esx1',
-              addresses: ['10.0.0.20'],
-              alias: 'esx1',
-            },
-          ],
-        },
-      ],
-      failures: [],
-      unattributed_initiators: [],
-    });
-  });
-
-  it('surfaces no field a later release adds', async () => {
-    const listing = await listed({
-      ['iscsi.target.query']: [target({ future_field: 'added by a later release' })],
-      ['iscsi.extent.query']: [extent({ future_field: 'added by a later release' })],
-      ['iscsi.targetextent.query']: [mapping({ future_field: 'added by a later release' })],
-      ['iscsi.global.sessions']: [session({ future_field: 'added by a later release' })],
-    });
-    expect(Object.keys(listing.targets[0])).toEqual([
-      'id',
-      'name',
-      'alias',
-      'mode',
-      'extents',
-      'initiators',
-    ]);
-    expect(Object.keys((listing.targets[0]['extents'] as Record<string, unknown>[])[0])).toEqual([
-      'id',
-      'lun',
-      'name',
-      'type',
-      'path',
-      'disk',
-      'enabled',
-      'locked',
-    ]);
-    expect(Object.keys((listing.targets[0]['initiators'] as Record<string, unknown>[])[0])).toEqual(
-      ['initiator', 'addresses', 'alias'],
-    );
-  });
-
-  it('reads a target with no alias as having none', async () => {
-    for (const missing of [null, undefined, '']) {
-      expect(await onlyTarget({ ['iscsi.target.query']: [target({ alias: missing })] })).toMatchObject(
-        { alias: null },
-      );
-    }
-  });
-
-  it('reads an initiator with no alias as having none', async () => {
-    for (const missing of [null, '']) {
-      const initiators = (
-        await onlyTarget({ ['iscsi.global.sessions']: [session({ initiator_alias: missing })] })
-      )['initiators'] as Record<string, unknown>[];
-      expect(initiators[0]['alias']).toBeNull();
-    }
-  });
-
-  it('maps every extent of a target, each at its own LUN', async () => {
-    const extents = (
-      await onlyTarget({
-        ['iscsi.extent.query']: [extent(), extent({ id: 8, name: 'logs', type: 'FILE' })],
-        ['iscsi.targetextent.query']: [mapping(), mapping({ id: 5, extent: 8, lunid: 1 })],
-      })
-    )['extents'] as Record<string, unknown>[];
-    expect(extents.map((mapped) => [mapped['lun'], mapped['name']])).toEqual([
-      [0, 'vmstore'],
-      [1, 'logs'],
-    ]);
-  });
-
-  it('reports the backing store of a DISK extent and of a FILE one', async () => {
-    const extents = (
-      await onlyTarget({
-        ['iscsi.extent.query']: [
-          extent(),
-          extent({ id: 8, type: 'FILE', disk: null, path: '/mnt/tank/iscsi/logs' }),
-        ],
-        ['iscsi.targetextent.query']: [mapping(), mapping({ id: 5, extent: 8, lunid: 1 })],
-      })
-    )['extents'] as Record<string, unknown>[];
-    // `path` is set on both kinds, so it is `disk` and `type` that separate
-    // them — a caller reading a set `path` as "file-backed" would be wrong.
-    expect(extents[0]).toMatchObject({
-      type: 'DISK',
-      disk: 'zvol/tank/vmstore',
-      path: '/dev/zvol/tank/vmstore',
-    });
-    expect(extents[1]).toMatchObject({ type: 'FILE', disk: null, path: '/mnt/tank/iscsi/logs' });
-  });
-
-  it('reports an extent field the system omitted as null, not as a value', async () => {
-    const extents = (
-      await onlyTarget({
-        ['iscsi.extent.query']: [{ id: 7, name: 'vmstore', naa: '0x1', vendor: 'TrueNAS' }],
-      })
-    )['extents'] as Record<string, unknown>[];
-    // `enabled` and `locked` especially: false would say the extent is
-    // definitely not serving, which the system did not report either way.
-    expect(extents[0]).toEqual({
-      id: 7,
-      lun: 0,
-      name: 'vmstore',
-      type: null,
-      path: null,
-      disk: null,
-      enabled: null,
-      locked: null,
-    });
-  });
-
-  it('keeps a mapping whose extent record is missing, marked by a null name', async () => {
-    const extents = (await onlyTarget({ ['iscsi.extent.query']: [] }))[
-      'extents'
-    ] as Record<string, unknown>[];
-    // The LUN was configured, and that is worth reporting; a real extent always
-    // carries a name, so the null name is what says the record was not found.
-    expect(extents).toEqual([
-      {
-        id: 7,
-        lun: 0,
-        name: null,
-        type: null,
-        path: null,
-        disk: null,
-        enabled: null,
-        locked: null,
-      },
-    ]);
-  });
-
-  it('reports a target with nothing mapped to it as an empty extent list', async () => {
-    expect(await onlyTarget({ ['iscsi.targetextent.query']: [] })).toMatchObject({ extents: [] });
-  });
-
-  it('reports a target with no session as an empty initiator list', async () => {
-    expect(await onlyTarget({ ['iscsi.global.sessions']: [] })).toMatchObject({ initiators: [] });
-  });
-
-  it('distinguishes sessions that could not be read from a target with none', async () => {
-    const listing = await listed({}, { ['iscsi.global.sessions']: new Error('service not running') });
-    // Null rather than empty: an empty list would say nothing is connected,
-    // which is the one answer this tool must not invent.
-    expect(listing.targets[0]['initiators']).toBeNull();
-    expect(listing.failures).toEqual([
-      { source: 'initiators', error: 'service not running' },
-    ]);
-  });
-
-  it('distinguishes extents that could not be read from a target with none', async () => {
-    for (const method of ['iscsi.extent.query', 'iscsi.targetextent.query']) {
-      const listing = await listed({}, { [method]: new Error('denied') });
-      expect(listing.targets[0]['extents']).toBeNull();
-      expect(listing.failures).toEqual([{ source: 'extents', error: 'denied' }]);
-      // The other read is unaffected, which is why they are separate failures.
-      expect(listing.targets[0]['initiators']).not.toBeNull();
-    }
-  });
-
-  it('reports both reads failing without losing the targets themselves', async () => {
-    const listing = await listed(
-      {},
-      {
-        ['iscsi.extent.query']: new Error('denied'),
-        ['iscsi.global.sessions']: new Error('service not running'),
-      },
-    );
-    expect(listing.targets).toEqual([
-      {
-        id: 1,
-        name: 'tgt0',
-        alias: 'VMware datastore',
-        mode: 'ISCSI',
-        extents: null,
-        initiators: null,
-      },
-    ]);
-    expect(listing.failures).toEqual([
-      { source: 'extents', error: 'denied' },
-      { source: 'initiators', error: 'service not running' },
-    ]);
-  });
-
-  it('names a failure that is not an Error, and one that says nothing', async () => {
-    expect(
-      (await listed({}, { ['iscsi.global.sessions']: 'connection reset' })).failures,
-    ).toEqual([{ source: 'initiators', error: 'connection reset' }]);
-    for (const silent of [new Error(''), { code: 500 }]) {
-      expect((await listed({}, { ['iscsi.global.sessions']: silent })).failures).toEqual([
-        { source: 'initiators', error: 'the system reported no reason' },
-      ]);
-    }
-  });
-
-  it('raises rather than reporting a system that serves nothing when targets fail', async () => {
-    await expect(
-      listed({}, { ['iscsi.target.query']: new Error('denied') }),
-    ).rejects.toThrow('denied');
-  });
-
-  it('attributes a session naming its target by the full IQN', async () => {
-    expect(
-      await onlyTarget({
-        ['iscsi.global.sessions']: [session({ target: 'iqn.2005-10.org.freenas.ctl:tgt0' })],
-      }),
-    ).toMatchObject({ initiators: [{ initiator: 'iqn.1998-01.com.vmware:esx1' }] });
-  });
-
-  it('groups each session under the one target it is on', async () => {
-    const listing = await listed({
-      ['iscsi.target.query']: [target(), target({ id: 2, name: 'tgt1', alias: null })],
-      ['iscsi.global.sessions']: [
-        session(),
-        session({ initiator: 'iqn.1998-01.com.vmware:esx2', target: 'tgt1' }),
-        session({ initiator: 'iqn.1998-01.com.vmware:esx3', target: 'tgt1' }),
-      ],
-    });
-    expect(
-      listing.targets.map((entry) => [
-        entry['name'],
-        (entry['initiators'] as Record<string, unknown>[]).map((one) => one['initiator']),
-      ]),
-    ).toEqual([
-      ['tgt0', ['iqn.1998-01.com.vmware:esx1']],
-      ['tgt1', ['iqn.1998-01.com.vmware:esx2', 'iqn.1998-01.com.vmware:esx3']],
-    ]);
-  });
-
-  it('counts a multipathed initiator once, keeping every path it reaches from', async () => {
-    // Two sessions, one initiator down two paths. Two entries would make one
-    // host with two NICs read as two hosts attached to the target.
-    const initiators = (
-      await onlyTarget({
-        ['iscsi.global.sessions']: [
-          session(),
-          session({ initiator_addr: '10.0.1.20' }),
-          session({ initiator_addr: '10.0.0.20' }),
-        ],
-      })
-    )['initiators'] as Record<string, unknown>[];
-    expect(initiators).toEqual([
-      {
-        initiator: 'iqn.1998-01.com.vmware:esx1',
-        addresses: ['10.0.0.20', '10.0.1.20'],
-        alias: 'esx1',
-      },
-    ]);
-  });
-
-  it('takes an initiator alias from whichever session carries one', async () => {
-    const initiators = (
-      await onlyTarget({
-        ['iscsi.global.sessions']: [
-          session({ initiator_alias: null }),
-          session({ initiator_addr: '10.0.1.20', initiator_alias: 'esx1' }),
-        ],
-      })
-    )['initiators'] as Record<string, unknown>[];
-    expect(initiators[0]).toMatchObject({ alias: 'esx1' });
-  });
-
-  it('keeps two different initiators on one target apart', async () => {
-    const initiators = (
-      await onlyTarget({
-        ['iscsi.global.sessions']: [
-          session(),
-          session({ initiator: 'iqn.1998-01.com.vmware:esx2', initiator_addr: '10.0.0.21' }),
-        ],
-      })
-    )['initiators'] as Record<string, unknown>[];
-    expect(initiators.map((one) => one['initiator'])).toEqual([
-      'iqn.1998-01.com.vmware:esx1',
-      'iqn.1998-01.com.vmware:esx2',
-    ]);
-  });
-
-  it('reports how a target is served, so an FC target is not read as idle', async () => {
-    // An FC target holds no iSCSI session by definition, so without `mode` its
-    // empty initiator list is indistinguishable from an idle iSCSI target.
-    const listing = await listed({
-      ['iscsi.target.query']: [
-        target({ id: 2, name: 'fctgt', mode: 'FC' }),
-        target({ id: 3, name: 'bothtgt', mode: 'BOTH' }),
-        target({ mode: undefined }),
-      ],
-      ['iscsi.global.sessions']: [],
-    });
-    expect(listing.targets.map((entry) => [entry['name'], entry['mode'], entry['initiators']])).toEqual(
-      [
-        ['fctgt', 'FC', []],
-        ['bothtgt', 'BOTH', []],
-        ['tgt0', null, []],
-      ],
-    );
-  });
-
-  it('groups mappings under the target each names', async () => {
-    const listing = await listed({
-      ['iscsi.target.query']: [target(), target({ id: 2, name: 'tgt1' })],
-      ['iscsi.extent.query']: [extent(), extent({ id: 8, name: 'logs' })],
-      ['iscsi.targetextent.query']: [
-        mapping(),
-        mapping({ id: 5, target: 2, extent: 8, lunid: 0 }),
-      ],
-    });
-    expect(
-      listing.targets.map((entry) => [
-        entry['name'],
-        (entry['extents'] as Record<string, unknown>[]).map((one) => one['name']),
-      ]),
-    ).toEqual([
-      ['tgt0', ['vmstore']],
-      ['tgt1', ['logs']],
-    ]);
-  });
-
-  it('reports a session it could not attribute rather than dropping it', async () => {
-    const listing = await listed({
-      ['iscsi.global.sessions']: [session({ target: 'some-other-spelling' })],
-    });
-    // Silently dropping it would leave the target reading as unused, which is
-    // exactly the answer this tool exists to be trusted on.
-    expect(listing.targets[0]['initiators']).toEqual([]);
-    expect(listing.unattributed_initiators).toEqual([
-      {
-        initiator: 'iqn.1998-01.com.vmware:esx1',
-        addresses: ['10.0.0.20'],
-        alias: 'esx1',
-        target: 'some-other-spelling',
-      },
-    ]);
-  });
-
-  it('groups unattributed sessions by target and initiator, as attributed ones are', async () => {
-    const listing = await listed({
-      ['iscsi.global.sessions']: [
-        session({ target: 'unknown-a' }),
-        session({ target: 'unknown-a', initiator_addr: '10.0.1.20' }),
-        session({ target: 'unknown-b' }),
-        session({ target: 'unknown-a', initiator: 'iqn.1998-01.com.vmware:esx2' }),
-      ],
-    });
-    expect(
-      listing.unattributed_initiators.map((one) => [
-        one['target'],
-        one['initiator'],
-        one['addresses'],
-      ]),
-    ).toEqual([
-      ['unknown-a', 'iqn.1998-01.com.vmware:esx1', ['10.0.0.20', '10.0.1.20']],
-      ['unknown-a', 'iqn.1998-01.com.vmware:esx2', ['10.0.0.20']],
-      ['unknown-b', 'iqn.1998-01.com.vmware:esx1', ['10.0.0.20']],
-    ]);
-  });
-
-  it('leaves a session unattributed where two targets answer to its IQN', async () => {
-    const listing = await listed({
-      ['iscsi.target.query']: [target({ id: 2, name: 'a:tgt0' }), target()],
-      ['iscsi.global.sessions']: [session({ target: 'iqn.2005-10.org.freenas.ctl:a:tgt0' })],
-    });
-    // Both `a:tgt0` and `tgt0` are colon-anchored suffixes of that IQN.
-    // Reporting it against both would invent a connection to one of them.
-    expect(listing.targets.map((entry) => entry['initiators'])).toEqual([[], []]);
-    expect(listing.unattributed_initiators).toHaveLength(1);
-  });
-
-  it('prefers an exact target name over a suffix that also matches', async () => {
-    const listing = await listed({
-      ['iscsi.target.query']: [target({ id: 2, name: 'x:tgt0' }), target()],
-      ['iscsi.global.sessions']: [session({ target: 'x:tgt0' })],
-    });
-    expect(listing.targets.map((entry) => [entry['name'], entry['initiators']])).toEqual([
-      [
-        'x:tgt0',
-        [{ initiator: 'iqn.1998-01.com.vmware:esx1', addresses: ['10.0.0.20'], alias: 'esx1' }],
-      ],
-      ['tgt0', []],
-    ]);
-    expect(listing.unattributed_initiators).toEqual([]);
-  });
-
-  it('reports a system with no targets as an empty list', async () => {
-    expect(
-      await listed({ ['iscsi.target.query']: [], ['iscsi.global.sessions']: [] }),
-    ).toEqual({
-      targets: [],
-      failures: [],
-      unattributed_initiators: [],
-    });
-  });
-
-  it('does not lose a live session on a system whose targets listed as none', async () => {
-    // A session with no target to hang it on is the one case where the tool
-    // has evidence of block storage in use and nothing to attribute it to.
-    const listing = await listed({ ['iscsi.target.query']: [] });
-    expect(listing.targets).toEqual([]);
-    expect(listing.unattributed_initiators).toMatchObject([{ target: 'tgt0' }]);
-  });
-
-  it('issues every read before awaiting any of them', async () => {
-    const { ctx, query } = failingSystem({
-      ['iscsi.target.query']: [target()],
-      ['iscsi.extent.query']: [extent()],
-      ['iscsi.targetextent.query']: [mapping()],
-      ['iscsi.global.sessions']: [session()],
-    });
-    const listing = iscsiList.handler(ctx, {});
-    // Asserted before the handler is awaited at all, which is what makes this
-    // about concurrency rather than order: every read is subscribed while the
-    // handler still holds the thread, so a handler that awaited one read
-    // before starting the next would have made one call by this point. The
-    // same assertion after the await passes either way.
-    expect(query.mock.calls.map((one) => one[0])).toEqual([
-      'iscsi.target.query',
-      'iscsi.extent.query',
-      'iscsi.targetextent.query',
-      'iscsi.global.sessions',
-    ]);
-    await listing;
-  });
-});
-
+/**
+ * `iscsi_list` was split out to `iscsi-list.spec.ts` under #87's exception when
+ * #138 grew two of this module's three tools past the 1,500-line trigger this
+ * file already sat three lines under. The two below stay here: the split is by
+ * tool, and the module's own spec keeping the tools a split did not have to
+ * move is #121's shape rather than a half-finished state to tidy.
+ */
 describe('nvmeof_list', () => {
   /**
    * A subsystem as `nvmet.subsys.query` reports one. `serial`, `pi_enable`,
@@ -585,13 +58,45 @@ describe('nvmeof_list', () => {
     ...over,
   });
 
+  /**
+   * A port as `nvmet.port.query` reports one. `inline_data_size`,
+   * `max_queue_size` and `pi_enable` are real fields of the payload the tool
+   * does not name, and are here to be dropped.
+   */
+  const port = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    index: 1,
+    addr_trtype: 'TCP',
+    addr_trsvcid: 4420,
+    addr_traddr: '10.0.0.10',
+    addr_adrfam: 'IPV4',
+    inline_data_size: null,
+    max_queue_size: null,
+    pi_enable: null,
+    enabled: true,
+    ...over,
+  });
+
+  /**
+   * A row of the join table publishing one subsystem on one port. It embeds
+   * BOTH entities whole, and neither may be forwarded.
+   */
+  const portJoin = (over: Record<string, unknown> = {}) => ({
+    id: 5,
+    port: port(),
+    subsys: subsystem(),
+    ...over,
+  });
+
   type Listing = {
     supported: boolean;
     unsupported_reason: string | null;
     subsystems: Record<string, unknown>[] | null;
+    ports: Record<string, unknown>[] | null;
     failures: Record<string, unknown>[];
     unattributed_namespaces: Record<string, unknown>[];
     unattributed_hosts: Record<string, unknown>[];
+    unattributed_port_subsystems: Record<string, unknown>[];
   };
 
   const listed = async (
@@ -603,12 +108,20 @@ describe('nvmeof_list', () => {
         ['nvmet.subsys.query']: [subsystem()],
         ['nvmet.namespace.query']: [namespace()],
         ['nvmet.host_subsys.query']: [hostJoin()],
+        ['nvmet.port.query']: [port()],
+        ['nvmet.port_subsys.query']: [portJoin()],
         ...rows,
       },
       failures,
     );
     return (await nvmeofList.handler(ctx, {})) as Listing;
   };
+
+  /** The single port of a listing, for the cases about one port's fields. */
+  const onlyPort = async (
+    rows: Partial<Record<string, unknown>> = {},
+    failures: Partial<Record<string, unknown>> = {},
+  ): Promise<Record<string, unknown>> => ((await listed(rows, failures)).ports ?? [])[0];
 
   /** The single subsystem of a listing, for the cases about one's fields. */
   const onlySubsystem = async (
@@ -640,9 +153,23 @@ describe('nvmeof_list', () => {
           ],
         },
       ],
+      ports: [
+        {
+          id: 1,
+          index: 1,
+          transport: 'TCP',
+          address_family: 'IPV4',
+          address: '10.0.0.10',
+          service_id: 4420,
+          enabled: true,
+          enabled_reported: true,
+          subsystems: [{ subsystem_id: 1, subsystem: 'nvme0' }],
+        },
+      ],
       failures: [],
       unattributed_namespaces: [],
       unattributed_hosts: [],
+      unattributed_port_subsystems: [],
     });
   });
 
@@ -651,14 +178,42 @@ describe('nvmeof_list', () => {
       ['nvmet.subsys.query']: [subsystem({ future_field: 'added by a later release' })],
       ['nvmet.namespace.query']: [namespace({ future_field: 'added by a later release' })],
       ['nvmet.host_subsys.query']: [hostJoin({ future_field: 'added by a later release' })],
+      ['nvmet.port.query']: [port({ future_field: 'added by a later release' })],
+      ['nvmet.port_subsys.query']: [
+        portJoin({
+          future_field: 'added by a later release',
+          // Both embedded entities carry one, and forwarding either is what
+          // this assertion exists to catch (#100).
+          port: port({ future_field: 'added by a later release' }),
+          subsys: subsystem({ future_field: 'added by a later release' }),
+        }),
+      ],
     });
     expect(Object.keys(listing)).toEqual([
       'supported',
       'unsupported_reason',
       'subsystems',
+      'ports',
       'failures',
       'unattributed_namespaces',
       'unattributed_hosts',
+      'unattributed_port_subsystems',
+    ]);
+    const onePort = (listing.ports ?? [])[0];
+    expect(Object.keys(onePort)).toEqual([
+      'id',
+      'index',
+      'transport',
+      'address_family',
+      'address',
+      'service_id',
+      'enabled',
+      'enabled_reported',
+      'subsystems',
+    ]);
+    expect(Object.keys((onePort['subsystems'] as Record<string, unknown>[])[0])).toEqual([
+      'subsystem_id',
+      'subsystem',
     ]);
     const only = (listing.subsystems ?? [])[0];
     expect(Object.keys(only)).toEqual([
@@ -1016,14 +571,18 @@ describe('nvmeof_list', () => {
         ['nvmet.subsys.query']: [],
         ['nvmet.namespace.query']: [],
         ['nvmet.host_subsys.query']: [],
+        ['nvmet.port.query']: [],
+        ['nvmet.port_subsys.query']: [],
       }),
     ).toEqual({
       supported: true,
       unsupported_reason: null,
       subsystems: [],
+      ports: [],
       failures: [],
       unattributed_namespaces: [],
       unattributed_hosts: [],
+      unattributed_port_subsystems: [],
     });
   });
 
@@ -1032,6 +591,8 @@ describe('nvmeof_list', () => {
       ['nvmet.subsys.query']: [subsystem()],
       ['nvmet.namespace.query']: [namespace()],
       ['nvmet.host_subsys.query']: [hostJoin()],
+      ['nvmet.port.query']: [port()],
+      ['nvmet.port_subsys.query']: [portJoin()],
     });
     const listing = nvmeofList.handler(ctx, {});
     // Asserted before the handler is awaited at all, which is what makes this
@@ -1041,18 +602,223 @@ describe('nvmeof_list', () => {
       'nvmet.subsys.query',
       'nvmet.namespace.query',
       'nvmet.host_subsys.query',
+      'nvmet.port.query',
+      'nvmet.port_subsys.query',
     ]);
     await listing;
+  });
+
+  describe('where the service listens', () => {
+    it('reports each port with the subsystems published through it', async () => {
+      const listing = await listed({
+        ['nvmet.subsys.query']: [subsystem(), subsystem({ id: 2, name: 'nvme1' })],
+        ['nvmet.port.query']: [port(), port({ id: 2, index: 2, addr_traddr: '10.0.1.10' })],
+        ['nvmet.port_subsys.query']: [
+          portJoin(),
+          portJoin({ id: 6, port: port({ id: 2 }), subsys: subsystem({ id: 2, name: 'nvme1' }) }),
+          portJoin({ id: 7, port: port({ id: 2 }) }),
+        ],
+      });
+      expect((listing.ports ?? []).map((one) => [one['id'], one['subsystems']])).toEqual([
+        [1, [{ subsystem_id: 1, subsystem: 'nvme0' }]],
+        [
+          2,
+          [
+            { subsystem_id: 2, subsystem: 'nvme1' },
+            { subsystem_id: 1, subsystem: 'nvme0' },
+          ],
+        ],
+      ]);
+      expect(listing.unattributed_port_subsystems).toEqual([]);
+    });
+
+    it('reports the service id as the system spelled it, without coercing it', async () => {
+      // `addr_trsvcid` is declared `number | string | null`: a TCP port number
+      // on a TCP port and something else on an FC one. Converting either way
+      // would assert a meaning the surface does not state.
+      for (const [sent, reported] of [
+        [4420, 4420],
+        ['4420', '4420'],
+        ['none', 'none'],
+        [null, null],
+        ['', null],
+        [Number.NaN, null],
+        [{ port: 4420 }, null],
+      ] as [unknown, unknown][]) {
+        expect(
+          await onlyPort({ ['nvmet.port.query']: [port({ addr_trsvcid: sent })] }),
+        ).toMatchObject({ service_id: reported });
+      }
+    });
+
+    it('tells a port that did not report `enabled` from a disabled one', async () => {
+      expect(await onlyPort({ ['nvmet.port.query']: [port({ enabled: false })] })).toMatchObject({
+        enabled: false,
+        enabled_reported: true,
+      });
+      // The field is optional on the payload, so its absence is a TrueNAS that
+      // does not report it rather than a port that is switched off.
+      const without = port();
+      delete (without as Record<string, unknown>)['enabled'];
+      expect(await onlyPort({ ['nvmet.port.query']: [without] })).toMatchObject({
+        enabled: null,
+        enabled_reported: false,
+      });
+      // Reported, and not a boolean: the system said something this tool could
+      // not read, which is a third answer again.
+      expect(await onlyPort({ ['nvmet.port.query']: [port({ enabled: 'yes' })] })).toMatchObject({
+        enabled: null,
+        enabled_reported: true,
+      });
+    });
+
+    it('does not read `enabled` off the prototype chain', async () => {
+      // Plain property access walks the prototype and `Object.hasOwn` does not,
+      // so a value read that way could sit beside `enabled_reported: false`.
+      const inherited = Object.assign(Object.create({ enabled: true }), port());
+      delete (inherited as Record<string, unknown>)['enabled'];
+      expect(await onlyPort({ ['nvmet.port.query']: [inherited] })).toMatchObject({
+        enabled: null,
+        enabled_reported: false,
+      });
+    });
+
+    it('reports a port field the system did not report as null', async () => {
+      expect(await onlyPort({ ['nvmet.port.query']: [{ addr_traddr: '' }] })).toEqual({
+        id: null,
+        index: null,
+        transport: null,
+        address_family: null,
+        // An empty address is reported as null, as a field that could not be
+        // read is: the catalog does not establish what an empty one means.
+        address: null,
+        service_id: null,
+        enabled: null,
+        enabled_reported: false,
+        // Null rather than empty, because the port carries no id for a
+        // publication to be joined on — the case below.
+        subsystems: null,
+      });
+    });
+
+    it('reports an FC port as a transport rather than as FC hardware', async () => {
+      expect(
+        await onlyPort({
+          ['nvmet.port.query']: [
+            port({ addr_trtype: 'FC', addr_adrfam: 'FC', addr_trsvcid: null }),
+          ],
+        }),
+      ).toMatchObject({ transport: 'FC', address_family: 'FC', service_id: null });
+      expect(nvmeofList.description).toContain('NOT A STATEMENT ABOUT THE FC HARDWARE');
+    });
+
+    it('keeps a publication naming a subsystem it could not identify', async () => {
+      // Dropping it would say the port publishes less than it does; keeping it
+      // costs a row that cannot be joined against the listing, which the
+      // description states (#93).
+      const only = await onlyPort({
+        ['nvmet.port_subsys.query']: [
+          portJoin({ subsys: { id: 'one', name: 42 } }),
+          // The whole embedded record being something else answers the same
+          // way, rather than throwing and taking every publication with it.
+          portJoin({ id: 6, subsys: 'nvme0' }),
+        ],
+      });
+      expect(only['subsystems']).toEqual([
+        { subsystem_id: null, subsystem: null },
+        { subsystem_id: null, subsystem: null },
+      ]);
+    });
+
+    it('sets aside a publication naming a port this listing does not report', async () => {
+      const listing = await listed({
+        ['nvmet.port_subsys.query']: [
+          portJoin({ port: port({ id: 9 }) }),
+          portJoin({ id: 6, port: 'not a record' }),
+        ],
+      });
+      // Dropped, both would leave the port reading as publishing nothing.
+      expect((listing.ports ?? [])[0]['subsystems']).toEqual([]);
+      expect(listing.unattributed_port_subsystems).toEqual([
+        { subsystem_id: 1, subsystem: 'nvme0', port_id: 9 },
+        { subsystem_id: 1, subsystem: 'nvme0', port_id: null },
+      ]);
+    });
+
+    it('sets every publication aside when the ports themselves could not be read', async () => {
+      const listing = await listed({}, { ['nvmet.port.query']: new Error('denied') });
+      expect(listing.ports).toBeNull();
+      expect(listing.unattributed_port_subsystems).toEqual([
+        { subsystem_id: 1, subsystem: 'nvme0', port_id: 1 },
+      ]);
+      expect(listing.failures).toEqual([{ source: 'ports', error: 'denied' }]);
+    });
+
+    it('distinguishes publications that could not be read from a port with none', async () => {
+      const listing = await listed({}, { ['nvmet.port_subsys.query']: new Error('denied') });
+      // Null rather than empty: empty would say nothing is reachable through
+      // the port, which is the answer this tool must not invent.
+      expect((listing.ports ?? [])[0]['subsystems']).toBeNull();
+      expect(listing.unattributed_port_subsystems).toEqual([]);
+      expect(listing.failures).toEqual([{ source: 'port_subsystems', error: 'denied' }]);
+      expect((listing.subsystems ?? [])[0]['namespaces']).not.toBeNull();
+    });
+
+    it('reports no publications for a port the system did not number', async () => {
+      const listing = await listed({ ['nvmet.port.query']: [port({ id: null })] });
+      // There is nothing for a publication to be joined on, which is not the
+      // same answer as a read that failed.
+      expect((listing.ports ?? [])[0]['subsystems']).toBeNull();
+      expect(listing.unattributed_port_subsystems).toEqual([
+        { subsystem_id: 1, subsystem: 'nvme0', port_id: 1 },
+      ]);
+      expect(listing.failures).toEqual([]);
+    });
+
+    it('distinguishes a system with no port from one whose ports failed', async () => {
+      expect((await listed({ ['nvmet.port.query']: [] })).ports).toEqual([]);
+      expect((await listed({}, { ['nvmet.port.query']: 'connection reset' })).ports).toBeNull();
+    });
+
+    it('keeps the subsystems when both listener reads failed', async () => {
+      const listing = await listed(
+        {},
+        {
+          ['nvmet.port.query']: new Error('denied'),
+          ['nvmet.port_subsys.query']: new Error('service not running'),
+        },
+      );
+      expect((listing.subsystems ?? [])[0]).toMatchObject({ id: 1, name: 'nvme0' });
+      expect(listing.failures).toEqual([
+        { source: 'ports', error: 'denied' },
+        { source: 'port_subsystems', error: 'service not running' },
+      ]);
+    });
+  });
+
+  describe('its description', () => {
+    it('says where a subsystem\'s ports are read from, now that they are reported', () => {
+      // The tool used to say outright that it did not report this. A caller
+      // reading that sentence beside the field it denies is the failure the
+      // reconciliation prevents.
+      expect(nvmeofList.description).toContain('READ FROM `ports[].subsystems`');
+      expect(nvmeofList.description).not.toContain('does not report which ports');
+    });
+
+    it('says that a service id is not converted between its two spellings', () => {
+      expect(nvmeofList.description).toContain('AS THE SYSTEM SPELLED IT');
+    });
   });
 });
 
 /**
  * Here rather than in a spec of its own, under #87's default: the split
- * exception is checked and was not met. This file was 1,047 lines and this
- * block is around 450, so the merged file is 1,497 — under the 1,500-line
- * trigger, which is #97's case rather than #121's. THE MARGIN IS THREE LINES:
- * the next tool added to this family meets the exception on arrival, and takes
- * its own spec named for it rather than growing this one.
+ * exception is checked each time this file grows, and the margin it recorded —
+ * three lines — is what #138 spent. That ticket grew `iscsi_list` and
+ * `nvmeof_list`, so `iscsi_list` took the spec named for it and this block did
+ * not move: the trigger is a file size, and moving the largest block a ticket
+ * touched brought this one back under it. A tool added to this family now
+ * measures again against what is left rather than against the old number.
  */
 describe('fc_list', () => {
   /**
