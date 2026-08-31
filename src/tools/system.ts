@@ -1256,7 +1256,10 @@ export const systemNtpStatus: ReadOnlyTool = {
     '`servers` is one entry per configured server, IN THE ORDER THE SYSTEM ' +
     'LISTED THEM and not re-ordered here. `address` is the server as the ' +
     'system spelled it — a hostname such as `0.debian.pool.ntp.org` or an IP ' +
-    'address — passed through exactly and NOT resolved, contacted or checked. ' +
+    'address — passed through exactly as spelled and NOT resolved, contacted ' +
+    'or checked. It is NULL WHERE THE SYSTEM REPORTED NO ADDRESS THIS TOOL ' +
+    'COULD READ, which covers an address reported as empty text, and such an ' +
+    'entry names no server that could be looked up or matched. ' +
     '`prefer` is the server\'s own `prefer` setting as the system recorded it, ' +
     '`burst` and `iburst` its two burst settings. Each of the three is ' +
     'THREE-VALUED: true, false, or NULL WHERE THE SYSTEM REPORTED NO VALUE ' +
