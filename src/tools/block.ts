@@ -2,19 +2,27 @@ import type { QueryEntity } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
-import { booleanOrNull, errorText, numberOrNull, textOrNull } from '@/tools/common';
+import {
+  booleanOrNull,
+  errorText,
+  numberOrNull,
+  recordOrNull,
+  textOrNull,
+  unreportedKeys,
+} from '@/tools/common';
 
 /**
  * Block-storage family: what the system serves as block devices rather than as
- * filesystem paths, over each of the two protocols that do it.
+ * filesystem paths, over each of the three protocols that do it.
  *
- * `shares_list` deliberately excludes both, and says so: a target or a
- * subsystem exports a block device rather than a filesystem path, and its
- * vocabulary answers a different question. That question is asked here, once
- * per protocol — `iscsi_list` for iSCSI, `nvmeof_list` for NVMe-oF. They are
- * two tools rather than one because they share no vocabulary: targets, extents
- * and initiators on one side, subsystems, namespaces and hosts on the other,
- * with no field meaning the same thing in both.
+ * `shares_list` deliberately excludes all of them, and says so: a target, a
+ * subsystem or an FC port exports a block device rather than a filesystem path,
+ * and its vocabulary answers a different question. That question is asked here,
+ * once per protocol — `iscsi_list` for iSCSI, `nvmeof_list` for NVMe-oF,
+ * `fc_list` for Fibre Channel. They are three tools rather than one because
+ * they share no vocabulary: targets, extents and initiators on the first side,
+ * subsystems, namespaces and hosts on the second, host adapters, ports and
+ * WWPNs on the third, with no field meaning the same thing in any two.
  *
  * iSCSI takes four middleware namespaces to answer, and none of them nests
  * inside another. `iscsi.target.query` names the targets; `iscsi.extent.query`
@@ -31,6 +39,15 @@ import { booleanOrNull, errorText, numberOrNull, textOrNull } from '@/tools/comm
  * sides whole. None of them is live state — the middleware exposes no
  * equivalent of `iscsi.global.sessions` for NVMe-oF in this client, so
  * `nvmeof_list` answers what is configured and cannot say what is attached.
+ *
+ * Fibre Channel takes three that do not nest at all, and unlike the other two
+ * families one of them is untyped: `fc.fc_host.query` and `fcport.query` are
+ * declared entities, while `fcport.status` takes and answers open records and
+ * is the one read that says whether a link is up. So the FC tool is the only one
+ * here carrying an unconfirmed allowlist and the `unreported_fields` list that
+ * makes it checkable (#98), and the only one whose three reads are ALL caught:
+ * no one of them names the others' subjects, so none is entitled to fail the
+ * tool.
  */
 
 /** Which of the two secondary iSCSI reads failed. */
@@ -251,7 +268,9 @@ export const iscsiList: ReadOnlyTool = {
     '`initiators` AS AN IDLE TARGET: an `FC` target is not served over iSCSI ' +
     'at all, so it holds no iSCSI session by definition and an empty list ' +
     'there says nothing about whether it is in use. Fibre Channel sessions are ' +
-    'not visible to this tool. `extents` are the backing ' +
+    'not visible to this tool, and are not visible to `fc_list` either — the ' +
+    'middleware exposes no FC equivalent of the iSCSI session list, so nothing ' +
+    'in this catalog reports who is attached over FC. `extents` are the backing ' +
     'stores mapped onto the target: `lun` is the logical unit number the ' +
     'initiator addresses it by, `id` the extent\'s numeric identity, `name` its ' +
     'name, and `type` `DISK` or `FILE` — a zvol or a file on a dataset. `disk` ' +
@@ -288,8 +307,10 @@ export const iscsiList: ReadOnlyTool = {
     'visible, and is grouped by initiator in the same way. WHILE IT IS NOT EMPTY THE ' +
     'PER-TARGET `initiators` LISTS ARE INCOMPLETE, and a target reporting an ' +
     'empty list may in fact be in use. This tool reads only iSCSI: NVMe-oF ' +
-    'subsystems and Fibre Channel ports are served separately and are not ' +
-    'listed here, and neither are SMB or NFS shares, which are `shares_list`.',
+    'subsystems are `nvmeof_list` and Fibre Channel host adapters and ports are ' +
+    '`fc_list`, and neither is listed here; nor are SMB or NFS shares, which ' +
+    'are `shares_list`. A target whose `mode` is `FC` or `BOTH` is served over ' +
+    'Fibre Channel, and `fc_list` is what reports the ports carrying it.',
   inputSchema: { type: 'object', properties: {} },
   requiredRole: Role.ReadOnly,
   mutating: false,
@@ -607,7 +628,8 @@ export const nvmeofList: ReadOnlyTool = {
     'and the other list is unaffected — `failures` names which read that was, ' +
     'and is also what tells a list that could not be read from one that could ' +
     'not be attributed. This tool reads only ' +
-    'NVMe-oF: iSCSI targets are `iscsi_list`, and SMB or NFS shares are ' +
+    'NVMe-oF: iSCSI targets are `iscsi_list`, Fibre Channel host adapters and ' +
+    'ports are `fc_list`, and SMB or NFS shares are ' +
     '`shares_list`. It does not report which ports a subsystem is published ' +
     'on, so a subsystem listed here is not necessarily reachable over the ' +
     'network.',
@@ -693,6 +715,342 @@ export const nvmeofList: ReadOnlyTool = {
         subsystem_id: row.subsystem_id,
         subsystem: row.subsystem,
       })),
+    };
+  },
+};
+
+/** Which of the three Fibre Channel reads failed. */
+type FcSource = 'hosts' | 'ports' | 'port_status';
+
+/**
+ * One Fibre Channel host adapter.
+ *
+ * `wwpn` and `wwpn_b` are the two CONTROLLERS' port names on an HA appliance,
+ * not two ports of one adapter: `wwpn` is this controller's and `wwpn_b` the
+ * peer's, and a single-controller system carries none for a peer it does not
+ * have. That is why both are reported and why the description says which is
+ * which — an operator shown one null would otherwise read a correctly
+ * configured adapter as half-configured.
+ */
+interface FcHost {
+  id: number | null;
+  alias: string | null;
+  wwpn: string | null;
+  wwpn_b: string | null;
+  npiv: number | null;
+  npiv_reported: boolean;
+}
+
+/**
+ * The keys of an `fcport.status` row whose values this tool reports.
+ *
+ * **(unconfirmed) in its entirety.** `fcport.status` takes and answers open
+ * records — `QueryFilters<Record<string, unknown>>` in, `unknown[]` out — so
+ * unlike every other read in this file there is no declared shape to name
+ * fields off, and no live system with FC hardware was available to read the real
+ * keys from. These four are taken from what a Linux FC host publishes per port
+ * (`/sys/class/fc_host/<host>/`), plus the port name the other two reads are
+ * spelled with, and they are a considered guess rather than a reading.
+ *
+ * #98 is what makes the guess checkable instead of hidden: every key a row
+ * actually carried whose value is not reported lands in `unreported_fields`,
+ * built from the keys that PRODUCED A VALUE and never from this list. A wrong
+ * key name and a right key over an unexpected value type then look different
+ * from the outside, and the second is the likelier failure here — a status
+ * record assembled from a sysfs tree sends numbers as text about as readily as
+ * it sends them as numbers.
+ */
+const PORT_STATUS_KEYS = ['port', 'port_type', 'port_state', 'speed'] as const;
+
+/** One row of `fcport.status`, read through the allowlist above. */
+interface FcPortStatus {
+  port: string | null;
+  port_type: string | null;
+  port_state: string | null;
+  speed: string | null;
+  unreported_fields: string[] | null;
+}
+
+/**
+ * One status row, or a row of nulls for an entry that was not a record.
+ *
+ * An unreadable entry is KEPT rather than dropped, per #93's direction rule: the
+ * per-port `status` lists are what a caller reads to find a link that is down,
+ * so a list one entry shorter says a port reported nothing about its link when
+ * what is true is that this tool could not read what it reported. It carries no
+ * `port`, so it is reported beside the listing rather than under a port, and its
+ * null `unreported_fields` is what tells it from a record that named no port.
+ */
+function readPortStatus(entry: unknown): FcPortStatus {
+  const record = recordOrNull(entry);
+  if (record === null) {
+    return { port: null, port_type: null, port_state: null, speed: null, unreported_fields: null };
+  }
+  const read = {
+    port: textOrNull(record['port']),
+    port_type: textOrNull(record['port_type']),
+    port_state: textOrNull(record['port_state']),
+    speed: textOrNull(record['speed']),
+  };
+  return {
+    ...read,
+    unreported_fields: unreportedKeys(
+      record,
+      PORT_STATUS_KEYS.filter((key) => read[key] !== null),
+    ),
+  };
+}
+
+/** Status rows filed under the port each named, and the ones that could not be. */
+interface StatusAttribution {
+  byPort: Map<string, FcPortStatus[]>;
+  unattributed: FcPortStatus[];
+}
+
+/**
+ * The status rows filed under the port each named, where that names a port this
+ * listing actually reports, and set aside where it does not.
+ *
+ * Set aside rather than dropped, for `attribute`'s reason one family over: a
+ * dropped row leaves an empty `status` behind that says the port reported no
+ * link state, which is a claim this read did not make. A row is set aside where
+ * it named no readable `port` and where it named one no listed port answers to.
+ *
+ * The join is on the port NAME because that is the only field the two reads
+ * plausibly share — and it is part of the same unconfirmed guess as the
+ * allowlist above. Getting it wrong empties every `status` list and fills
+ * `unattributed_status`, which is the one shape that says so rather than
+ * reading as ports with nothing to report.
+ */
+function attributeStatus(rows: FcPortStatus[], listed: Set<string>): StatusAttribution {
+  const byPort = new Map<string, FcPortStatus[]>();
+  const unattributed: FcPortStatus[] = [];
+  for (const row of rows) {
+    if (row.port === null || !listed.has(row.port)) {
+      unattributed.push(row);
+      continue;
+    }
+    const filed = byPort.get(row.port);
+    if (filed === undefined) byPort.set(row.port, [row]);
+    else filed.push(row);
+  }
+  return { byPort, unattributed };
+}
+
+/**
+ * Every host adapter the system reported.
+ *
+ * `npiv` is optional on the declared entity, so its null covers a release that
+ * does not report the field at all as well as one that reported something this
+ * tool could not read as a count. `npiv_reported` separates the first from the
+ * second, which is #134's companion-field shape over the same `field?: T`
+ * signature — `Object.hasOwn` and not `in`, which walks the prototype (#101).
+ *
+ * BOTH FIELDS READ THE ROW'S OWN KEY, and that pairing is the point rather than
+ * a flourish. Plain property access walks the prototype too, so reading the
+ * value that way beside a membership test that does not would let a non-null
+ * `npiv` sit beside `npiv_reported: false` — a value presented as one the
+ * system did not report. No JSON payload carries such a chain, which is exactly
+ * why the two would be trusted to agree and never checked.
+ */
+async function readFcHosts(system: SystemHandle): Promise<FcHost[]> {
+  const hosts = await firstValueFrom(system.client.api.query('fc.fc_host.query'));
+  return hosts.map((host) => {
+    const reported = Object.hasOwn(host, 'npiv');
+    return {
+      id: numberOrNull(host.id),
+      alias: textOrNull(host.alias),
+      wwpn: textOrNull(host.wwpn),
+      wwpn_b: textOrNull(host.wwpn_b),
+      npiv: reported ? numberOrNull(host.npiv) : null,
+      npiv_reported: reported,
+    };
+  });
+}
+
+/**
+ * One Fibre Channel port, and the iSCSI target it is mapped to reduced to that
+ * target's id.
+ *
+ * `target` is an open record on the declared entity, so it is REDUCED rather
+ * than forwarded (#102): a caller gets the one fact reading it establishes and
+ * nothing a later release adds to that record reaches a tool result.
+ * `target_mapped` is the companion that splits the reduction's null — a port
+ * mapped to no target at all is a different answer from one whose target record
+ * could not be read, and only the first says the port serves nothing.
+ */
+interface FcPort {
+  id: number | null;
+  port: string | null;
+  wwpn: string | null;
+  wwpn_b: string | null;
+  target_mapped: boolean | null;
+  target_id: number | null;
+  status: FcPortStatus[] | null;
+}
+
+/** Every port the system reported, before any status row has been attributed. */
+async function readFcPorts(system: SystemHandle): Promise<Omit<FcPort, 'status'>[]> {
+  const ports = await firstValueFrom(system.client.api.query('fcport.query'));
+  return ports.map((port) => {
+    const target = port.target;
+    const record = recordOrNull(target);
+    return {
+      id: numberOrNull(port.id),
+      port: textOrNull(port.port),
+      wwpn: textOrNull(port.wwpn),
+      wwpn_b: textOrNull(port.wwpn_b),
+      // Three answers rather than two: a record is a mapping, an explicit null
+      // is the system saying there is none, and anything else established
+      // neither — `recordOrNull` alone answers null for the last two alike,
+      // which is the reading this field exists to separate (#102).
+      target_mapped: record !== null ? true : target === null ? false : null,
+      target_id: record === null ? null : numberOrNull(record['id']),
+    };
+  });
+}
+
+/** Every `fcport.status` row the system reported, each read through #98's allowlist. */
+async function readPortStatuses(system: SystemHandle): Promise<FcPortStatus[]> {
+  const rows = await firstValueFrom(system.client.api.call('fcport.status'));
+  return rows.map(readPortStatus);
+}
+
+export const fcList: ReadOnlyTool = {
+  name: 'fc_list',
+  description:
+    'Every Fibre Channel host adapter the system has, every FC port and the ' +
+    'iSCSI target it is mapped to, and each port\'s link status. `hosts` are ' +
+    'the adapters: `id` is the numeric identity, `alias` the label the adapter ' +
+    'records for itself, and `npiv` the number of virtual ports configured on ' +
+    'it. `npiv` ' +
+    'IS OPTIONAL ON THIS PAYLOAD, so `npiv_reported` says whether the system ' +
+    'reported the field at all — false means this TrueNAS does not report NPIV, ' +
+    'while true beside a null `npiv` means it reported something that could not ' +
+    'be read as a count. A reported `0` is a real count of none and is not ' +
+    'either of those. `ports` are the FC ports: `id` is the numeric identity ' +
+    'and `port` the port name, which is also what a `status` row names. ' +
+    'THIS TOOL DOES NOT RELATE AN ADAPTER TO A PORT and offers no field that ' +
+    'does: `hosts[].alias` and `ports[].port` are separate names the payloads ' +
+    'report separately, nothing in the API says they are drawn from one ' +
+    'namespace, and an adapter carrying NPIV virtual ports is precisely the ' +
+    'case where they need not coincide. Matching them by text is a guess, and ' +
+    'not one this tool makes on a caller\'s behalf. ' +
+    '`wwpn` AND `wwpn_b` ON BOTH LISTS ARE UNDERSTOOD TO BE THE TWO ' +
+    'CONTROLLERS OF AN HA PAIR rather than two ports of one adapter: `wwpn` is ' +
+    'this controller\'s World Wide Port Name and `wwpn_b` its peer\'s. THAT ' +
+    'READING IS NOT STATED BY THE API — both are plain nullable strings on the ' +
+    'payload, which says nothing about what the `_b` names — so it is reported ' +
+    'here as the reading it is. Under it, a single-controller appliance has no ' +
+    'peer and a null `wwpn_b` there is the expected answer rather than a ' +
+    'misconfiguration; but that is also what a system reporting no value sends, ' +
+    'and nothing in this tool tells those two apart. `ha_status` is what says ' +
+    'whether this system is an HA pair at all, and it is what a caller needs ' +
+    'before reading anything into a null `wwpn_b`. ' +
+    '`target_id` is the iSCSI target the port is mapped to, ' +
+    'reduced to that target\'s identity and joinable against `iscsi_list`\'s ' +
+    '`targets[].id`; the target\'s name and its extents are reported there and ' +
+    'not here. `target_mapped` is whether the port named a target at all: false ' +
+    'is a port mapped to nothing, which serves no data; true beside a null ' +
+    '`target_id` is a mapping whose target this tool could not identify; and ' +
+    'null is a field that was neither. `status` is what `fcport.status` said ' +
+    'about that port, and it is THE ONLY READ HERE THAT SAYS WHETHER A LINK IS ' +
+    'ACTUALLY UP — `port_state` is the system\'s own word for the link state, ' +
+    '`port_type` the topology it negotiated, and `speed` the negotiated speed. ' +
+    'THE FIELD NAMES IN A STATUS ROW ARE UNCONFIRMED: this read answers an open ' +
+    'record the middleware declares nothing about, so the four names above are ' +
+    'taken from what a Linux FC host publishes and have not been checked ' +
+    'against a live system. `unreported_fields` names every key a row actually ' +
+    'carried whose value is not reported here, so an allowlist that does not ' +
+    'fit this system is visible rather than silent: the four fields all null ' +
+    'beside a full `unreported_fields` is a wrong allowlist, and all null ' +
+    'beside an EMPTY one is a row that genuinely carried nothing under those ' +
+    'names. `unreported_fields` is null for an entry that was not a record at ' +
+    'all, whose other fields are then all null for that reason. Values are ' +
+    'reported ONLY AS TEXT, so a system sending a numeric `speed` reports null ' +
+    'there and names `speed` in `unreported_fields`. AN EMPTY `status` AND A ' +
+    'NULL ONE ARE DIFFERENT ANSWERS: empty means the status read succeeded and ' +
+    'no row named this port. NULL HAS TWO CAUSES AND ONLY ONE OF THEM IS A ' +
+    'FAILED READ — either the status read failed, which `failures` names, or ' +
+    'this port carries a null `port` and so has no name for a status row to be ' +
+    'joined on, which leaves `failures` empty. Read `port` and `failures` ' +
+    'together to tell them apart. Neither says anything about the link. ' +
+    '`hosts` and `ports` are null only in the first way. ' +
+    '`unattributed_status` holds status rows that could not ' +
+    'be placed on any port listed here — one naming a `port` no listed port ' +
+    'answers to carries that name, one that named no readable port carries a ' +
+    'null `port` beside a non-null `unreported_fields`, and one that was not a ' +
+    'record at all carries null for both. WHILE IT IS NOT EMPTY THE PER-PORT ' +
+    '`status` LISTS ARE INCOMPLETE. WHAT A FULL ONE RULES OUT IS PORTS WITH ' +
+    'NOTHING TO REPORT — every row in it was read, and none was dropped. IT IS ' +
+    'NOT A PARTITION BEYOND THAT and this tool does not offer one: a null ' +
+    '`ports` says the port read failed and there was nothing to attribute ' +
+    'against, but where `ports` was read the same shape covers a system whose ' +
+    'status rows name ports it has not mapped, and a port-name join that does ' +
+    'not hold on this system at all — and NOTHING HERE SEPARATES THOSE TWO. ' +
+    'Comparing the `port` names in this list against `ports[].port` is what ' +
+    'tells them apart, and it is the caller\'s to do. ' +
+    '`failures` names each read that failed, as ' +
+    '`source` — `hosts`, `ports` or `port_status` — and `error`, and is empty ' +
+    'when all three were read. NONE OF THE THREE FAILS THE TOOL, so a system ' +
+    'with no Fibre Channel hardware answers cleanly: it reports empty lists ' +
+    'where the reads succeed and names them in `failures` where they do not. ' +
+    'THERE IS NO `supported` FIELD AND NO CATALOG ANSWER TO "does this system ' +
+    'have FC at all" — empty `hosts` and empty `ports` are the closest thing to ' +
+    'one, and they do not distinguish an appliance with no FC hardware from one ' +
+    'whose hardware is present and unconfigured. This tool reports ' +
+    'CONFIGURATION AND LINK STATE AND NOT SESSIONS: the middleware exposes no ' +
+    'FC equivalent of the iSCSI session list, so nothing here says which hosts ' +
+    'are attached, and a port whose link is up may have nothing talking to it. ' +
+    'It reads only Fibre Channel: iSCSI targets are `iscsi_list`, NVMe-oF ' +
+    'subsystems are `nvmeof_list`, and SMB or NFS shares are `shares_list`.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }) {
+    // Every read is issued before any is awaited, so none waits on another —
+    // and unlike the two tools above, ALL THREE are caught. There is no primary
+    // read here: an adapter, a port and a link state are three separate facts
+    // about a protocol rather than three parts of one entity, so no one of them
+    // failing leaves the others with nothing to describe.
+    const [hosts, ports, status] = await Promise.all([
+      attempt('hosts', () => readFcHosts(system)),
+      attempt('ports', () => readFcPorts(system)),
+      attempt('port_status', () => readPortStatuses(system)),
+    ]);
+
+    const failures: Failure<FcSource>[] = [];
+    if (hosts.failure !== null) failures.push(hosts.failure);
+    if (ports.failure !== null) failures.push(ports.failure);
+    if (status.failure !== null) failures.push(status.failure);
+
+    // What a status row has to name to be filed under a port. Built from the
+    // ports that were read: where the port read itself failed there is nothing
+    // to file against, and every status row is reported unattributed instead.
+    const listed = new Set(
+      (ports.value ?? []).flatMap((port) => (port.port === null ? [] : [port.port])),
+    );
+    const attributed = status.value === null ? null : attributeStatus(status.value, listed);
+
+    return {
+      hosts: hosts.value,
+      ports:
+        ports.value === null
+          ? null
+          : ports.value.map((port) => ({
+              ...port,
+              // Null for a read that failed and for a port the system did not
+              // name, which is what a status row is joined on; an empty list
+              // for a read that succeeded and placed nothing here.
+              status:
+                attributed === null || port.port === null
+                  ? null
+                  : (attributed.byPort.get(port.port) ?? []),
+            })),
+      failures,
+      // Named for the concept the two tools above already use: an entity that
+      // was read and could not be placed under the thing it named.
+      unattributed_status: attributed?.unattributed ?? [],
     };
   },
 };
