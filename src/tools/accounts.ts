@@ -1,11 +1,21 @@
 import { firstValueFrom } from 'rxjs';
+import type { QueryEntity } from '@truenas/api-client';
 import { Role } from '@/interfaces';
-import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
-import { effectiveLimit, errorText, numberOrNull, textOrNull } from '@/tools/common';
+import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+import {
+  booleanOrNull,
+  effectiveLimit,
+  errorText,
+  numberOrNull,
+  recordOrNull,
+  strictTextList,
+  textOrNull,
+} from '@/tools/common';
 
 /**
- * Accounts family: who has an account on this system, what each belongs to, and
- * whether the directory service the non-local ones come from is joined.
+ * Accounts family: who has an account on this system, what each belongs to,
+ * what the groups they belong to are permitted to do, and whether the directory
+ * service the non-local ones come from is joined.
  *
  * `users_list` reads two middleware namespaces. `user.query` lists the
  * accounts, local and directory-provided alike, and each account carries its
@@ -14,19 +24,24 @@ import { effectiveLimit, errorText, numberOrNull, textOrNull } from '@/tools/com
  * group record id and by nothing else, so without the listing they are numbers
  * with no meaning.
  *
+ * `privileges_list` reads `privilege.query`, which is the other half of that
+ * question: `users_list` says who belongs to which group and this says what
+ * holding a group is worth. The two are joined on the group, not on the
+ * account, because a privilege is granted to a group and never to a user.
+ *
  * `directory_services_status` reads two more. `directoryservices.status` is the
  * live join state, and it is the tool; `directoryservices.config` is where the
  * domain and the bind method are read from, and it is reported rather than
  * fatal for the reason `readConfig` gives.
  *
- * Both payloads are ones where over-returning is a hazard rather than a cost.
- * The account record holds `unixhash`, `smbhash`, `sshpubkey` and
+ * All three payloads are ones where over-returning is a hazard rather than a
+ * cost. The account record holds `unixhash`, `smbhash`, `sshpubkey` and
  * `password_history`; the directory services configuration embeds the
- * credential the system binds with — a Kerberos `password`, an LDAP `bindpw`.
- * Passing either row through would put every one of them in front of an LLM.
- * Every field that survives is named here, so a credential a later TrueNAS
- * release adds to either record cannot reach a caller without a change to this
- * file.
+ * credential the system binds with — a Kerberos `password`, an LDAP `bindpw`;
+ * a privilege embeds whole group entities. Passing any of those rows through
+ * would put every one of their fields in front of an LLM. Every field that
+ * survives is named here, so a credential a later TrueNAS release adds to any
+ * of those records cannot reach a caller without a change to this file.
  */
 
 /**
@@ -217,7 +232,11 @@ export const usersList: ReadOnlyTool = {
     'whatever else a later TrueNAS release adds to an account record. This is ' +
     'the account listing rather than live state — it does not say who is ' +
     'logged in — and it does not report what an account is permitted to do: ' +
-    'who may reach a share is `share_access`. BOTH LISTS ARE BOUNDED: `users` ' +
+    'who may reach a share is `share_access`, and which groups hold which ' +
+    'ADMINISTRATIVE ROLES is `privileges_list`. A privilege is granted to a ' +
+    'GROUP AND NEVER TO AN ACCOUNT, so what a named account may administer is ' +
+    'this tool read together with that one — the memberships here, the roles ' +
+    'there. BOTH LISTS ARE BOUNDED: `users` ' +
     'holds at most `limit` accounts and `groups` at most `limit` groups — 100 ' +
     'by default and 1000 at most, and the `limit` returned is the bound ' +
     'actually applied. `users_truncated` and `groups_truncated` are true where ' +
@@ -410,6 +429,197 @@ export const directoryServicesStatus: ReadOnlyTool = {
       kerberos_realm: config.values?.kerberos_realm ?? null,
       credential_type: config.values?.credential_type ?? null,
       config_error: config.error,
+    };
+  },
+};
+
+/** One privilege of the system, as the API surface in use types a row of it. */
+type PrivilegeRow = QueryEntity<ApiSurface['call'], 'privilege.query'>;
+
+/** A group the system named, as this tool reports one. */
+interface ResolvedGroup {
+  id: number | null;
+  gid: number | null;
+  name: string | null;
+  local: boolean | null;
+  builtin: boolean | null;
+  sid: string | null;
+}
+
+/** What a privilege named where the system could not resolve it to a group. */
+interface UnmappedGroup {
+  gid: number | null;
+  sid: string | null;
+}
+
+/**
+ * One entry of a privilege's group list, under the arm it turned out to be.
+ *
+ * The middleware discriminates this payload — an entry is a `GroupEntry` or an
+ * `UnmappedGroupEntry`, and the second carries a `group` of null where the
+ * first carries the group's name — so it gets one allowlist per arm with the
+ * arm reported, rather than a flattened row unioning both. The two arms share
+ * no field that means the same thing: an `UnmappedGroupEntry`'s `gid` is what
+ * the privilege ASKED FOR and did not get, while a `GroupEntry`'s is a fact
+ * about a group that exists.
+ */
+interface PrivilegeGroup {
+  kind: 'RESOLVED' | 'UNMAPPED' | 'UNREADABLE';
+  group: ResolvedGroup | null;
+  unmapped: UnmappedGroup | null;
+}
+
+/**
+ * Whether somebody created this privilege on this system, from the stock name.
+ *
+ * Reduced to a fact rather than left to the caller to infer from a null
+ * `builtin_name`, because that null has two causes and only one of them is the
+ * interesting one: the system reporting no stock name, which is what an
+ * operator-created privilege reports, and the field arriving as something that
+ * is neither a name nor null. `textOrNull` answers null for both, so reading
+ * the absence as "somebody defined this" would be a claim on the second.
+ */
+function operatorDefined(value: unknown): boolean | null {
+  if (value === null) return true;
+  return textOrNull(value) === null ? null : false;
+}
+
+/**
+ * One group list of a privilege, with every entry kept.
+ *
+ * Null where the field was not a list at all, which is a list the system did
+ * not report and never a privilege granted to no group of that kind. Nothing is
+ * dropped: an entry that could not be read is reported as one, because a list
+ * one entry shorter says one fewer group holds this privilege — understating
+ * who has access, which is the direction the entry has to be kept in.
+ */
+function privilegeGroups(value: unknown): PrivilegeGroup[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.map(privilegeGroup);
+}
+
+/**
+ * One entry of a group list, read under whichever arm it is.
+ *
+ * `group` explicitly null is the unmapped arm, which is the discriminant the
+ * client's own union declares. Anything else that is a record is read as a
+ * resolved group — including a record carrying no `group` at all, since that
+ * field is a legacy alias for the name and every field the resolved arm reports
+ * is read through its own guard anyway. An entry that is not a record is
+ * neither arm, and says so.
+ */
+function privilegeGroup(entry: unknown): PrivilegeGroup {
+  const record = recordOrNull(entry);
+  if (record === null) return { kind: 'UNREADABLE', group: null, unmapped: null };
+  if (record['group'] === null) {
+    return {
+      kind: 'UNMAPPED',
+      group: null,
+      unmapped: { gid: numberOrNull(record['gid']), sid: textOrNull(record['sid']) },
+    };
+  }
+  return {
+    kind: 'RESOLVED',
+    group: {
+      id: numberOrNull(record['id']),
+      gid: numberOrNull(record['gid']),
+      name: textOrNull(record['name']),
+      local: booleanOrNull(record['local']),
+      builtin: booleanOrNull(record['builtin']),
+      sid: textOrNull(record['sid']),
+    },
+    unmapped: null,
+  };
+}
+
+export const privilegesList: ReadOnlyTool = {
+  name: 'privileges_list',
+  description:
+    'Which groups hold which administrative roles on this system, and which of ' +
+    'those grant web shell access. A privilege is granted to a GROUP AND NEVER ' +
+    'TO A USER, so an account holds one by being a member of a group named ' +
+    'here; who belongs to which group is `users_list`. `web_shell` IS THE ' +
+    'FIELD TO READ FIRST: it is whether the privilege grants the web shell, ' +
+    'which is a command line on the system and a different order of authority ' +
+    'from any read role. It is null where the system reported no value, WHICH ' +
+    'IS NOT THE SAME AS FALSE — a privilege whose shell access could not be ' +
+    'read has not been shown to grant none. `name` is what the privilege is ' +
+    "called and `id` the middleware's own record id; each is null where the " +
+    'system reported no readable value for it. `builtin_name` is the name of ' +
+    'the stock privilege this is, null BOTH where the system named none and ' +
+    'where it reported something that could not be read as a name, ' +
+    'and `operator_defined` is what tells those apart: TRUE where the system ' +
+    'reported no stock name, so somebody created this privilege on this ' +
+    "system, FALSE where it is one of the system's own, and NULL where the " +
+    'field could not be read as either. An operator-defined privilege is the ' +
+    'more interesting case, because nothing outside this system decided what ' +
+    'it grants. `roles` are the administrative roles the privilege confers, by ' +
+    'name, and `roles_reported` is whether the privilege carried that field at ' +
+    'all; THE TWO ARE READ TOGETHER. `roles_reported` false with `roles` null ' +
+    'is a TrueNAS version that does not report roles here. `roles_reported` ' +
+    'true with `roles` an empty list is a privilege that confers no role. ' +
+    '`roles_reported` true with `roles` null is a field that was there and ' +
+    'would not read as a list of names — either it was not a list at all, or ' +
+    'one of its names could not be read, AND THOSE TWO ARE NOT TOLD APART. ' +
+    'THE WHOLE LIST IS NULLED WHERE ANY ONE NAME COULD NOT BE READ, ' +
+    'deliberately, because a role list one name short says the group holds ' +
+    'less authority than it does and that is a claim this tool will not make. ' +
+    '`local_groups` are the groups defined on this system that hold the ' +
+    'privilege and `ds_groups` those from a directory service — Active ' +
+    'Directory or LDAP. Either is null where the system reported no list at ' +
+    'all, which is NOT the empty list it reports for a privilege granted to no ' +
+    'group of that kind. NOTHING IS EVER DROPPED FROM EITHER LIST, so its ' +
+    'length is how many entries the system sent. `kind` says which of three an ' +
+    'entry is. `RESOLVED` is a group the system resolved, and its `group` ' +
+    'holds `id`, `gid`, `name`, whether the group is `local` in the same sense ' +
+    'a user is, whether it is `builtin`, and its `sid`. EACH OF THOSE SIX IS ' +
+    'NULL WHERE THE SYSTEM REPORTED NO READABLE VALUE FOR IT, so a `RESOLVED` ' +
+    'entry whose `name` is null is a group the system resolved and did not ' +
+    'name — `kind` is what separates that from an entry that resolved to ' +
+    'nothing, and a null field never means the entry failed to resolve. ' +
+    '`UNMAPPED` is a group the system could NOT name: `group` is null and ' +
+    '`unmapped` holds the `gid` or `sid` the privilege named, either of which ' +
+    'may itself be null. THAT IS A FINDING RATHER THAN A GAP IN THIS TOOL — ' +
+    'in `ds_groups` it usually means a directory group that no longer ' +
+    'resolves, so the privilege is held by something the system can no longer ' +
+    'identify. `UNREADABLE` is an entry that was not a record at all, with ' +
+    'both `group` and `unmapped` null. ONLY THE FIELDS NAMED HERE ARE RETURNED ' +
+    'from an embedded group record, whatever else a later TrueNAS release adds ' +
+    "to one: a group's own roles, its member accounts and its sudo command " +
+    'lists are not reported, and the roles reported here are the ' +
+    "PRIVILEGE's. Membership is `users_list`. This tool reports the role " +
+    'landscape of the system; it does not say which of these privileges the ' +
+    'credential it is running as holds, and it creates, edits and deletes ' +
+    'nothing.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }) {
+    // Unbounded, unlike the account and group listings above: a privilege is
+    // configuration an operator wrote, so the count is a handful whether or not
+    // the system is joined to a directory with tens of thousands of groups.
+    const privileges = await firstValueFrom(system.client.api.query('privilege.query'));
+
+    return {
+      privileges: privileges.map((privilege: PrivilegeRow) => ({
+        id: numberOrNull(privilege.id),
+        name: textOrNull(privilege.name),
+        builtin_name: textOrNull(privilege.builtin_name),
+        operator_defined: operatorDefined(privilege.builtin_name),
+        // Not defaulted to false: a privilege whose shell access was not
+        // reported must not read as one that definitely grants none.
+        web_shell: booleanOrNull(privilege.web_shell),
+        // `hasOwn` rather than `in`, which walks the prototype. The field is
+        // optional on the surface, so its absence is a version that does not
+        // report roles and is a different answer from a list that would not
+        // read — which `roles` alone cannot tell apart, both being null.
+        roles_reported: Object.hasOwn(privilege, 'roles'),
+        // Strict rather than lenient per the direction rule: a role dropped
+        // silently understates what the group may do, which is a claim.
+        roles: strictTextList(privilege.roles),
+        local_groups: privilegeGroups(privilege.local_groups),
+        ds_groups: privilegeGroups(privilege.ds_groups),
+      })),
     };
   },
 };

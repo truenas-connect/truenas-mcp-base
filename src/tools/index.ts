@@ -1,5 +1,5 @@
 import { ToolCatalog } from '@/catalog/catalog';
-import { directoryServicesStatus, usersList } from '@/tools/accounts';
+import { directoryServicesStatus, privilegesList, usersList } from '@/tools/accounts';
 import { alertsDismiss, alertSettings, alertsList, alertsRestore } from '@/tools/alerts';
 import { appEngineStatus, appsList, appsUpdateSummary } from '@/tools/apps';
 import { iscsiList, nvmeofList } from '@/tools/block';
@@ -44,7 +44,7 @@ import {
 } from '@/tools/tasks';
 import { vmDevices, vmLogs, vmsList } from '@/tools/vms';
 
-/** The sketch's catalog: fifty-one read-only tools plus six mutating tools. */
+/** The sketch's catalog: fifty-two read-only tools plus six mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -84,6 +84,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(nvmeofList);
   catalog.register(usersList);
   catalog.register(directoryServicesStatus);
+  catalog.register(privilegesList);
   catalog.register(networkInterfaces);
   catalog.register(networkConfig);
   catalog.register(certificatesList);
@@ -139,6 +140,7 @@ export {
   nvmeofList,
   poolStatus,
   poolTopology,
+  privilegesList,
   quotaReport,
   rebootInfo,
   replicationStatus,

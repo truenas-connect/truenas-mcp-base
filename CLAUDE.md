@@ -1302,6 +1302,38 @@ carry no unit in their names under #96's first ground: the API declares none, an
 nothing about a polling bound fixes one the way SMART fixes a drive temperature
 in Celsius.
 
+### A companion field is what separates two causes of one null (#134)
+
+`privileges_list` reports `roles_reported` beside `roles`, and
+`operator_defined` beside `builtin_name`. Neither is a second reading of the
+same fact. Each is there because the field it sits beside answers null to
+questions a caller has to tell apart.
+
+`roles` is OPTIONAL on the entity — `roles?: string[]` — and it is read through
+`strictTextList`, which nulls the whole list where any one name could not be
+read (#93: a role list one name short says the group holds less authority than
+it does). So one null covers three causes: a TrueNAS version that does not
+report the field at all, a field that was there and was not a list, and a list
+one of whose entries would not read. `roles_reported` — `Object.hasOwn` and not
+`in`, which walks the prototype (#101) — separates the first from the other two,
+and the description says outright that nothing separates the second from the
+third.
+
+`builtin_name` is the same shape one size smaller. It is declared
+`string | null`, and null is the ticket's evidence that an operator created the
+privilege — true of the explicit null and not of a value that arrived as
+something else, since `textOrNull` answers null for both. `operator_defined`
+carries that reading and leaves `builtin_name` reporting what was actually
+there.
+
+**A companion field earns its place only where the null it splits has causes a
+caller would act on differently**, and it is reported BESIDE the field rather
+than instead of it — which is where this differs from `system_general_config`'s
+`ui_certificate` reduction (#102). There the record itself must not be
+forwarded, so the fact replaces it; here the raw field is safe to report and is
+the evidence for the companion's reading. Add the reading, keep the field, and
+say in the description which combination means what.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
