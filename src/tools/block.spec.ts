@@ -1368,9 +1368,18 @@ describe('fc_list', () => {
       const listing = await listed({}, { ['fcport.query']: new Error('down') });
       expect(listing.ports).toBeNull();
       expect(listing.unattributed_status).toHaveLength(1);
-      // The other reading of a full `unattributed_status`, and `ports` is what
-      // separates it from a port-name join that does not hold.
       expect(listing.failures).toEqual([{ source: 'ports', error: 'down' }]);
+    });
+
+    // The third shape a full `unattributed_status` takes, and the reason the
+    // description refuses to partition it: an adapter with no port mapped reads
+    // both lists successfully and still attributes nothing. It is neither a
+    // failed read nor a join key that does not hold.
+    it('sets aside every row where the ports read succeeded and listed none', async () => {
+      const listing = await listed({ ['fcport.query']: [] });
+      expect(listing.ports).toEqual([]);
+      expect(listing.failures).toEqual([]);
+      expect(listing.unattributed_status).toHaveLength(1);
     });
   });
 
@@ -1461,6 +1470,18 @@ describe('fc_list', () => {
       expect(fcList.description).toContain(
         'NULL HAS TWO CAUSES AND ONLY ONE OF THEM IS A FAILED READ',
       );
+    });
+
+    // A not-established list is not a status enum: say what it rules out and
+    // name what cannot be told apart, rather than offering a partition the
+    // shapes do not support.
+    it('does not partition a full unattributed_status', () => {
+      expect(fcList.description).toContain('IT IS NOT A PARTITION BEYOND THAT');
+      expect(fcList.description).toContain('NOTHING HERE SEPARATES THOSE TWO');
+    });
+
+    it('refuses to relate an adapter to a port', () => {
+      expect(fcList.description).toContain('THIS TOOL DOES NOT RELATE AN ADAPTER TO A PORT');
     });
 
     it('refuses to answer whether the system has FC at all', () => {

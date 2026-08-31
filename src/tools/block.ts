@@ -921,14 +921,21 @@ export const fcList: ReadOnlyTool = {
   description:
     'Every Fibre Channel host adapter the system has, every FC port and the ' +
     'iSCSI target it is mapped to, and each port\'s link status. `hosts` are ' +
-    'the adapters: `id` is the numeric identity, `alias` the name the port is ' +
-    'known by, and `npiv` the number of virtual ports configured on it. `npiv` ' +
+    'the adapters: `id` is the numeric identity, `alias` the label the adapter ' +
+    'records for itself, and `npiv` the number of virtual ports configured on ' +
+    'it. `npiv` ' +
     'IS OPTIONAL ON THIS PAYLOAD, so `npiv_reported` says whether the system ' +
     'reported the field at all — false means this TrueNAS does not report NPIV, ' +
     'while true beside a null `npiv` means it reported something that could not ' +
     'be read as a count. A reported `0` is a real count of none and is not ' +
     'either of those. `ports` are the FC ports: `id` is the numeric identity ' +
     'and `port` the port name, which is also what a `status` row names. ' +
+    'THIS TOOL DOES NOT RELATE AN ADAPTER TO A PORT and offers no field that ' +
+    'does: `hosts[].alias` and `ports[].port` are separate names the payloads ' +
+    'report separately, nothing in the API says they are drawn from one ' +
+    'namespace, and an adapter carrying NPIV virtual ports is precisely the ' +
+    'case where they need not coincide. Matching them by text is a guess, and ' +
+    'not one this tool makes on a caller\'s behalf. ' +
     '`wwpn` AND `wwpn_b` ON BOTH LISTS ARE UNDERSTOOD TO BE THE TWO ' +
     'CONTROLLERS OF AN HA PAIR rather than two ports of one adapter: `wwpn` is ' +
     'this controller\'s World Wide Port Name and `wwpn_b` its peer\'s. THAT ' +
@@ -974,11 +981,15 @@ export const fcList: ReadOnlyTool = {
     'answers to carries that name, one that named no readable port carries a ' +
     'null `port` beside a non-null `unreported_fields`, and one that was not a ' +
     'record at all carries null for both. WHILE IT IS NOT EMPTY THE PER-PORT ' +
-    '`status` LISTS ARE INCOMPLETE. Every row landing there at once has two ' +
-    'readings and `ports` is what separates them: with `ports` null the port ' +
-    'read simply failed and there was nothing to attribute against, while with ' +
-    '`ports` populated it is the shape of a port-name join that does not hold ' +
-    'on this system — in neither case is it ports with nothing to report. ' +
+    '`status` LISTS ARE INCOMPLETE. WHAT A FULL ONE RULES OUT IS PORTS WITH ' +
+    'NOTHING TO REPORT — every row in it was read, and none was dropped. IT IS ' +
+    'NOT A PARTITION BEYOND THAT and this tool does not offer one: a null ' +
+    '`ports` says the port read failed and there was nothing to attribute ' +
+    'against, but where `ports` was read the same shape covers a system whose ' +
+    'status rows name ports it has not mapped, and a port-name join that does ' +
+    'not hold on this system at all — and NOTHING HERE SEPARATES THOSE TWO. ' +
+    'Comparing the `port` names in this list against `ports[].port` is what ' +
+    'tells them apart, and it is the caller\'s to do. ' +
     '`failures` names each read that failed, as ' +
     '`source` — `hosts`, `ports` or `port_status` — and `error`, and is empty ' +
     'when all three were read. NONE OF THE THREE FAILS THE TOOL, so a system ' +

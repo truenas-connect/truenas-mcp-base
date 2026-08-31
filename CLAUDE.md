@@ -1382,15 +1382,25 @@ correct and is not. This is `attribute`'s reason in `nvmeof_list` one level up:
 there the unconfirmed part is whether an id answers to a listed subsystem, here
 it is whether the key exists at all.
 
-**What that costs is a second cause for one null, and the description owes
-both.** A port's `status` is null where the status read failed AND where the
-port carries no name to be joined on — the first is in `failures` and the second
-leaves it empty, so `port` and `failures` together are what separate them. The
-same doubling reaches the list: everything landing in `unattributed_status` at
-once is a broken join where `ports` is populated and simply a failed port read
-where `ports` is null. **A join whose key is a guess adds a cause to every null
-downstream of it**, and enumerating one of them is this repository's most common
-finding wearing the join's hat.
+**What that costs is a cause added to every null downstream, and the description
+owes all of them.** A port's `status` is null where the status read failed AND
+where the port carries no name to be joined on — the first is in `failures` and
+the second leaves it empty, so `port` and `failures` together separate them.
+**A join whose key is a guess adds a cause to every null downstream of it**, and
+naming one of them is this repository's most common finding wearing the join's
+hat.
+
+**Where the added causes stop being separable, say so instead of enumerating
+them.** A full `unattributed_status` was first described as two readings split
+by `ports` — a failed port read where `ports` is null, a join that does not hold
+where `ports` is populated. It is three: an appliance that listed its ports and
+has none mapped reads both lists cleanly and still attributes nothing, which is
+neither. So the description now says what a full list RULES OUT (ports with
+nothing to report; every row in it was read) and names what it cannot tell
+apart, which is #122's rule about `ended: false` reaching a list. **Two review
+rounds went on one sentence here and on the same sentence in `cloudsync_run` —
+when a field's causes come from a guess, assume you have not enumerated them
+all.**
 
 ## Conventions
 
