@@ -874,8 +874,9 @@ export const nvmeofList: ReadOnlyTool = {
     'system carries and which say nothing about where it listens. ' +
     '`subsystems` on a port names which subsystems are published through it, ' +
     'each as the `subsystem_id` and `subsystem` name the join\'s own record ' +
-    'spelled; `subsystem_id` is joinable against `subsystems[].id`, and the NQN ' +
-    'an initiator connects to is reported there rather than repeated here. An ' +
+    'spelled; `subsystem_id` is joinable against the `id` of an entry in THIS ' +
+    'RESULT\'S TOP-LEVEL `subsystems` LIST, which is where the NQN an initiator ' +
+    'connects to is reported rather than repeated here. An ' +
     'entry whose `subsystem_id` is null is a publication naming a subsystem ' +
     'this tool could not identify: it is kept, because dropping it would say ' +
     'the port publishes less than it does, and it cannot be joined against the ' +
@@ -885,8 +886,10 @@ export const nvmeofList: ReadOnlyTool = {
     'this port carries no `id` for a publication to be joined on. AN EMPTY ' +
     '`ports` AND A NULL ONE ARE DIFFERENT ANSWERS in the same way: empty is a ' +
     'system with no NVMe-oF port configured, which is a system whose subsystems ' +
-    'are unreachable however they are configured; null is a read that failed, ' +
-    'which `failures` names. ' +
+    'are unreachable however they are configured. NULL HAS TWO CAUSES, and ' +
+    '`supported` is what separates them: where it is false the system has no ' +
+    'NVMe-oF at all and nothing was read, so `failures` is empty; where it is ' +
+    'true the port read failed, and `failures` names it. ' +
     '`failures` names each read that failed, as `source` — `namespaces`, ' +
     '`hosts`, `ports` or `port_subsystems` — and `error`, and is empty when all ' +
     'four were read. ' +

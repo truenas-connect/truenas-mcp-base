@@ -536,12 +536,16 @@ describe('nvmeof_list', () => {
       expect(await listed({}, { ['nvmet.subsys.query']: reason })).toMatchObject({
         supported: false,
         subsystems: null,
-        // The other two reads fail the same way on such a system; naming them
-        // would report one absent feature three times, as three defects. No row
+        // Null here for the OTHER of the two causes the description names:
+        // nothing was read, rather than a port read that failed.
+        ports: null,
+        // The other four reads fail the same way on such a system; naming them
+        // would report one absent feature five times, as five defects. No row
         // was read either, so nothing was left out of a list.
         failures: [],
         unattributed_namespaces: [],
         unattributed_hosts: [],
+        unattributed_port_subsystems: [],
       });
     }
     expect(

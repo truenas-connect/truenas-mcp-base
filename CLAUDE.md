@@ -305,8 +305,11 @@ Two things that rule does not decide on its own:
   and the other two stayed. What decides which block moves is that it is one the
   ticket already has open and that moving it brings the file back under 1,500:
   moving a block the ticket did not touch is the re-homing #121 rules out, and
-  moving every block is a rewrite where a move was owed. **Move the largest block
-  the ticket touched, and stop when the file is under the number.**
+  moving every block is a rewrite where a move was owed. **Move a block the
+  ticket touched, and stop as soon as the file is under the number** — which
+  block, where more than one qualifies and either would do it, is not a decision
+  this rule makes. It is not the largest: the block moved here is the smaller of
+  the two, and the file is under the trigger either way.
 - **The catalog-wide test is not any tool's.** The exact-list assertion over
   `createDefaultCatalog()` is about `src/tools/index.ts`, so it lives in
   `index.spec.ts` under the same rule as everything else. Registering a tool
