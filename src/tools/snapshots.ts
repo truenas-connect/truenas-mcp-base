@@ -2,7 +2,14 @@ import type { CallParams } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ApiSurface, MutatingTool, ReadOnlyTool, ToolContext } from '@/catalog/tool';
-import { MAX_TIME_MS, effectiveLimit } from '@/tools/common';
+import {
+  MAX_TIME_MS,
+  MiddlewareDate,
+  effectiveLimit,
+  numberOrNull,
+  recordOrNull,
+  textOrNull,
+} from '@/tools/common';
 
 /** Snapshots family: the snapshots that exist, and taking a new one. */
 
@@ -222,6 +229,120 @@ function snapshotProperty(properties: unknown, name: string): unknown {
 }
 
 /**
+ * Whether TrueNAS's own hold tag is on the snapshot, or null where the system
+ * reported no hold state this tool can read.
+ *
+ * The middleware answers `holds` as `{ truenas: 1 }` where that tag is present
+ * and `{}` where it is not: a hold placed under any other tag never reaches
+ * this field, and the count is normalised to 1 whatever the real refcount is.
+ * So `false` is "no `truenas` tag" and NOT "no ZFS hold", which is a weaker
+ * claim than the field name makes on its own and is why the description says it
+ * before it says anything else about the field.
+ *
+ * A payload that is not a record — including the field being absent, which is
+ * what a system that ignored the `holds` request answers with — is null and
+ * never false. That is #93's direction rule: `false` says nothing is protecting
+ * this snapshot, and a caller acting on that prunes it.
+ */
+function heldOf(value: unknown): boolean | null {
+  const holds = recordOrNull(value);
+  if (holds === null) return null;
+  // `Object.hasOwn` and not `in`, which walks the prototype.
+  if (!Object.hasOwn(holds, 'truenas')) return false;
+  const count = numberOrNull(holds['truenas']);
+  return count === null ? null : count > 0;
+}
+
+/**
+ * An ISO 8601 instant carrying an explicit zone. A string with no zone in it is
+ * deliberately not matched: reading one as UTC would be a guess that is
+ * confidently off by hours, which is the reading `tasks.ts` refuses for the
+ * same reason.
+ */
+const ZONED_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * When the middleware says the snapshot is due to be removed, in milliseconds
+ * since the epoch, or null where it reported no time this tool can read.
+ *
+ * Two shapes, because the surface and the wire disagree about this one and
+ * neither could be checked against a live middleware: the client declares
+ * `datetime` a `string`, while a middleware time reaches this repository as the
+ * `{ "$date": … }` envelope every other date-reading tool here unwraps. A
+ * reading both shapes satisfy is worth more than one written to whichever
+ * arrives (#102), and a bare number is accepted beside the envelope for
+ * `tasks.ts`'s reason — the envelope exists only to tag a number as a date in
+ * transit, and both are epoch milliseconds.
+ *
+ * Bounded by {@link MAX_TIME_MS} like every other instant this file reports:
+ * one absurd removal date must not take the listing down through
+ * `toISOString`.
+ */
+function removalMillis(value: unknown): number | null {
+  const raw = typeof value === 'object' && value !== null ? (value as MiddlewareDate).$date : value;
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw) && Math.abs(raw) <= MAX_TIME_MS ? raw : null;
+  }
+  if (typeof raw !== 'string' || !ZONED_INSTANT.test(raw)) return null;
+  const millis = Date.parse(raw);
+  return Number.isFinite(millis) && Math.abs(millis) <= MAX_TIME_MS ? millis : null;
+}
+
+/** What the system says is scheduled to remove a snapshot. */
+interface ScheduledRemoval {
+  at: string | null;
+  source: string | null;
+  periodic_snapshot_task_id: number | null;
+}
+
+/**
+ * The removal the middleware annotated the snapshot with, or null where it
+ * annotated none.
+ *
+ * `retention` is `null` on a snapshot no ENABLED periodic snapshot task owns,
+ * which is the ordinary answer for one taken by hand, and absent where the
+ * system was not asked — so null here covers "nothing will remove it", "the
+ * payload could not be read" and "the argument was not passed", and the
+ * description says so rather than letting a null read as the first.
+ *
+ * A record whose `datetime` could not be read is NOT nulled: it still says a
+ * removal is scheduled and names its source, where a null would say the
+ * opposite. Same direction rule as {@link heldOf}, one level in.
+ *
+ * `source` is passed through as the system spelled it, so a source a later
+ * release adds reaches the caller rather than being flattened; the task id is
+ * read by name, and is null on the arm that has none — the snapshot's own
+ * removal-date property — exactly as it is on one that could not be read.
+ */
+function scheduledRemovalOf(value: unknown): ScheduledRemoval | null {
+  const retention = recordOrNull(value);
+  if (retention === null) return null;
+  const millis = removalMillis(retention['datetime']);
+  return {
+    at: millis === null ? null : new Date(millis).toISOString(),
+    // `textOrNull` rather than this file's `stringOrNull`: a source is a name,
+    // and an empty one has told the caller nothing.
+    source: textOrNull(retention['source']),
+    periodic_snapshot_task_id: numberOrNull(retention['periodic_snapshot_task_id']),
+  };
+}
+
+/**
+ * Whether the caller asked for one of the two opt-in fields.
+ *
+ * Strict, as `snapshots_create` is about `recursive` and `tasks_recent_runs`
+ * about `failed_only`. A coerced `"true"` would leave the flag false, the
+ * middleware never asked, and every entry reporting null — which is exactly
+ * what a system that does not report the field answers with, so the caller
+ * could not tell that its argument had been dropped.
+ */
+function requestedField(raw: unknown, name: string): boolean {
+  if (raw == null) return false;
+  if (typeof raw !== 'boolean') throw new Error(`"${name}" must be a boolean`);
+  return raw;
+}
+
+/**
  * The dataset to restrict the listing to, or null for every dataset.
  *
  * Strict where {@link effectiveLimit} is lenient. A `dataset` argument that is
@@ -275,9 +396,9 @@ export const snapshotsList: ReadOnlyTool = {
     '`dataset`, the dataset the snapshot was taken of, which matches `id` in ' +
     '`storage_list_datasets`; `created`, when it was taken, as an ISO 8601 ' +
     'UTC timestamp; and `referenced_bytes`, the data that snapshot ' +
-    'references. Each of the four is null where the system reported no value ' +
-    'this tool can read, and null is not zero: a snapshot referencing nothing ' +
-    'reports `referenced_bytes: 0`. A snapshot with no readable `created` is ' +
+    'references. Each of those four is null where the system reported no ' +
+    'value this tool can read, and null is not zero: a snapshot referencing ' +
+    'nothing reports `referenced_bytes: 0`. A snapshot with no readable `created` is ' +
     'ordered last rather than first. Pass `dataset` to list only that ' +
     "dataset's snapshots; a dataset that does not exist is an error naming " +
     'it, so an empty list always means that dataset has no snapshots rather ' +
@@ -291,7 +412,38 @@ export const snapshotsList: ReadOnlyTool = {
     'snapshots it names and about nothing else: it cannot show that a ' +
     'snapshot is absent. Narrow it with `dataset`, or raise `limit`, until ' +
     '`truncated` is false, and only then read the list as everything that ' +
-    'exists.',
+    'exists. Two further fields say whether a snapshot is protected and ' +
+    'whether anything is scheduled to remove it, and both are opt-in: `held` ' +
+    'is reported only when `report_held` is true, `scheduled_removal` only ' +
+    'when `report_scheduled_removal` is true, and each is null on every entry ' +
+    'when its own argument was not passed. `held` REPORTS TRUENAS\'S OWN HOLD ' +
+    'TAG AND NOT ANY ZFS HOLD: the system answers whether the `truenas` tag ' +
+    'is on the snapshot and nothing else, so a hold placed under a different ' +
+    'tag is invisible here and `held: false` means "no `truenas` tag" rather ' +
+    'than "nothing is holding this". `scheduled_removal` is the system\'s own ' +
+    'computation of when a snapshot is due to be removed rather than a ' +
+    're-derivation from task schedules, and it carries `at`, that time as an ' +
+    'ISO 8601 UTC timestamp; `source`, what schedules it, as the system ' +
+    'spelled it; and `periodic_snapshot_task_id`, the owning task where the ' +
+    'source is a periodic snapshot task and null where it is the snapshot\'s ' +
+    'own removal-date property. ONLY ENABLED periodic snapshot tasks are ' +
+    'considered — a snapshot owned solely by a disabled task reports null, ' +
+    'and enabling that task changes the answer — and where several tasks own ' +
+    'one snapshot the latest removal time is the one reported. IT DOES NOT ' +
+    'ACCOUNT FOR HOLDS: the two fields are independent, and a held snapshot ' +
+    'can report a removal time it will survive. `scheduled_removal: null` is ' +
+    'the ordinary answer for a snapshot taken by hand, which parses against ' +
+    "no task's naming schema and so is scheduled for removal by none, but it " +
+    'is also what a snapshot whose retention the system reported unreadably ' +
+    'answers with, and what every entry answers with when the argument was ' +
+    'not passed — so a null does not on its own establish that nothing will ' +
+    'remove the snapshot, and this tool does not separate those three. A ' +
+    '`scheduled_removal` whose `at` is null is the other way round: a removal ' +
+    'IS scheduled and its time could not be read. `held: null` reads the same ' +
+    'way — the argument was not passed, or the hold state could not be read, ' +
+    'and never "not held". Both arguments widen the read the system makes ' +
+    'over every snapshot it holds, before `limit` bounds anything, so ask for ' +
+    'them when they are wanted rather than by default.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -307,6 +459,25 @@ export const snapshotsList: ReadOnlyTool = {
         default: 100,
         description: 'Return at most this many snapshots. Default 100, maximum 1000.',
       },
+      report_held: {
+        type: 'boolean',
+        default: false,
+        description:
+          "Also report whether TrueNAS's own hold tag is on each snapshot. " +
+          'Default false, which reports `held: null` on every entry. Widens ' +
+          'the read the system makes over every snapshot it holds, before ' +
+          '`limit` bounds anything.',
+      },
+      report_scheduled_removal: {
+        type: 'boolean',
+        default: false,
+        description:
+          'Also report when an enabled periodic snapshot task is due to ' +
+          'remove each snapshot. Default false, which reports ' +
+          '`scheduled_removal: null` on every entry. Widens the read the ' +
+          'system makes over every snapshot it holds, before `limit` bounds ' +
+          'anything.',
+      },
     },
   },
   requiredRole: Role.ReadOnly,
@@ -314,6 +485,13 @@ export const snapshotsList: ReadOnlyTool = {
   async handler(ctx, args) {
     const dataset = requestedDataset(args['dataset']);
     const limit = snapshotLimit(args['limit']);
+    // Read before the call, so an unreadable flag is an error rather than a
+    // question the system answers and this tool then discards.
+    const reportHeld = requestedField(args['report_held'], 'report_held');
+    const reportRemoval = requestedField(
+      args['report_scheduled_removal'],
+      'report_scheduled_removal',
+    );
     const snapshots = await firstValueFrom(
       // Filters and options are inlined so the call's own parameter types
       // apply, as in `storage.ts`.
@@ -339,7 +517,23 @@ export const snapshotsList: ReadOnlyTool = {
           limit: limit + 1,
           // Only the two properties this tool reports. A snapshot row
           // otherwise carries every ZFS property of the snapshot, on every row.
-          extra: { properties: ['creation', 'referenced'] },
+          //
+          // The two opt-in flags are passed only where the caller asked for
+          // the field they produce: each widens the read the middleware makes
+          // over every snapshot on the system — `holds` reads the ZFS holds,
+          // `retention` reads the user properties and runs zettarepl's
+          // annotation pass — and both are applied before this tool's `limit`
+          // reaches anything, so the cost is not bounded by it. Their names
+          // are the middleware's own and the client types `extra` as an open
+          // record, so nothing here is compiler-checked: a misspelling would
+          // be dropped rather than refused, and the field would read null on
+          // every entry. That is what the tests asserting them populated are
+          // for.
+          extra: {
+            properties: ['creation', 'referenced'],
+            ...(reportHeld ? { holds: true } : {}),
+            ...(reportRemoval ? { retention: true } : {}),
+          },
         },
       ),
     );
@@ -360,6 +554,11 @@ export const snapshotsList: ReadOnlyTool = {
           dataset: stringOrNull(snapshot['dataset']),
           created: created === null ? null : new Date(created).toISOString(),
           referenced_bytes: propertyBytes(snapshotProperty(properties, 'referenced')),
+          // Null where the caller did not ask, rather than absent: a key that
+          // is not there serializes to no key at all, and the description
+          // promises both fields on every entry.
+          held: reportHeld ? heldOf(snapshot['holds']) : null,
+          scheduled_removal: reportRemoval ? scheduledRemovalOf(snapshot['retention']) : null,
         },
       };
     });

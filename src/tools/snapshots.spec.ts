@@ -51,6 +51,10 @@ describe('snapshots_list', () => {
           dataset: 'tank/media',
           created: '2025-08-28T02:00:00.000Z',
           referenced_bytes: 98304,
+          // Neither argument was passed, so neither field was asked of the
+          // system and neither is reported.
+          held: null,
+          scheduled_removal: null,
         },
       ],
       truncated: false,
@@ -59,13 +63,25 @@ describe('snapshots_list', () => {
   });
 
   it('surfaces no field a later release adds', async () => {
-    const result = await listing([snapshot({ future_field: 'added by a later TrueNAS release' })]);
+    const result = await listing([
+      snapshot({
+        future_field: 'added by a later TrueNAS release',
+        // Sent by the system though nothing asked for them: a field is
+        // reported because this tool names it, not because a row carried it.
+        holds: { truenas: 1 },
+        retention: { datetime: { $date: 1756346400000 }, source: 'property' },
+      }),
+    ]);
     expect(Object.keys(result.snapshots[0])).toEqual([
       'name',
       'dataset',
       'created',
       'referenced_bytes',
+      'held',
+      'scheduled_removal',
     ]);
+    expect(result.snapshots[0]['held']).toBeNull();
+    expect(result.snapshots[0]['scheduled_removal']).toBeNull();
   });
 
   it('asks for one more row than the bound, and for only the two properties it reports', async () => {
@@ -251,6 +267,239 @@ describe('snapshots_list', () => {
       dataset: 'tank/media',
       created: null,
       referenced_bytes: null,
+      held: null,
+      scheduled_removal: null,
+    });
+  });
+
+  describe('hold state and scheduled removal', () => {
+    /** The two fields of one entry, for the assertions below. */
+    const fields = async (
+      row: Record<string, unknown>,
+      args: Record<string, unknown>,
+    ): Promise<Record<string, unknown>> => {
+      const result = await listing([snapshot(row)], args);
+      return result.snapshots[0];
+    };
+
+    it('asks the system for neither field unless the caller did', async () => {
+      const { ctx, query } = fakeSystem({ ['pool.snapshot.query']: [snapshot()] });
+      await snapshotsList.handler(ctx, { report_held: false, report_scheduled_removal: false });
+      // No `holds` and no `retention`: both widen the read over every snapshot
+      // on the system, before this tool's `limit` bounds anything.
+      expect(query).toHaveBeenCalledWith('pool.snapshot.query', [], {
+        limit: 101,
+        extra: { properties: ['creation', 'referenced'] },
+      });
+    });
+
+    it('asks for each flag only where its own argument was passed', async () => {
+      // The option names are the middleware's own and the client types `extra`
+      // as an open record, so nothing about them is compiler-checked: a
+      // misspelling would be dropped rather than refused, and the field would
+      // read null on every entry. This pins the spelling; the tests below pin
+      // that what comes back is actually read.
+      const asked = async (args: Record<string, unknown>, extra: Record<string, unknown>) => {
+        const { ctx, query } = fakeSystem({ ['pool.snapshot.query']: [] });
+        await snapshotsList.handler(ctx, args);
+        expect(query).toHaveBeenCalledWith('pool.snapshot.query', [], { limit: 101, extra });
+      };
+      await asked(
+        { report_held: true },
+        { properties: ['creation', 'referenced'], holds: true },
+      );
+      await asked(
+        { report_scheduled_removal: true },
+        { properties: ['creation', 'referenced'], retention: true },
+      );
+      await asked({ report_held: true, report_scheduled_removal: true }, {
+        properties: ['creation', 'referenced'],
+        holds: true,
+        retention: true,
+      });
+    });
+
+    it('rejects an argument that is not a boolean rather than reading it as false', async () => {
+      // Coerced, the flag would be false, the middleware would never be asked,
+      // and every entry would report null — which is what a system that does
+      // not report the field answers with, so a caller could not tell.
+      for (const bad of ['true', 1, 0, 'yes', {}]) {
+        await expect(listing([snapshot()], { report_held: bad })).rejects.toThrow(
+          /"report_held" must be a boolean/,
+        );
+        await expect(listing([snapshot()], { report_scheduled_removal: bad })).rejects.toThrow(
+          /"report_scheduled_removal" must be a boolean/,
+        );
+      }
+    });
+
+    it('reports the truenas hold tag as held, and its absence as not held', async () => {
+      // `false` and null are different answers: the first is a hold state that
+      // was read, the second is one that was not.
+      expect(await fields({ holds: { truenas: 1 } }, { report_held: true })).toMatchObject({
+        held: true,
+      });
+      expect(await fields({ holds: {} }, { report_held: true })).toMatchObject({ held: false });
+      // The refcount the middleware normalises to 1, and the count of none.
+      expect(await fields({ holds: { truenas: 3 } }, { report_held: true })).toMatchObject({
+        held: true,
+      });
+      expect(await fields({ holds: { truenas: 0 } }, { report_held: true })).toMatchObject({
+        held: false,
+      });
+      // A tag that is not TrueNAS's own is not this field's subject at all.
+      expect(await fields({ holds: { keep: 1 } }, { report_held: true })).toMatchObject({
+        held: false,
+      });
+    });
+
+    it('reports a hold state it cannot read as null rather than as not held', async () => {
+      // Null and never false: `false` says nothing is protecting the snapshot,
+      // and a caller acting on that prunes it.
+      for (const holds of [undefined, null, 'held', 7, [], { truenas: 'yes' }, { truenas: null }]) {
+        expect(await fields({ holds }, { report_held: true })).toMatchObject({ held: null });
+      }
+    });
+
+    it('reports the removal the system annotated, with the owning task', async () => {
+      expect(
+        await fields(
+          {
+            retention: {
+              datetime: { $date: 1756346400000 },
+              source: 'periodic_snapshot_task',
+              periodic_snapshot_task_id: 4,
+            },
+          },
+          { report_scheduled_removal: true },
+        ),
+      ).toMatchObject({
+        scheduled_removal: {
+          at: '2025-08-28T02:00:00.000Z',
+          source: 'periodic_snapshot_task',
+          periodic_snapshot_task_id: 4,
+        },
+      });
+    });
+
+    it('reports no task id where the removal comes from the property', async () => {
+      expect(
+        await fields(
+          { retention: { datetime: { $date: 1756346400000 }, source: 'property' } },
+          { report_scheduled_removal: true },
+        ),
+      ).toMatchObject({
+        scheduled_removal: {
+          at: '2025-08-28T02:00:00.000Z',
+          source: 'property',
+          periodic_snapshot_task_id: null,
+        },
+      });
+    });
+
+    it('reads the removal time as an envelope, a bare number or a zoned ISO string', async () => {
+      const at = async (datetime: unknown): Promise<unknown> => {
+        const row = await fields({ retention: { datetime, source: 'property' } }, {
+          report_scheduled_removal: true,
+        });
+        return (row['scheduled_removal'] as Record<string, unknown>)['at'];
+      };
+      expect(await at({ $date: 1756346400000 })).toBe('2025-08-28T02:00:00.000Z');
+      expect(await at(1756346400000)).toBe('2025-08-28T02:00:00.000Z');
+      // The shape the client declares: a string. Only with a zone in it.
+      expect(await at('2025-08-28T02:00:00Z')).toBe('2025-08-28T02:00:00.000Z');
+      expect(await at('2025-08-28T04:00:00+02:00')).toBe('2025-08-28T02:00:00.000Z');
+      expect(await at('2025-08-28T02:00:00.500Z')).toBe('2025-08-28T02:00:00.500Z');
+      // No zone: reading it as UTC would be a guess off by hours.
+      expect(await at('2025-08-28T02:00:00')).toBeNull();
+      expect(await at('Thu Aug 28 02:00 2025')).toBeNull();
+      expect(await at('2025-13-28T02:00:00Z')).toBeNull();
+      expect(await at(undefined)).toBeNull();
+      expect(await at(null)).toBeNull();
+      expect(await at({ $date: 'soon' })).toBeNull();
+      // Beyond what a Date can hold: one absurd row must not take the listing
+      // down through `toISOString`.
+      expect(await at({ $date: 1e16 })).toBeNull();
+      expect(await at(Number.POSITIVE_INFINITY)).toBeNull();
+    });
+
+    it('keeps a removal whose time could not be read, rather than nulling it', async () => {
+      // The opposite direction to a null: this snapshot IS scheduled for
+      // removal and the time is what was unreadable.
+      expect(
+        await fields(
+          { retention: { datetime: 'whenever', source: 'periodic_snapshot_task' } },
+          { report_scheduled_removal: true },
+        ),
+      ).toMatchObject({
+        scheduled_removal: {
+          at: null,
+          source: 'periodic_snapshot_task',
+          periodic_snapshot_task_id: null,
+        },
+      });
+    });
+
+    it('passes an unfamiliar source through as the system spelled it', async () => {
+      expect(
+        await fields(
+          { retention: { datetime: { $date: 1756346400000 }, source: 'something_later' } },
+          { report_scheduled_removal: true },
+        ),
+      ).toMatchObject({
+        scheduled_removal: { source: 'something_later', periodic_snapshot_task_id: null },
+      });
+      expect(
+        await fields(
+          { retention: { datetime: { $date: 1756346400000 }, source: 42 } },
+          { report_scheduled_removal: true },
+        ),
+      ).toMatchObject({ scheduled_removal: { source: null } });
+    });
+
+    it('reports no scheduled removal where the system annotated none', async () => {
+      // The ordinary answer for a snapshot taken by hand — it parses against
+      // no task's naming schema — and the same answer an unreadable payload
+      // gives, which is why the description says a null establishes nothing.
+      for (const retention of [null, undefined, 'none', [], 5]) {
+        expect(await fields({ retention }, { report_scheduled_removal: true })).toMatchObject({
+          scheduled_removal: null,
+        });
+      }
+    });
+
+    it('reports each field only where its own argument was passed', async () => {
+      const row = {
+        holds: { truenas: 1 },
+        retention: { datetime: { $date: 1756346400000 }, source: 'property' },
+      };
+      expect(await fields(row, { report_held: true })).toMatchObject({
+        held: true,
+        scheduled_removal: null,
+      });
+      expect(await fields(row, { report_scheduled_removal: true })).toMatchObject({
+        held: null,
+        scheduled_removal: { at: '2025-08-28T02:00:00.000Z' },
+      });
+    });
+
+    it('surfaces no field of a retention record the tool does not name', async () => {
+      const row = await fields(
+        {
+          retention: {
+            datetime: { $date: 1756346400000 },
+            source: 'periodic_snapshot_task',
+            periodic_snapshot_task_id: 4,
+            future_field: 'added by a later TrueNAS release',
+          },
+        },
+        { report_scheduled_removal: true },
+      );
+      expect(Object.keys(row['scheduled_removal'] as Record<string, unknown>)).toEqual([
+        'at',
+        'source',
+        'periodic_snapshot_task_id',
+      ]);
     });
   });
 });
