@@ -540,9 +540,11 @@ export const privilegesList: ReadOnlyTool = {
     'from any read role. It is null where the system reported no value, WHICH ' +
     'IS NOT THE SAME AS FALSE — a privilege whose shell access could not be ' +
     'read has not been shown to grant none. `name` is what the privilege is ' +
-    "called and `id` the middleware's own record id. `builtin_name` is the " +
-    'name of the stock privilege this is, null where the system named none, ' +
-    'and `operator_defined` is the reading of that: TRUE where the system ' +
+    "called and `id` the middleware's own record id; each is null where the " +
+    'system reported no readable value for it. `builtin_name` is the name of ' +
+    'the stock privilege this is, null BOTH where the system named none and ' +
+    'where it reported something that could not be read as a name, ' +
+    'and `operator_defined` is what tells those apart: TRUE where the system ' +
     'reported no stock name, so somebody created this privilege on this ' +
     "system, FALSE where it is one of the system's own, and NULL where the " +
     'field could not be read as either. An operator-defined privilege is the ' +
@@ -564,9 +566,13 @@ export const privilegesList: ReadOnlyTool = {
     'all, which is NOT the empty list it reports for a privilege granted to no ' +
     'group of that kind. NOTHING IS EVER DROPPED FROM EITHER LIST, so its ' +
     'length is how many entries the system sent. `kind` says which of three an ' +
-    'entry is. `RESOLVED` is a group the system could name, and its `group` ' +
+    'entry is. `RESOLVED` is a group the system resolved, and its `group` ' +
     'holds `id`, `gid`, `name`, whether the group is `local` in the same sense ' +
-    'a user is, whether it is `builtin`, and its `sid` where it has one. ' +
+    'a user is, whether it is `builtin`, and its `sid`. EACH OF THOSE SIX IS ' +
+    'NULL WHERE THE SYSTEM REPORTED NO READABLE VALUE FOR IT, so a `RESOLVED` ' +
+    'entry whose `name` is null is a group the system resolved and did not ' +
+    'name — `kind` is what separates that from an entry that resolved to ' +
+    'nothing, and a null field never means the entry failed to resolve. ' +
     '`UNMAPPED` is a group the system could NOT name: `group` is null and ' +
     '`unmapped` holds the `gid` or `sid` the privilege named, either of which ' +
     'may itself be null. THAT IS A FINDING RATHER THAN A GAP IN THIS TOOL — ' +
