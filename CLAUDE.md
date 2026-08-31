@@ -1213,6 +1213,51 @@ guarantee this check cannot make) would have passed every test. **A redefinition
 that lives only in prose is one edit away from being undone** — where the rule
 is enforced by a message rather than by a type, pin the message.
 
+### A credential is named by an allowlist, and that is what makes it readable (#132)
+
+`replication_topology` reports the peer on the far end of each replication task,
+which means reading a stored SSH credential — the thing `automated_tasks_list`
+deliberately reads by `id` and `name` and no further, because its `attributes`
+hold an SSH private key (#97). The ticket asked whether the host can be reached
+without the key coming with it. It can, and the reason is the allowlist rather
+than anything about this particular payload.
+
+**The declared type is `SSHKeyPair | SSHCredentials`, and it is UNTAGGED.**
+Nothing in the union says which arm a row is, and one of the two is
+`{ private_key?: string, public_key?: string }`. What settles it is that the arm
+a replication task actually uses declares `private_key` as a **number** — the id
+of the separate `SSH_KEY_PAIR` credential that holds the key — so `host` and
+`port` are ordinary fields on a record whose secret is a reference. Naming those
+two BY NAME is what keeps that true whichever arm arrives, and what keeps the key
+out if a release ever moves it. #97's account is unchanged: forwarding
+`attributes`, or trimming the known secrets out of it, would still put a private
+key in a tool result. **"This payload holds a secret" is a reason to name fields,
+not a reason to refuse the read** — and the two are only the same answer for a
+tool that had no use for the record.
+
+**The join the ticket named is a FALLBACK, and it is made lazily.** A
+`replication.query` row's `ssh_credentials` is declared a whole
+`KeychainCredentialEntry`, so the common case carries the host inside the task
+row and there is nothing to look up; the middleware also sends the id-only form,
+which `tasks.ts` already reads for a cloud sync task's `credentials`. So both
+shapes are read (#102's rule about a payload arriving more than one way), and
+`keychaincredential.query` is called only where at least one task named its
+credential by id alone. **A supporting read that was never made reports no reason
+for not having been** — `credentials_unavailable` is null both where the listing
+was read and where nothing needed it, and a section-style `unavailable` that
+fired on a call this tool chose not to make would report a failure that did not
+happen.
+
+**One field, two tools, two readings — and #93 is what decides, not
+consistency.** `source_datasets` is `textList`-shaped in `replication_status`,
+which drops an entry it cannot read, and `strictTextList`-shaped here, which
+nulls the whole list. This tool is asked which datasets go to a named peer, so a
+list one name short says that dataset is not replicated there — a claim — while
+in the status listing the same shortening understates a description. Two tools
+reading one middleware field differently is the expected outcome of that rule
+rather than drift; what would be drift is copying whichever sibling was read
+first.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
