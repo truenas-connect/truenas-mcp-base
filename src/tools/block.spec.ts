@@ -1100,7 +1100,7 @@ describe('fc_list', () => {
     hosts: Record<string, unknown>[] | null;
     ports: Record<string, unknown>[] | null;
     failures: Record<string, unknown>[];
-    unmatched_status: Record<string, unknown>[];
+    unattributed_status: Record<string, unknown>[];
   };
 
   const listed = async (
@@ -1306,7 +1306,7 @@ describe('fc_list', () => {
 
     it('keeps an entry that was not a record at all, as a row of nulls', async () => {
       const listing = await listed({ ['fcport.status']: ['Online'] });
-      expect(listing.unmatched_status).toEqual([
+      expect(listing.unattributed_status).toEqual([
         {
           port: null,
           port_type: null,
@@ -1319,7 +1319,7 @@ describe('fc_list', () => {
 
     it('tells a non-record entry from a record that named no port', async () => {
       const listing = await listed({ ['fcport.status']: [{ port_state: 'Online' }] });
-      expect(listing.unmatched_status).toEqual([
+      expect(listing.unattributed_status).toEqual([
         {
           port: null,
           port_type: null,
@@ -1338,14 +1338,14 @@ describe('fc_list', () => {
       });
       const rows = (listing.ports ?? [])[0]['status'] as Record<string, unknown>[];
       expect(rows.map((row) => row['port_state'])).toEqual(['Online', 'Linkdown']);
-      expect(listing.unmatched_status).toEqual([]);
+      expect(listing.unattributed_status).toEqual([]);
     });
 
     it('sets aside a row naming a port no listed port answers to', async () => {
       const listing = await listed({ ['fcport.status']: [status({ port: 'fc9' })] });
       expect((listing.ports ?? [])[0]['status']).toEqual([]);
-      expect(listing.unmatched_status).toHaveLength(1);
-      expect(listing.unmatched_status[0]['port']).toBe('fc9');
+      expect(listing.unattributed_status).toHaveLength(1);
+      expect(listing.unattributed_status[0]['port']).toBe('fc9');
     });
 
     it('reports an empty status where the read succeeded and named no port here', async () => {
@@ -1354,14 +1354,23 @@ describe('fc_list', () => {
       expect(listing.failures).toEqual([]);
     });
 
-    it('reports a null status for a port the system did not name', async () => {
-      expect((await onlyPort({ port: '' }))['status']).toBeNull();
+    // The second cause of a null `status`, and the one `failures` cannot show:
+    // a port with no name has nothing for a status row to be joined on, and the
+    // read that would have filled it succeeded.
+    it('reports a null status for a port the system did not name, with no failure', async () => {
+      const listing = await listed({ ['fcport.query']: [port({ port: '' })] });
+      expect((listing.ports ?? [])[0]).toMatchObject({ port: null, status: null });
+      expect(listing.failures).toEqual([]);
+      expect(listing.unattributed_status).toHaveLength(1);
     });
 
     it('sets aside every row where the port read failed', async () => {
       const listing = await listed({}, { ['fcport.query']: new Error('down') });
       expect(listing.ports).toBeNull();
-      expect(listing.unmatched_status).toHaveLength(1);
+      expect(listing.unattributed_status).toHaveLength(1);
+      // The other reading of a full `unattributed_status`, and `ports` is what
+      // separates it from a port-name join that does not hold.
+      expect(listing.failures).toEqual([{ source: 'ports', error: 'down' }]);
     });
   });
 
@@ -1385,7 +1394,7 @@ describe('fc_list', () => {
     it('names the status read and reports a null status rather than an empty one', async () => {
       const listing = await listed({}, { ['fcport.status']: new Error('timed out') });
       expect((listing.ports ?? [])[0]['status']).toBeNull();
-      expect(listing.unmatched_status).toEqual([]);
+      expect(listing.unattributed_status).toEqual([]);
       expect(listing.failures).toEqual([{ source: 'port_status', error: 'timed out' }]);
     });
 
@@ -1406,7 +1415,7 @@ describe('fc_list', () => {
           { source: 'ports', error: 'b' },
           { source: 'port_status', error: 'c' },
         ],
-        unmatched_status: [],
+        unattributed_status: [],
       });
     });
   });
@@ -1419,7 +1428,7 @@ describe('fc_list', () => {
       ['fcport.query']: [],
       ['fcport.status']: [],
     });
-    expect(listing).toEqual({ hosts: [], ports: [], failures: [], unmatched_status: [] });
+    expect(listing).toEqual({ hosts: [], ports: [], failures: [], unattributed_status: [] });
   });
 
   describe('its description', () => {
@@ -1427,8 +1436,14 @@ describe('fc_list', () => {
     // them: each is a claim the normalization actually delivers and a caller
     // acts on differently for having read it.
     it('says which WWPN is which controller and what a null second one means', () => {
-      expect(fcList.description).toContain('THE TWO CONTROLLERS OF AN HA PAIR');
+      expect(fcList.description).toContain('UNDERSTOOD TO BE THE TWO ');
       expect(fcList.description).toContain('`ha_status`');
+    });
+
+    // The reading is the ticket's and not the API's, and saying so is what
+    // keeps it from being a description promising more than the read delivers.
+    it('says the HA reading of the _b fields is not stated by the API', () => {
+      expect(fcList.description).toContain('THAT READING IS NOT STATED BY THE API');
     });
 
     it('says the status field names are unconfirmed', () => {
@@ -1438,6 +1453,13 @@ describe('fc_list', () => {
     it('says an empty status and a null one are different answers', () => {
       expect(fcList.description).toContain(
         'AN EMPTY `status` AND A NULL ONE ARE DIFFERENT ANSWERS',
+      );
+    });
+
+    // One null, two causes, and only one of them is in `failures`.
+    it('enumerates both causes of a null status rather than only the failed read', () => {
+      expect(fcList.description).toContain(
+        'NULL HAS TWO CAUSES AND ONLY ONE OF THEM IS A FAILED READ',
       );
     });
 

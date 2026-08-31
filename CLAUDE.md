@@ -1348,7 +1348,7 @@ and returning it would be returning a shape with nowhere to put anything. An FC
 host adapter, an FC port and a port's link state are three facts about a
 protocol rather than three parts of one entity: a system whose `fcport.query`
 failed still has adapters worth reporting, and its status rows are still worth
-reporting under `unmatched_status`. So no read there is entitled to fail the
+reporting under `unattributed_status`. So no read there is entitled to fail the
 tool, and the acceptance criterion that a system without the hardware answers
 cleanly falls out of that rather than needing a check of its own.
 
@@ -1373,14 +1373,24 @@ the rows are ATTRIBUTED on: `port` is the only field the status rows and
 `fcport.query` plausibly share, and if that is wrong nothing joins.
 
 **Make a wrong join visible in the shape rather than in the field.** Every
-status row that names no listed port goes to `unmatched_status` rather than
+status row that names no listed port goes to `unattributed_status` rather than
 being dropped, so a join key that does not hold produces empty per-port `status`
-lists beside a full `unmatched_status` — which reads as "this tool could not
+lists beside a full `unattributed_status` — which reads as "this tool could not
 place these" and not as "these ports report nothing about their links". Dropping
 them, or filing them under a port anyway, both produce an answer that looks
 correct and is not. This is `attribute`'s reason in `nvmeof_list` one level up:
 there the unconfirmed part is whether an id answers to a listed subsystem, here
 it is whether the key exists at all.
+
+**What that costs is a second cause for one null, and the description owes
+both.** A port's `status` is null where the status read failed AND where the
+port carries no name to be joined on — the first is in `failures` and the second
+leaves it empty, so `port` and `failures` together are what separate them. The
+same doubling reaches the list: everything landing in `unattributed_status` at
+once is a broken join where `ports` is populated and simply a failed port read
+where `ports` is null. **A join whose key is a guess adds a cause to every null
+downstream of it**, and enumerating one of them is this repository's most common
+finding wearing the join's hat.
 
 ## Conventions
 

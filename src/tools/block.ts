@@ -804,7 +804,7 @@ function readPortStatus(entry: unknown): FcPortStatus {
 /** Status rows filed under the port each named, and the ones that could not be. */
 interface StatusAttribution {
   byPort: Map<string, FcPortStatus[]>;
-  unmatched: FcPortStatus[];
+  unattributed: FcPortStatus[];
 }
 
 /**
@@ -819,22 +819,22 @@ interface StatusAttribution {
  * The join is on the port NAME because that is the only field the two reads
  * plausibly share — and it is part of the same unconfirmed guess as the
  * allowlist above. Getting it wrong empties every `status` list and fills
- * `unmatched_status`, which is the one shape that says so rather than reading
- * as ports with nothing to report.
+ * `unattributed_status`, which is the one shape that says so rather than
+ * reading as ports with nothing to report.
  */
 function attributeStatus(rows: FcPortStatus[], listed: Set<string>): StatusAttribution {
   const byPort = new Map<string, FcPortStatus[]>();
-  const unmatched: FcPortStatus[] = [];
+  const unattributed: FcPortStatus[] = [];
   for (const row of rows) {
     if (row.port === null || !listed.has(row.port)) {
-      unmatched.push(row);
+      unattributed.push(row);
       continue;
     }
     const filed = byPort.get(row.port);
     if (filed === undefined) byPort.set(row.port, [row]);
     else filed.push(row);
   }
-  return { byPort, unmatched };
+  return { byPort, unattributed };
 }
 
 /**
@@ -845,17 +845,27 @@ function attributeStatus(rows: FcPortStatus[], listed: Set<string>): StatusAttri
  * tool could not read as a count. `npiv_reported` separates the first from the
  * second, which is #134's companion-field shape over the same `field?: T`
  * signature — `Object.hasOwn` and not `in`, which walks the prototype (#101).
+ *
+ * BOTH FIELDS READ THE ROW'S OWN KEY, and that pairing is the point rather than
+ * a flourish. Plain property access walks the prototype too, so reading the
+ * value that way beside a membership test that does not would let a non-null
+ * `npiv` sit beside `npiv_reported: false` — a value presented as one the
+ * system did not report. No JSON payload carries such a chain, which is exactly
+ * why the two would be trusted to agree and never checked.
  */
 async function readFcHosts(system: SystemHandle): Promise<FcHost[]> {
   const hosts = await firstValueFrom(system.client.api.query('fc.fc_host.query'));
-  return hosts.map((host) => ({
-    id: numberOrNull(host.id),
-    alias: textOrNull(host.alias),
-    wwpn: textOrNull(host.wwpn),
-    wwpn_b: textOrNull(host.wwpn_b),
-    npiv: numberOrNull(host.npiv),
-    npiv_reported: Object.hasOwn(host, 'npiv'),
-  }));
+  return hosts.map((host) => {
+    const reported = Object.hasOwn(host, 'npiv');
+    return {
+      id: numberOrNull(host.id),
+      alias: textOrNull(host.alias),
+      wwpn: textOrNull(host.wwpn),
+      wwpn_b: textOrNull(host.wwpn_b),
+      npiv: reported ? numberOrNull(host.npiv) : null,
+      npiv_reported: reported,
+    };
+  });
 }
 
 /**
@@ -919,14 +929,18 @@ export const fcList: ReadOnlyTool = {
     'be read as a count. A reported `0` is a real count of none and is not ' +
     'either of those. `ports` are the FC ports: `id` is the numeric identity ' +
     'and `port` the port name, which is also what a `status` row names. ' +
-    '`wwpn` AND `wwpn_b` ON BOTH LISTS ARE THE TWO CONTROLLERS OF AN HA PAIR, ' +
-    'not two ports of one adapter: `wwpn` is this controller\'s World Wide Port ' +
-    'Name and `wwpn_b` is its peer\'s. A single-controller appliance has no ' +
-    'peer, so a null `wwpn_b` there is the expected answer and NOT a ' +
-    'misconfiguration — it is also what a system that reported no value sends, ' +
-    'and nothing here tells those two apart. `ha_status` is the tool that says ' +
-    'whether this system is an HA pair, and it is what settles which reading a ' +
-    'null `wwpn_b` has. `target_id` is the iSCSI target the port is mapped to, ' +
+    '`wwpn` AND `wwpn_b` ON BOTH LISTS ARE UNDERSTOOD TO BE THE TWO ' +
+    'CONTROLLERS OF AN HA PAIR rather than two ports of one adapter: `wwpn` is ' +
+    'this controller\'s World Wide Port Name and `wwpn_b` its peer\'s. THAT ' +
+    'READING IS NOT STATED BY THE API — both are plain nullable strings on the ' +
+    'payload, which says nothing about what the `_b` names — so it is reported ' +
+    'here as the reading it is. Under it, a single-controller appliance has no ' +
+    'peer and a null `wwpn_b` there is the expected answer rather than a ' +
+    'misconfiguration; but that is also what a system reporting no value sends, ' +
+    'and nothing in this tool tells those two apart. `ha_status` is what says ' +
+    'whether this system is an HA pair at all, and it is what a caller needs ' +
+    'before reading anything into a null `wwpn_b`. ' +
+    '`target_id` is the iSCSI target the port is mapped to, ' +
     'reduced to that target\'s identity and joinable against `iscsi_list`\'s ' +
     '`targets[].id`; the target\'s name and its extents are reported there and ' +
     'not here. `target_mapped` is whether the port named a target at all: false ' +
@@ -949,16 +963,23 @@ export const fcList: ReadOnlyTool = {
     'reported ONLY AS TEXT, so a system sending a numeric `speed` reports null ' +
     'there and names `speed` in `unreported_fields`. AN EMPTY `status` AND A ' +
     'NULL ONE ARE DIFFERENT ANSWERS: empty means the status read succeeded and ' +
-    'no row named this port; null means it could not be read at all, and says ' +
-    'nothing about the link. `hosts` and `ports` are null in the same way and ' +
-    'for the same reason. `unmatched_status` holds status rows that could not ' +
+    'no row named this port. NULL HAS TWO CAUSES AND ONLY ONE OF THEM IS A ' +
+    'FAILED READ — either the status read failed, which `failures` names, or ' +
+    'this port carries a null `port` and so has no name for a status row to be ' +
+    'joined on, which leaves `failures` empty. Read `port` and `failures` ' +
+    'together to tell them apart. Neither says anything about the link. ' +
+    '`hosts` and `ports` are null only in the first way. ' +
+    '`unattributed_status` holds status rows that could not ' +
     'be placed on any port listed here — one naming a `port` no listed port ' +
     'answers to carries that name, one that named no readable port carries a ' +
     'null `port` beside a non-null `unreported_fields`, and one that was not a ' +
     'record at all carries null for both. WHILE IT IS NOT EMPTY THE PER-PORT ' +
-    '`status` LISTS ARE INCOMPLETE; every row landing there at once is the ' +
-    'shape of a port-name join that does not hold on this system rather than of ' +
-    'ports with nothing to report. `failures` names each read that failed, as ' +
+    '`status` LISTS ARE INCOMPLETE. Every row landing there at once has two ' +
+    'readings and `ports` is what separates them: with `ports` null the port ' +
+    'read simply failed and there was nothing to attribute against, while with ' +
+    '`ports` populated it is the shape of a port-name join that does not hold ' +
+    'on this system — in neither case is it ports with nothing to report. ' +
+    '`failures` names each read that failed, as ' +
     '`source` — `hosts`, `ports` or `port_status` — and `error`, and is empty ' +
     'when all three were read. NONE OF THE THREE FAILS THE TOOL, so a system ' +
     'with no Fibre Channel hardware answers cleanly: it reports empty lists ' +
@@ -994,7 +1015,7 @@ export const fcList: ReadOnlyTool = {
 
     // What a status row has to name to be filed under a port. Built from the
     // ports that were read: where the port read itself failed there is nothing
-    // to file against, and every status row is reported unmatched instead.
+    // to file against, and every status row is reported unattributed instead.
     const listed = new Set(
       (ports.value ?? []).flatMap((port) => (port.port === null ? [] : [port.port])),
     );
@@ -1016,7 +1037,9 @@ export const fcList: ReadOnlyTool = {
                   : (attributed.byPort.get(port.port) ?? []),
             })),
       failures,
-      unmatched_status: attributed?.unmatched ?? [],
+      // Named for the concept the two tools above already use: an entity that
+      // was read and could not be placed under the thing it named.
+      unattributed_status: attributed?.unattributed ?? [],
     };
   },
 };
