@@ -1686,6 +1686,56 @@ rather than in the file's own order: the key order of a module namespace object
 is a property of the module system, not of `src/index.ts`, and pinning it would
 assert something this repository does not decide.
 
+### A field whose read costs more than the tool's own bound is opt-in (#155)
+
+`snapshots_list` reports `held` and `scheduled_removal` only where the caller
+passed `report_held` or `report_scheduled_removal`, and both default false.
+That is not caution about a wider response — it is where the cost lands.
+`holds` and `retention` on `pool.snapshot.query`'s `extra` set
+`get_holds`/`get_user_properties` on the underlying ZFS query and add
+zettarepl's annotation pass, and both apply to the WHOLE query before the
+middleware's own `limit` reaches anything: a listing bounded to 100 snapshots
+pays them over every snapshot the system holds. **Ask where a read's cost is
+applied relative to the bound the tool advertises** — `select` (#115) narrows
+what comes back and is bandwidth, and this is the other direction.
+
+**The argument-was-not-passed cause of a null is NOT split off by a companion
+field, and that is #134's bar being applied rather than skipped.** Null on
+either field covers the argument not having been passed as well as a payload
+that would not read — and on `scheduled_removal` a third, ordinary cause, no
+enabled task owning the snapshot at all. That first cause is the two-cause null
+`temperature_reported` exists to split in #120, and a companion for it earns
+nothing here: the caller set the flag itself, so it already knows whether the
+field was asked for, and a companion field earns its place only where the causes
+are ones the caller cannot tell apart and would act on differently. What it
+cannot tell apart — an unreadable retention from no removal scheduled — no flag
+of the caller's own settles, so the description says outright that the tool does
+not separate them. **A rule that adds a
+field is still a rule about the CALLER's answer**, and an argument the caller
+passed is part of what the caller knows.
+
+**Inside a record, the direction rule (#93) points the other way from the field
+that holds it.** `held: false` and `scheduled_removal: null` are both claims
+that nothing is protecting or scheduling this snapshot, and a caller acting on
+either prunes — so an unreadable holds payload is null and never false, while a
+retention record whose `datetime` will not read KEEPS the object, with `at`
+null, because nulling it would say no removal is scheduled when one is. The
+same reading, applied one level in, produces opposite-looking answers.
+
+**`held` is TrueNAS's own hold tag and the description says so before it says
+anything else.** `_transform_snapshot_entry` reports `{ truenas: 1 }` where that
+one tag is present and `{}` otherwise, normalising the count — so a ZFS hold
+under any other tag is invisible to this field, and the name promises a great
+deal more than the payload delivers. That is `pool_resilver_config`'s `enabled`
+(#141) in a field this repository DID name: the correction still lives in the
+description, because the honest name would be `truenas_hold_tag_present`.
+
+**`scheduled_removal` does not account for holds**, and the two fields are
+independent — `annotate_snapshots` never reads holds, so a held snapshot can
+report a removal date it will survive. Stated in the description as the reading
+a caller is most likely to get wrong, since side-by-side fields are what an
+implied relationship looks like from the outside (#138).
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
