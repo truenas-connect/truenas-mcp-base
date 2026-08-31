@@ -1769,11 +1769,25 @@ count reads as "it exists". **That fails in opposite directions on one call**:
 `snapshot_clone` would refuse every destination on the system. Neither looks
 like a filter problem from the outside.
 
-**Both declared name fields are compared for the snapshot.** A snapshot row
-declares `id` and `name` as two separate required strings and the surface states
-no relationship between them — the same shape as an alert's `uuid` and `id`
-(#119) — so a match on either is what keeps the plan from failing for a snapshot
-that is plainly there. #91's rule reaching an equality nobody wrote down.
+**Both declared name fields are compared for the snapshot, and the read asks
+both ways.** A snapshot row declares `id` and `name` as two separate required
+strings and the surface states no relationship between them — the same shape as
+an alert's `uuid` and `id` (#119) — so a match on either is what keeps the plan
+from failing for a snapshot that is plainly there. #91's rule reaching an
+equality nobody wrote down.
+
+**A comparison over two fields needs a FILTER over both, or it rescues nothing
+on the system it was written for.** Comparing `name` after filtering on `id`
+alone reads as belt and braces and is not: where the two differ and the caller
+passes the `name` — which is what the description asks for — a filter the
+middleware honours answers with no row, and the second comparison has nothing to
+run against. It is reachable only on the dropped-filter path, which is a
+different case. The client declares the disjunction itself
+(`['OR', QueryFilters<T>[]]`, each arm a filter LIST), so this is checkable
+against the surface rather than guessed. **Ask which rows the filter can return
+before deciding what comparing them establishes** — the filter and the
+comparison do different jobs (#121: bandwidth versus the control) and a
+mismatched pair silently covers neither case.
 
 ### `reversible` is not "this catalog can undo it" (#153)
 

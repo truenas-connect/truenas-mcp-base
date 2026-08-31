@@ -698,12 +698,20 @@ describe('snapshot_clone', () => {
     await expect(snapshotClone.plan(byId, args)).resolves.toHaveLength(2);
   });
 
-  it('asks the system for the source snapshot without every ZFS property', async () => {
+  it('asks the system for the source snapshot under either name field, without every ZFS property', async () => {
+    // `fakeSystem` answers every filter with the same rows, so the two cases
+    // above pass whatever this read asked for — which is why the filter itself
+    // is asserted here. On a system that honours it, an `id`-only filter
+    // answers with no row at all for a snapshot whose `name` is what the
+    // caller was told to pass, and the comparison above would have nothing
+    // left to rescue.
     const { ctx, query } = plannable();
     await snapshotClone.plan(ctx, args);
-    expect(query).toHaveBeenCalledWith('pool.snapshot.query', [['id', '=', SOURCE]], {
-      extra: { properties: ['creation'] },
-    });
+    expect(query).toHaveBeenCalledWith(
+      'pool.snapshot.query',
+      [['OR', [[['id', '=', SOURCE]], [['name', '=', SOURCE]]]]],
+      { extra: { properties: ['creation'] } },
+    );
   });
 
   it('executes the clone, then reports the destination the read found', async () => {

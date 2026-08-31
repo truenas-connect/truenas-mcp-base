@@ -707,11 +707,26 @@ function cloneParams(args: CloneArgs): CallParams<ApiSurface, 'pool.snapshot.clo
  * reason: a dropped filter answers with every snapshot on the system, and a
  * length test would then plan a clone of a snapshot that does not exist.
  *
- * BOTH `id` AND `name` ARE COMPARED. The client declares them as two separate
- * required `string` fields on a snapshot row and states no relationship between
- * them — the same shape as an alert's `uuid` and `id` (#119) — so matching only
- * one of them would fail the plan for a snapshot that is plainly there on a
- * system where they differ. `pool.snapshot.clone` takes the name either way.
+ * BOTH `id` AND `name` ARE COMPARED, AND THE READ ASKS BOTH WAYS. The client
+ * declares them as two separate required `string` fields on a snapshot row and
+ * states no relationship between them — the same shape as an alert's `uuid` and
+ * `id` (#119) — so matching only one of them would fail the plan for a snapshot
+ * that is plainly there on a system where they differ.
+ * `pool.snapshot.clone` takes the name either way.
+ *
+ * The FILTER has to name both fields for that to be true of a read the
+ * middleware actually narrowed: filtering on `id` alone and then comparing
+ * `name` rescues nothing, because on the system where the two differ and the
+ * caller passes the `name` the tool's own description asks for, an honoured
+ * `id` filter answers with no row at all and there is nothing left to compare.
+ * The disjunction is the client's own declared filter form
+ * (`['OR', QueryFilters<T>[]]`), so each arm is a filter LIST rather than a
+ * bare condition.
+ *
+ * The two halves still do different work, and neither replaces the other. The
+ * filter is bandwidth and is what a system that honours it narrows on; the
+ * comparison is the control, and is what reads a dropped filter's whole-table
+ * answer correctly rather than as "every snapshot matches".
  *
  * One property is asked for because this read needs none and the middleware is
  * not documented to read an empty list as "no properties"; a snapshot row
@@ -720,9 +735,11 @@ function cloneParams(args: CloneArgs): CallParams<ApiSurface, 'pool.snapshot.clo
  */
 async function snapshotExists(ctx: ToolContext, snapshot: string): Promise<boolean> {
   const matches = await firstValueFrom(
-    ctx.system.client.api.query('pool.snapshot.query', [['id', '=', snapshot]], {
-      extra: { properties: ['creation'] },
-    }),
+    ctx.system.client.api.query(
+      'pool.snapshot.query',
+      [['OR', [[['id', '=', snapshot]], [['name', '=', snapshot]]]]],
+      { extra: { properties: ['creation'] } },
+    ),
   );
   return matches.some(
     (row) => stringOrNull(row['id']) === snapshot || stringOrNull(row['name']) === snapshot,
