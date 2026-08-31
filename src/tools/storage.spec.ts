@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Observable, of, throwError } from 'rxjs';
+import { EMPTY, Observable, of, throwError } from 'rxjs';
 import { fakeSystem } from '@/testing/fake-systems';
 import { SystemHandle, ToolContext } from '@/catalog/tool';
 import { listDatasets, poolStatus, quotaReport, systemDatasetConfig } from '@/tools/index';
@@ -161,6 +161,17 @@ describe('storage_pool_status', () => {
 
   it('reports no flag where the read answered with something that is not a boolean', async () => {
     expect(await flag({ upgraded: { 1: 'yes' } })).toBeNull();
+  });
+
+  it('reports no flag where the read completed without answering at all', async () => {
+    // `firstValueFrom` raises on an observable that completes without emitting.
+    // That is neither a refusal nor a non-boolean answer, which is why the
+    // description says what a null rules out rather than listing its causes.
+    const call = vi.fn(() => EMPTY);
+    const query = vi.fn(() => of([pool({ id: 1 })]));
+    const system = { name: 'nas', client: { api: { call, query } } } as unknown as SystemHandle;
+    const [row] = (await poolStatus.handler({ system } as ToolContext, {})) as Row[];
+    expect(row.feature_flags_current).toBeNull();
   });
 
   it('reports no flag where the row carried one that is not a boolean', async () => {

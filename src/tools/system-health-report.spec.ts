@@ -126,8 +126,11 @@ describe('system_health_report', () => {
     const result = await report(healthy({ ['pool.query']: [pool({ is_upgraded: false })] }));
     expect(result.verdict).toBe('OK');
     expect(result.reasons).toEqual([]);
-    // Asserted as the exact key list rather than as an absence, so that a
-    // later field reaching the composite unannounced fails here too.
+    // Asserted as the exact key list rather than as an absence. Nothing can
+    // arrive here on its own — `poolEntries` names its six fields by hand,
+    // which is #44's guard and is what kept the new field out without a line
+    // changing there — so what this pins is the DECISION: an edit that added
+    // the field to the composite would have to fail a test to land.
     expect(Object.keys((result['pools']['entries'] as object[])[0])).toEqual([
       'name',
       'status',

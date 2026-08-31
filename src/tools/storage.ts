@@ -29,10 +29,13 @@ interface ZfsProperty {
  *
  * **Null is "not established", and it is never read as either verdict.** A pool
  * reported current when the read failed understates a finding and the reverse
- * invents one, which is the direction #93 turns on. Three causes reach it and
- * this result does not separate them: a row carrying no readable flag beside no
+ * invents one, which is the direction #93 turns on. Several causes reach it and
+ * this result separates none of them: a row carrying no readable flag beside no
  * readable pool id, so there was nothing to aim the verb at; a verb that
- * rejected; and a verb that answered with something that is not a boolean.
+ * rejected; a verb that answered with something that is not a boolean; and a
+ * verb whose observable completed without emitting at all, which `firstValueFrom`
+ * raises as an error and this catch takes with the rest. The description says
+ * what a null RULES OUT rather than enumerating a partition it does not have.
  *
  * **The rejection is caught here rather than reported.** `storage_pool_status`
  * is composed by `system_health_report` and, through it, by
@@ -77,19 +80,21 @@ export const poolStatus: ReadOnlyTool = {
     'implicitly. NOTHING IN THIS CATALOG UPGRADES A POOL: `pool.upgrade` is ' +
     'not a tool here, and the decision belongs to a person in the UI. ' +
     'A NULL `feature_flags_current` IS NOT A FALSE. Null is "this was not ' +
-    'established", and three causes reach it that this result does NOT ' +
-    'separate: the system reported no flag on the pool row and no pool id to ' +
-    'ask about separately, the separate read was refused, and that read ' +
-    'answered with something this tool could not take as a boolean. So a null ' +
-    'is not evidence that the pool is behind, and not evidence that it is ' +
-    'current. ' +
+    'established", and SEVERAL causes reach it that this result separates ' +
+    'NONE of: the system reported no flag on the pool row and no pool id to ' +
+    'ask about separately, a separate read that was refused, a separate read ' +
+    'that answered with something this tool could not take as a boolean, and ' +
+    'any other way that read ended without producing one. What a null DOES ' +
+    'rule out is that this tool read a boolean: it is not evidence that the ' +
+    'pool is behind, and not evidence that it is current. ' +
     '`system_health_report` DOES NOT RAISE A FINDING FOR THIS, and its verdict ' +
     'says nothing about it either way: feature-flag currency is a ' +
-    'configuration fact rather than a health problem. The system reports it as ' +
-    'a NOTICE-level `PoolUpgraded` alert, which `alerts_list` carries for as ' +
-    'long as that alert stands and not after it is dismissed. A pool that is ' +
-    'behind is therefore not a reason that report is anything other than OK, ' +
-    'and this field is where the answer lives.',
+    'configuration fact rather than a health problem. The system also reports ' +
+    'it as a NOTICE-level `PoolUpgraded` alert, which `alerts_list` carries as ' +
+    'prose — dismissed or not, since that tool includes dismissed alerts — for ' +
+    'as long as the system raises it; this field is the same fact as a state ' +
+    'per pool. A pool that is behind is therefore not a reason that report is ' +
+    'anything other than OK, and this field is where the answer lives.',
   inputSchema: { type: 'object', properties: {} },
   requiredRole: Role.ReadOnly,
   mutating: false,

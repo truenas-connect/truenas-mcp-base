@@ -1544,11 +1544,14 @@ the one worth keeping: `false` is the answer this tool exists to surface and it
 is also falsy, so a fallback written as `carried || read()` asks a second
 question about a pool that had already answered.
 
-**Null is not a false, and the three causes behind it are not separable.** No
-readable flag beside no readable pool id (nothing to aim the verb at), a verb
-that rejected, and a verb that answered with something that is not a boolean.
-The description says what a null rules out and names what it cannot tell apart,
-per #122, rather than enumerating a partition it does not have. **No companion
+**Null is not a false, and the causes behind it are not separable — nor are they
+enumerable, which is the part a first draft got wrong.** No readable flag beside
+no readable pool id (nothing to aim the verb at), a verb that rejected, a verb
+that answered with something that is not a boolean, and a verb whose observable
+completed without emitting, which `firstValueFrom` raises as an error and the
+same catch takes. The first three read as a partition and are not one; the
+description now says what a null RULES OUT — that this tool read a boolean —
+and says outright that it separates none of the causes, per #122. **No companion
 field splits it**: #134's bar is that a companion earns its place where the
 causes behind one null are ones a caller would act on differently, and every
 cause here leaves the same course of action. The rejection text is dropped for
@@ -1566,10 +1569,19 @@ by dropping fields and never by re-judging them, and #44's is that a composite
 re-reads every field through its own guard by name — which is what kept the new
 field out of `poolEntries` without a line changing there. The composite's spec
 now asserts the pools entry's **exact key list**, so a field reaching it
-unannounced fails a test rather than shipping. `storage_pool_status`'s own
+unannounced fails a test rather than shipping — nothing can arrive there on its
+own, so what that assertion pins is the decision. `storage_pool_status`'s own
 description carries the pointer both ways: a pool that is behind is not a reason
 that report is anything other than `OK`, and this field is where the answer
 lives.
+
+**Describing a NEIGHBOURING tool means reading its description, not recalling
+it.** The first draft said `alerts_list` carries the `PoolUpgraded` alert only
+until it is dismissed, which is what the ticket's own text says and is the
+opposite of what that tool does — its description states outright that dismissed
+alerts are still active conditions and are included. A pointer between tools is
+a claim about the other tool, and it can be false the same way any description
+can.
 
 ## Conventions
 
