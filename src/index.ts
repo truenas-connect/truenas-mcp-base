@@ -102,6 +102,7 @@ export {
   alertSettings,
   snapshotsList,
   replicationStatus,
+  replicationTopology,
   snapshotTasksList,
   cloudsyncTasksList,
   automatedTasksList,

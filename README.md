@@ -23,7 +23,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `disks_temperature`, `apps_list`,
   `app_engine_status`, `apps_update_summary`,
   `vms_list`, `vm_logs`, `vm_devices`, `alerts_list`, `snapshots_list`,
-  `replication_status`,
+  `replication_status`, `replication_topology`,
   `snapshot_tasks_list`, `cloudsync_tasks_list`, `automated_tasks_list`,
   `tasks_recent_runs`,
   `shares_list`, `share_access`, `nfs_clients`, `iscsi_list`, `nvmeof_list`,

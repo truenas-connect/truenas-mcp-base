@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the fifty-five sketch tools', () => {
+  it('registers the fifty-six sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -29,6 +29,7 @@ describe('createDefaultCatalog', () => {
       'alerts_list',
       'snapshots_list',
       'replication_status',
+      'replication_topology',
       'snapshot_tasks_list',
       'cloudsync_tasks_list',
       'automated_tasks_list',
@@ -236,6 +237,12 @@ describe('createDefaultCatalog', () => {
   it('advertises replication_status to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
       'replication_status',
+    );
+  });
+
+  it('advertises replication_topology to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
+      'replication_topology',
     );
   });
 

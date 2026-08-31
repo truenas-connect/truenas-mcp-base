@@ -11,7 +11,7 @@ import { fleetComplianceReport, fleetHealthRollup, haStatus } from '@/tools/flee
 import { networkConfig, networkInterfaces } from '@/tools/network';
 import { nfsClients } from '@/tools/nfs';
 import { poolTopology, scrubHistory } from '@/tools/pools';
-import { replicationStatus } from '@/tools/replication';
+import { replicationStatus, replicationTopology } from '@/tools/replication';
 import {
   reportingAppVmUsage,
   reportingDiskIo,
@@ -43,7 +43,7 @@ import {
 } from '@/tools/tasks';
 import { vmDevices, vmLogs, vmsList } from '@/tools/vms';
 
-/** The sketch's catalog: forty-nine read-only tools plus six mutating tools. */
+/** The sketch's catalog: fifty read-only tools plus six mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -70,6 +70,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(alertsList);
   catalog.register(snapshotsList);
   catalog.register(replicationStatus);
+  catalog.register(replicationTopology);
   catalog.register(snapshotTasksList);
   catalog.register(cloudsyncTasksList);
   catalog.register(automatedTasksList);
@@ -139,6 +140,7 @@ export {
   quotaReport,
   rebootInfo,
   replicationStatus,
+  replicationTopology,
   reportingAppVmUsage,
   reportingDiskIo,
   reportingSpaceTrends,
