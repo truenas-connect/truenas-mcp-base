@@ -297,6 +297,19 @@ Two things that rule does not decide on its own:
   not touch is a separate change. So a module can be part-split, and that is not
   a half-finished state to tidy — the next tool over the line takes its own spec
   the same way.
+
+  **The trigger can also be met by GROWING tools rather than by adding one, and
+  then there is no new tool whose block is the one to move.** #138 grew two of `block.ts`'s three
+  tools past the three-line margin `block.spec.ts` had recorded for itself, so
+  `iscsi_list` — one of the two blocks it had open — took `iscsi-list.spec.ts`
+  and the other two stayed. What decides which block moves is that it is one the
+  ticket already has open and that moving it brings the file back under 1,500:
+  moving a block the ticket did not touch is the re-homing #121 rules out, and
+  moving every block is a rewrite where a move was owed. **Move a block the
+  ticket touched, and stop as soon as the file is under the number** — which
+  block, where more than one qualifies and either would do it, is not a decision
+  this rule makes. It is not the largest: the block moved here is the smaller of
+  the two, and the file is under the trigger either way.
 - **The catalog-wide test is not any tool's.** The exact-list assertion over
   `createDefaultCatalog()` is about `src/tools/index.ts`, so it lives in
   `index.spec.ts` under the same rule as everything else. Registering a tool
@@ -1401,6 +1414,48 @@ apart, which is #122's rule about `ended: false` reaching a list. **Two review
 rounds went on one sentence here and on the same sentence in `cloudsync_run` —
 when a field's causes come from a guess, assume you have not enumerated them
 all.**
+
+### Where a service listens is reported beside what it serves, not under it (#138)
+
+`iscsi_list` reports `portals` and `nvmeof_list` reports `ports`, each a
+top-level list rather than a field on a target or a subsystem. Both are read
+through `attempt`, so neither can fail its tool — which is #135's test answered
+the way `fc_list` answers it: a listener is a fact about the PROTOCOL rather
+than a part of the entity, so a system whose portals did not read still has
+targets and sessions worth reporting.
+
+**Only one of the two families can be joined, and the tool that cannot says so.**
+`nvmet.port_subsys.query` embeds the port and the subsystem whole, so each port
+carries the subsystems published through it — reduced to `subsystem_id` and
+`subsystem` (#100), never forwarded, and the NQN deliberately not repeated
+because it is reported once on the subsystem itself. iSCSI has the same
+relationship in a target's own `groups[].portal` and **this catalog does not
+read it**: `portal` sits beside `initiator` and `auth`, which are the initiator
+allowlist and the CHAP credential, and reading the group was out of #138's
+scope. So `iscsi_list` reports the portals and states outright that it does not
+say which portal serves which target. **A tool reporting two lists a caller
+would expect to be joined has to say it did not join them** — side by side is
+what an implied join looks like from the outside.
+
+**Closing a gap a description NAMES means editing that sentence, not appending
+to it.** `nvmeof_list` said in its own description that it did not report which
+ports a subsystem was published on; that sentence is now the opposite of the
+tool, and it is replaced rather than qualified — with the direction the answer
+is read in (`ports[].subsystems`, since the subsystem row still carries no port
+field) and with what the absence of a subsystem there does NOT establish when
+either read failed or a publication could not be placed.
+
+**A wildcard listen address is the trap, and it is the description's to state.**
+An iSCSI portal on `0.0.0.0` is bound to EVERY address, and `::` is the same
+answer for IPv6 — the opposite of what a reader who sees a placeholder assumes.
+The string is passed through as the system spelled it and the description says
+what it means, which is the same division `addr_trsvcid` gets one tool over:
+declared `number | string | null`, reported as whichever arrived, and never
+converted, because fixing one spelling would assert a meaning the surface
+refuses to (#96). A port's `address` is null both where the field could not be
+read and where the system sent the empty address the middleware accepts on a
+TCP port — stated, since **this catalog does not establish what an empty
+address means** (#120), and a null there is not evidence a port listens nowhere.
 
 ## Conventions
 
