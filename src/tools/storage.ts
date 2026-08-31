@@ -329,6 +329,10 @@ export const systemDatasetConfig: ReadOnlyTool = {
     'pool is absent: that tool reads the data pools, and the BOOT POOL is not ' +
     'among them, so a system dataset sitting on the boot pool names a pool it ' +
     'will never report. `boot_pool_status` is where the boot pool is reported. ' +
+    'The same name is the `pool` field `storage_list_datasets` reports and the ' +
+    'value its `pool` argument takes, so it narrows that listing to the ' +
+    'datasets on the pool holding the system dataset — see below for what it ' +
+    'does not do there. ' +
     '`pool` AND `pool_set` ARE READ TOGETHER OR NOT AT ALL, and reporting the ' +
     'pool without the flag loses the distinction the flag exists for. ' +
     '`pool_set` is whether the system records an EXPLICIT CHOICE of that pool. ' +
@@ -359,9 +363,11 @@ export const systemDatasetConfig: ReadOnlyTool = {
     'The row id, the dataset basename and the dataset uuid are all declared by ' +
     'the API and all left out, because the surface states nothing about what ' +
     'either name names and a meaning read off a field name is a guess a caller ' +
-    'could not tell from a reading. In particular NOTHING RETURNED HERE JOINS ' +
-    'TO `storage_list_datasets`, whose `id` is a dataset id this tool does not ' +
-    'report — the join this tool offers is the pool one, above. ' +
+    'could not tell from a reading. In particular NOTHING HERE NAMES THE SYSTEM ' +
+    'DATASET AS A DATASET: `storage_list_datasets` keys its rows by `id`, no ' +
+    'dataset id is reported here, and so the system dataset cannot be picked ' +
+    'out of that listing from this result. The `pool` above narrows that ' +
+    'listing to the right pool and no further. ' +
     'THIS TOOL ONLY READS. It does not move the system dataset to another pool ' +
     'and it does not list the pools it could be moved to; those are ' +
     '`systemdataset.update` and `systemdataset.pool_choices`, and neither is in ' +
