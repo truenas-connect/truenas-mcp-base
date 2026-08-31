@@ -1118,3 +1118,29 @@ describe('share_access', () => {
     expect((await oneEntry({ flags: { INHERIT_ONLY: 'yes' } }))['children_only']).toBeNull();
   });
 });
+
+describe('share_access — result guidance', () => {
+  it('carries guidance that is a verbatim slice of the description', () => {
+    expect(shareAccess.description).toContain(shareAccess.resultGuidance ?? '');
+  });
+
+  it('keeps the inversion that makes an empty list mean its opposite', () => {
+    // The reading most costly to lose: two empty NFS lists are unrestricted
+    // access, not none.
+    const guidance = shareAccess.resultGuidance ?? '';
+    expect(guidance).toContain('AN EMPTY LIST MEANS UNRESTRICTED');
+  });
+
+  it('leaves how to name the share where a caller reads it before choosing', () => {
+    // Selection text: which string to pass, and that a non-match or an
+    // ambiguous match is an error rather than an empty result.
+    const description = shareAccess.description;
+    expect(description).toContain('A string matching NO share is an error');
+    expect(description).toContain('A string matching MORE THAN one share is also an error');
+  });
+
+  it('renders no stray escape into either field', () => {
+    expect(shareAccess.description).not.toContain('\\');
+    expect(shareAccess.resultGuidance).not.toContain('\\');
+  });
+});

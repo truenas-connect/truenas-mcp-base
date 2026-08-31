@@ -1102,3 +1102,53 @@ describe('fleet_health_rollup', () => {
     expect(fleetHealthRollup.inputSchema).toEqual({ type: 'object', properties: {} });
   });
 });
+
+describe('fleet_compliance_report — result guidance', () => {
+  /**
+   * The prose split (#131) is a text edit over a 10KB literal, and the first
+   * attempt at it silently dropped two lines built from template literals with
+   * all four CI jobs green — nothing in the repository asserted description
+   * text, so nothing could catch it. These pin the two properties that would
+   * have. Fifty-three more tools take the same edit.
+   */
+  it('carries guidance that is a verbatim slice of the description', () => {
+    // While the two overlap this is the whole integrity check: any reflow that
+    // reworded, rewrapped or dropped a line breaks it. The follow-up that
+    // removes the text from `description` replaces this with the assertions
+    // below, which stand on their own.
+    expect(fleetComplianceReport.description).toContain(
+      fleetComplianceReport.resultGuidance ?? '',
+    );
+  });
+
+  it('states the expiry horizon and the entry cap, both interpolated', () => {
+    // Exactly the two lines round one lost: each is a template literal, so a
+    // pass that handles only quoted strings drops them and leaves prose that
+    // still reads as a sentence.
+    const guidance = fleetComplianceReport.resultGuidance ?? '';
+    expect(guidance).toContain('`expiring_soon` how many have 30 days or fewer left');
+    expect(guidance).toContain('are capped, at 10 entries each');
+  });
+
+  it('keeps the readings a caller cannot take from a value it does not have', () => {
+    const guidance = fleetComplianceReport.resultGuidance ?? '';
+    expect(guidance).toContain('A HOLE IS NEVER A PASS');
+    expect(guidance).toContain('NULL IS NEVER "AUDITING IS OFF"');
+    expect(guidance).toContain('NO CERTIFICATE OR PRIVATE KEY MATERIAL IS RETURNED');
+  });
+
+  it('leaves the no-verdict claim where a caller reads it before choosing', () => {
+    // The one caveat that must NOT move: someone asking "are we compliant?"
+    // has already chosen this tool by the time a result exists.
+    expect(fleetComplianceReport.description).toContain(
+      'THIS TOOL STATES NO COMPLIANCE VERDICT AND NEVER WILL',
+    );
+  });
+
+  it('renders no stray escape into either field', () => {
+    // Round one double-escaped apostrophes, which `--word-diff` cannot see:
+    // backslashes fall outside its word regex.
+    expect(fleetComplianceReport.description).not.toContain('\\');
+    expect(fleetComplianceReport.resultGuidance).not.toContain('\\');
+  });
+});

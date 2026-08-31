@@ -897,7 +897,148 @@ export const fleetComplianceReport: ReadOnlyTool = {
     'being audited against — the framework, the policy, the customer ' +
     'contract — is not this tool\'s to assert, so it reports the facts and the ' +
     'auditor decides. Any pass/fail reading of this report is the READER\'s ' +
-    'judgement and not the system\'s.',
+    'judgement and not the system\'s. `system` is the system every fact below ' +
+    'came from, repeated on each entry of `unreadable` so that lines collected ' +
+    'from several systems stay attributable one by one. `unreadable` is every ' +
+    'fact this report could NOT establish, each with the `section` it belongs ' +
+    'to and a `detail` stating it in words. IT IS NOT A LIST OF FAULTS — it is ' +
+    'the list of holes in the report, and A HOLE IS NEVER A PASS: an empty ' +
+    '`unreadable` is the narrow claim that every fact below was actually read. ' +
+    'Each of the five sections carries `unavailable`: null where it was read, ' +
+    'and otherwise the reason it could not be, IN WHICH CASE EVERY OTHER FIELD ' +
+    'OF THAT SECTION IS NULL — null there means "not read", never "nothing to ' +
+    'report" and never "nothing wrong". THIS TOOL NEVER FAILS BECAUSE ONE ' +
+    'SUBSYSTEM DID. ' +
+    '`auditing` REPORTS THE TRAIL AND NOT THE SETTING, and the difference ' +
+    'matters here more than anywhere else in this report. `recording` is true ' +
+    'ONLY where the audit trail was read and held at least one entry, which is ' +
+    'proof the system is writing one. IT IS NULL EVERYWHERE ELSE AND NULL IS ' +
+    'NEVER "AUDITING IS OFF": a system nobody touched inside the window records ' +
+    'nothing and is indistinguishable from a system that is not auditing at ' +
+    'all. WHETHER AUDITING IS CONFIGURED ON CANNOT BE ANSWERED BY THIS TOOL — ' +
+    'that setting is `audit.config` on the middleware, and `audit_config` is ' +
+    'the tool that reads it. CALL IT ON A NULL `recording` rather than reading ' +
+    'the null as an answer. TRUE IS ALSO WEAKER THAN IT LOOKS ON THE ' +
+    '`MIDDLEWARE` TRAIL: every tool in this catalog reaches the system through ' +
+    'the middleware API, so a call this assistant makes lands in the trail this ' +
+    'reads, and `MIDDLEWARE` recording is close to self-fulfilling once the ' +
+    'assistant has been used inside the window. The trails that carry evidence ' +
+    'of activity this assistant did not generate are the other ones. ' +
+    '`entries_seen` is how many entries came ' +
+    'back inside the window and `by_service` counts them per trail, busiest ' +
+    'first, so a trail that IS recording can be named — `MIDDLEWARE`, `SMB`, ' +
+    '`SUDO`, `SYSTEM`, or a name a later TrueNAS release adds; `service` is ' +
+    'null on entries whose own trail the system did not name, which is one ' +
+    'count and not a missing one. A SERVICE MISSING FROM `by_service` IS NEVER ' +
+    'EVIDENCE THAT IT IS NOT AUDITED, and what its absence DOES mean depends on ' +
+    '`truncated`. `window_start` is the instant the ' +
+    'trail was read from — the last 24 hours — and `truncated` says the trail ' +
+    'holds more entries in that window than were counted, because the read ' +
+    'stops at a fixed bound. WHILE `truncated` IS TRUE, `entries_seen` AND ' +
+    'EVERY COUNT IN `by_service` ARE FLOORS, and a service missing from it may ' +
+    'simply not have fitted — a busy `MIDDLEWARE` trail can fill the bound on ' +
+    'its own and push every `SMB` entry out of the answer. ONLY WHERE ' +
+    '`truncated` IS FALSE does a missing service mean it recorded nothing ' +
+    'inside the window. Call `audit_log_query` narrowed to one service to ' +
+    'settle it either way. NO AUDIT ENTRY ITSELF IS RETURNED: those name people and ' +
+    'what they did, which is `audit_log_query`\'s answer and not this one. ' +
+    '`certificates` reports expiry. EACH CERTIFICATE IS PLACED BY THE ' +
+    'SYSTEM\'S OWN `expired` VERDICT FIRST AND BY THE COMPUTED DAY COUNT ONLY ' +
+    'WHERE THE SYSTEM GAVE NO VERDICT OR SAID IT HAS NOT EXPIRED — so a ' +
+    'certificate the system calls expired is counted and listed as expired ' +
+    'however many days its date appears to leave, because the two can disagree ' +
+    'and being silent about one the system itself calls expired is the one ' +
+    'answer this section must never give. `reported` is how many certificates ' +
+    'the ' +
+    'system holds; `expired` how many have already lapsed, `expiring_soon` how ' +
+    `many have ${EXPIRY_HORIZON_DAYS} days or fewer left, and ` +
+    '`expiry_unknown` how many reported no expiry date this report could read ' +
+    '— WHICH IS NOT "DOES NOT EXPIRE", every certificate expires, and those are ' +
+    'the ones to look at by hand. The three counts and `reported` are over ' +
+    'EVERY certificate. `expiring_within_days` is the horizon `expiring_soon` ' +
+    'was counted against, so the count is readable against the window it was ' +
+    'taken from; it is fixed rather than an argument, so that one system\'s ' +
+    'report can be compared with another\'s. `entries` lists the certificates ' +
+    'in those three ' +
+    'categories individually and lists no comfortably-valid one, ALREADY-' +
+    'EXPIRED ONES FIRST, THEN THOSE WHOSE EXPIRY COULD NOT BE READ, THEN THOSE ' +
+    'EXPIRING SOON, so that what survives truncation is the worst of what was ' +
+    'found; certificates in the same category keep the order the system listed ' +
+    'them in, which is not an ordering by date. Each entry carries its ' +
+    '`name`, `common_name`, `not_after` exactly as the system formatted it, ' +
+    '`days_until_expiry` — negative where it has already expired, by that many ' +
+    'days — and `expired`, WHICH IS THE SYSTEM\'S OWN VERDICT and can disagree ' +
+    'with the day count beside it, in which case both are worth reading and ' +
+    'neither is corrected here; `expired` is null where the system gave no ' +
+    'verdict, WHICH IS NOT "NOT EXPIRED" — the day count beside it is then the ' +
+    'only reading there is. NO CERTIFICATE OR PRIVATE KEY MATERIAL IS ' +
+    'RETURNED. `directory_service` reports where this system gets its ' +
+    'identities. `service_type` is which of Active Directory, IPA or LDAP is ' +
+    'configured and NULL MEANS NONE IS, which is the ordinary case and is not a ' +
+    'fault; `status` is the live state of the join — `HEALTHY`, `FAULTED`, ' +
+    '`JOINING`, `LEAVING` or `DISABLED` — and `status_message` what the system ' +
+    'said about it. A NULL `status` IS NOT `HEALTHY`: the system reported no ' +
+    'state, and `unreadable` says so. `enabled` is the SETTING rather than the ' +
+    'state, and a service can be enabled and `FAULTED` at once; A NULL ' +
+    '`enabled` IS NOT `false`, and where it is null with `config_error` null ' +
+    'the configuration was read and did not say — again named in `unreadable`. ' +
+    '`domain`, `server_urls` and ' +
+    '`kerberos_realm` name the directory: `domain` is null for LDAP, which is ' +
+    'identified by `server_urls` instead, and `server_urls` is null for Active ' +
+    'Directory and IPA. `server_urls` IS REPORTED WHOLE OR NOT AT ALL — a list ' +
+    'holding an entry this report could not read is null rather than the ' +
+    'readable part of it, since a partial list names a different set of servers ' +
+    'from the one the system holds — and `unreadable` says when that happened, ' +
+    'so a null there can be told from the Active Directory case where the ' +
+    'system carries no such list at all. `credential_type` names HOW the system ' +
+    'binds and NEVER ' +
+    'WITH WHAT — NO PASSWORD, BIND PASSWORD, KEYTAB OR CERTIFICATE PASSES ' +
+    'THROUGH THIS TOOL. `config_error` names what the system said when the ' +
+    'configuration read failed, and while it is non-null `enabled`, `domain`, ' +
+    '`server_urls`, `kerberos_realm` and `credential_type` are all null BECAUSE ' +
+    'THEY COULD NOT BE READ rather than because they are unset — that is a ' +
+    'separate read from the status beside it. `shares` reports WHAT IS EXPOSED ' +
+    'AND OVER WHICH PROTOCOL, NOT WHO MAY REACH IT. `reported` is how many SMB ' +
+    'and NFS shares the system holds, `enabled` how many are switched on, ' +
+    '`disabled` how many are off, and `enablement_unknown` how many reported no ' +
+    'switch this report could read — counted apart from `disabled` because a ' +
+    'share not shown to be off must not be counted as one. `by_protocol` ' +
+    'counts them per protocol. `entries` lists them individually, SWITCHED-ON ' +
+    'SHARES FIRST so that what survives truncation is what is actually exposed, ' +
+    'each with its `protocol`, its `id` — which is unique only WITHIN a ' +
+    'protocol — its `name`, ALWAYS null on an NFS export, its `path`, and ' +
+    '`enabled`. THE HOST RESTRICTIONS, THE SHARE ACL AND THE FILESYSTEM ACL ARE ' +
+    'NOT REPORTED HERE: who may reach one share is `share_access`, called per ' +
+    'share, and nothing in this section is evidence that a share is reachable ' +
+    'by anyone in particular or by everyone. SMB AND NFS ARE LISTED BY TWO ' +
+    'SEPARATE READS AND EITHER CAN FAIL ON ITS OWN, in which case `unavailable` ' +
+    'STAYS NULL — the other protocol was read — and every count and entry here ' +
+    'is over the protocol that answered. `unreadable` names the one that did ' +
+    'not, and while it does, `reported` is a floor rather than a total and a ' +
+    'share not appearing is not evidence it does not exist. `unavailable` is ' +
+    'set only where NEITHER could be listed. iSCSI and NVMe-oF export block ' +
+    'devices rather than filesystem paths and are not counted as shares — see ' +
+    '`iscsi_list` and `nvmeof_list`. `updates` reports whether the system is ' +
+    'patched. `update_available` is true, false, or NULL WHERE THE CHECK DID ' +
+    'NOT COMPLETE, which is not "no update available" — that system may have ' +
+    'gone unchecked for months. `current_version` is what it runs now and comes ' +
+    'from a SEPARATE read, so it survives a failed check; `new_version` and ' +
+    '`train` are null while `update_available` is null, because they come from ' +
+    'the status the check did not produce. `check_error` and `version_error` ' +
+    'name those two failures independently, and `current_version` null with ' +
+    '`version_error` null is a THIRD case — the read worked and named no ' +
+    'version — which `unreadable` states rather than leaving as a bare null. ' +
+    'EVERY COUNT IS COMPUTED OVER ' +
+    'EVERYTHING THE SECTION READ, and only the two lists — ' +
+    '`certificates.entries` and `shares.entries` — are capped, at ' +
+    `${MAX_LISTED} entries each with a ` +
+    '`truncated` flag saying whether anything was left out. So ' +
+    'truncation can drop the line describing a certificate or a share and can ' +
+    'never drop it from the counts. This tool only reads. It does not change a ' +
+    'setting, renew a certificate, join or leave a directory, alter a share, ' +
+    'change what is audited, or install an update. NO field beyond those named ' +
+    'here is returned, whatever a later TrueNAS release adds to any of the five ' +
+    'underlying responses.',
   resultGuidance:
     '`system` is the system every fact below ' +
     'came from, repeated on each entry of `unreadable` so that lines collected ' +

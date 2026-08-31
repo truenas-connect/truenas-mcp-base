@@ -44,8 +44,13 @@ export type ExecutionOutcome =
       /**
        * The tool's {@link Tool.resultGuidance}, present only on the first
        * result this executor returns for it that carries any data. An adapter
-       * renders it alongside the results; absent means it has already been
-       * delivered in this session, or the tool declares none.
+       * renders it alongside the results.
+       *
+       * **Absent has three causes and they are not equivalent.** The tool
+       * declares none; it was already delivered earlier in this session; or
+       * this particular result carried no SUCCESS, in which case it is STILL
+       * OWED and arrives with the next result that does. An adapter must not
+       * read absence as "the caller has it".
        */
       guidance?: string;
     };
