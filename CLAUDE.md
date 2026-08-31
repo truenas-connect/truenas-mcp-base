@@ -1613,6 +1613,16 @@ list has been misread rather than partially read — the same reading
 day shorter would say the window does not apply on that day, which is a claim.
 `[]` stays `[]`: the system reported a list and it names no day.
 
+**"System-local" is itself an unconfirmed reading, and the ticket asking for it
+does not make it a confirmed one.** `begin` and `end` are clock times with no
+zone in them, and the surface states the zone for these no more than it does
+for any other schedule the catalog reports. What is established is the
+negative — nothing in the strings says which zone, so the instant either names
+is not fixed by this read — and the local-time reading is carried as
+`(unconfirmed)`, in `ups_config`'s form, with `system_general_config` named as
+where to confirm it. **A ticket can ask for a sentence and still not supply the
+evidence for it**; state what the read establishes, and mark the rest.
+
 **A middleware field name inherits none of the tool's care, and `enabled` is
 the case to watch.** `enabled: false` on this payload means the priority window
 is not in force — the system still resilvers, at ordinary priority — so the

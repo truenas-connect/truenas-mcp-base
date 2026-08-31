@@ -280,8 +280,7 @@ export const scrubHistory: ReadOnlyTool = {
  * helpers under them — is that family's own (#95), and matching a convention is
  * not the same act as re-siting the code that implements it.
  */
-const WEEKDAY_MIN = 0;
-const WEEKDAY_MAX = 7;
+const WEEKDAY_RANGE = { min: 0, max: 7 } as const;
 
 /**
  * The days a resilver window applies on, all of them or none.
@@ -289,11 +288,10 @@ const WEEKDAY_MAX = 7;
  * All-or-nothing for #93's reason rather than for symmetry with any sibling:
  * this list is read for which days the window is in force, so a list one entry
  * shorter says the window does not apply on that day — a CLAIM, and one made
- * silently. Nulling the whole list refuses it. An entry outside {@link
- * WEEKDAY_MIN}–{@link WEEKDAY_MAX} is not a day this file can name under either
- * numbering, so it is a list this tool has misread rather than a day to report,
- * which is the same reading `numberList` gives an out-of-range cron field in
- * `tasks.ts`.
+ * silently. Nulling the whole list refuses it. An entry outside
+ * {@link WEEKDAY_RANGE} is not a day this file can name under either numbering,
+ * so it is a list this tool has misread rather than a day to report, which is
+ * the same reading `numberList` gives an out-of-range cron field in `tasks.ts`.
  *
  * An EMPTY list is not that answer and is returned as itself: the system
  * reported a list and it names no day.
@@ -303,7 +301,12 @@ function weekdayList(value: unknown): number[] | null {
   const days: number[] = [];
   for (const entry of value) {
     const day = numberOrNull(entry);
-    if (day === null || !Number.isInteger(day) || day < WEEKDAY_MIN || day > WEEKDAY_MAX) {
+    if (
+      day === null ||
+      !Number.isInteger(day) ||
+      day < WEEKDAY_RANGE.min ||
+      day > WEEKDAY_RANGE.max
+    ) {
       return null;
     }
     days.push(day);
@@ -379,9 +382,14 @@ export const poolResilverConfig: ReadOnlyTool = {
     'sentence exists to prevent. ' +
     '`begin` and `end` are the start and end of the window as the system ' +
     'recorded them, passed through exactly as spelled and NOT parsed, ' +
-    'converted or compared here. THEY CARRY NO TIMEZONE AND ARE NOT UTC: they ' +
-    "are the system's own local time, and `system_general_config` reports the " +
-    '`timezone` that local time is in. AN `end` EARLIER THAN `begin` IS A ' +
+    'converted or compared here. THEY CARRY NO TIMEZONE AND MUST NOT BE READ ' +
+    'AS UTC: the strings name a clock time and nothing in them says which zone ' +
+    'that clock is in, so the instant either one names is not established by ' +
+    'this read. (unconfirmed) They are the system\'s own local time, as every ' +
+    'other schedule the catalog reports is, and `system_general_config` is ' +
+    'where that `timezone` is reported — the API states the zone for none of ' +
+    'them, so confirm it there before converting either value or comparing it ' +
+    'against a time from anywhere else. AN `end` EARLIER THAN `begin` IS A ' +
     'WINDOW THAT SPANS MIDNIGHT and is never an empty or a negative one — ' +
     '`begin` 22:00 with `end` 06:00 is eight hours across the night. Each is ' +
     'null where the system reported no value this tool could read; a null is ' +
