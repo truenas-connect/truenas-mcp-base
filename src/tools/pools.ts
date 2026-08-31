@@ -1,6 +1,7 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool } from '@/catalog/tool';
+import { booleanOrNull, numberOrNull, recordOrNull, textOrNull } from '@/tools/common';
 
 /** Pool internals: the vdev tree beneath each pool, the state of every device
  * in it, and the outcome of the last scrub that verified it.
@@ -259,5 +260,197 @@ export const scrubHistory: ReadOnlyTool = {
         errors: scrub?.errors ?? null,
       };
     });
+  },
+};
+
+/**
+ * The days a `weekday` list can name, as numbers.
+ *
+ * The surface declares `weekday?: number[]` and states no numbering for it. Two
+ * numberings are in ordinary use for such a field and THEY AGREE ON EVERY VALUE
+ * BOTH DEFINE: cron's — which this catalog already reads a `dow` field under,
+ * in `tasks.ts` — runs 0 and 7 for Sunday with 1 Monday through 6 Saturday, and
+ * ISO-8601's runs 1 Monday through 7 Sunday with no 0. So a number in this
+ * range names one day whichever of the two the middleware means, and a number
+ * outside it names none under either.
+ *
+ * That agreement is the whole of what is established here, and it is why this
+ * file states the numbering without reaching into the tasks family for its
+ * rendering: the cron vocabulary — `dayName`, `describeSchedule` and the
+ * helpers under them — is that family's own (#95), and matching a convention is
+ * not the same act as re-siting the code that implements it.
+ */
+const WEEKDAY_MIN = 0;
+const WEEKDAY_MAX = 7;
+
+/**
+ * The days a resilver window applies on, all of them or none.
+ *
+ * All-or-nothing for #93's reason rather than for symmetry with any sibling:
+ * this list is read for which days the window is in force, so a list one entry
+ * shorter says the window does not apply on that day — a CLAIM, and one made
+ * silently. Nulling the whole list refuses it. An entry outside {@link
+ * WEEKDAY_MIN}–{@link WEEKDAY_MAX} is not a day this file can name under either
+ * numbering, so it is a list this tool has misread rather than a day to report,
+ * which is the same reading `numberList` gives an out-of-range cron field in
+ * `tasks.ts`.
+ *
+ * An EMPTY list is not that answer and is returned as itself: the system
+ * reported a list and it names no day.
+ */
+function weekdayList(value: unknown): number[] | null {
+  if (!Array.isArray(value)) return null;
+  const days: number[] = [];
+  for (const entry of value) {
+    const day = numberOrNull(entry);
+    if (day === null || !Number.isInteger(day) || day < WEEKDAY_MIN || day > WEEKDAY_MAX) {
+      return null;
+    }
+    days.push(day);
+  }
+  return days;
+}
+
+/**
+ * When ZFS resilvering is given priority over other I/O, which is one
+ * system-wide setting rather than a per-pool one.
+ *
+ * `pool.resilver.config` takes no parameters and answers with one entity, so
+ * there is nothing here to key on a pool — unlike every other tool in this
+ * file, which maps `pool.query` one row at a time. The middleware row `id` is
+ * dropped: there is one such configuration, and an id names nothing outside the
+ * middleware, the same omission `ups_config` and `system_ntp_status` make.
+ *
+ * WHAT `enabled: false` MEANS IS THE WHOLE RISK IN THIS TOOL. It says the
+ * priority window is not in force; it does not say resilvering is off, and a
+ * system reporting it still rebuilds redundancy after a disk is replaced, at
+ * its ordinary priority. A name promising more than the data holds is this
+ * repository's most common review finding — `storage_scrub_history` promising
+ * history one scan record cannot hold is the same shape — and here the field
+ * name is the middleware's, so the description carries the correction rather
+ * than the name.
+ *
+ * EVERY FIELD IS OPTIONAL ON THE DECLARED ENTRY, and that is what the
+ * normalization is for: `enabled` absent is not `enabled: false`, and a window
+ * with no `begin` is not one starting at midnight. Each is read through a guard
+ * and answers null where the system reported no value this file could read,
+ * which keeps "unreported" distinct from "configured off" per field — for
+ * `weekday` that distinction is null against `[]`, and for `enabled` it is null
+ * against `false`.
+ *
+ * WHAT THIS TOOL DELIBERATELY DOES NOT DO:
+ *
+ * - **It does not say whether a resilver is running, ever ran, or how far
+ *   along one is.** That is the measured half of the question and this read is
+ *   the configured half (#133). A device being replaced is visible in
+ *   `storage_pool_topology`, which nests the outgoing and incoming disks
+ *   beneath the member being replaced.
+ * - **It does not parse, compare or convert `begin` and `end`.** They are
+ *   passed through as the system spelled them. A window whose `end` is earlier
+ *   than its `begin` spans midnight and is a real window; anything here that
+ *   subtracted one from the other would have to decide that, and deciding it
+ *   would assert a time format the surface does not state (#96).
+ * - **It does not resolve `enabled: true` beside an empty `weekday`.** Nothing
+ *   on this surface says what the middleware does with a window that names no
+ *   day, so the combination is reported as the combination it is rather than
+ *   smoothed into either reading (#120).
+ * - **It does not change the window.** `pool.resilver.update` is mutating and
+ *   is not in this catalog.
+ */
+export const poolResilverConfig: ReadOnlyTool = {
+  name: 'pool_resilver_config',
+  description:
+    'When ZFS resilvering on this system is given priority over other I/O. A ' +
+    'resilver is what rebuilds redundancy after a disk is replaced or comes ' +
+    'back, and until it finishes the pool is running without the redundancy ' +
+    'it is configured for — so how quickly it finishes is the thing this ' +
+    'setting is about. Inside the configured window resilvering is prioritised ' +
+    'over other I/O and finishes sooner, at the cost of contending with ' +
+    'production work; outside it, the other work is prioritised instead. THIS ' +
+    'IS ONE SYSTEM-WIDE SETTING AND NOT A PER-POOL ONE: it governs every ' +
+    'resilver on the system, and no field below is about any particular pool. ' +
+    '`enabled` is whether that priority window is in force. It is ' +
+    'THREE-VALUED — true, false, or null where the system reported no value ' +
+    'this tool could read — and A NULL IS NOT A FALSE. `enabled: false` MEANS ' +
+    'THE PRIORITY WINDOW IS NOT IN FORCE. IT DOES NOT MEAN RESILVERING IS ' +
+    'DISABLED, and it is NOT evidence that a replaced disk will not be rebuilt: ' +
+    'a system with the window off still resilvers, at its ordinary priority. ' +
+    'Reporting `enabled: false` as "resilvering is off" is the misreading this ' +
+    'sentence exists to prevent. ' +
+    '`begin` and `end` are the start and end of the window as the system ' +
+    'recorded them, passed through exactly as spelled and NOT parsed, ' +
+    'converted or compared here. THEY CARRY NO TIMEZONE AND ARE NOT UTC: they ' +
+    "are the system's own local time, and `system_general_config` reports the " +
+    '`timezone` that local time is in. AN `end` EARLIER THAN `begin` IS A ' +
+    'WINDOW THAT SPANS MIDNIGHT and is never an empty or a negative one — ' +
+    '`begin` 22:00 with `end` 06:00 is eight hours across the night. Each is ' +
+    'null where the system reported no value this tool could read; a null is ' +
+    'not midnight and is not "no restriction", and a null in one end says ' +
+    'nothing about when the other end applies from or to. ' +
+    '`weekday` is the days of the week the window applies on, as NUMBERS the ' +
+    'system sent and not converted to names here. THE API STATES NO NUMBERING ' +
+    'FOR THIS FIELD. What is established is that the two numberings in ' +
+    'ordinary use for a day-of-the-week field agree on every value both ' +
+    'define: cron numbers Sunday as 0 and again as 7 with 1 Monday through 6 ' +
+    'Saturday, ISO-8601 numbers 1 Monday through 7 Sunday and has no 0, so 1 ' +
+    'to 7 name the same days under both. That is the same numbering this ' +
+    'catalog reads a cron day-of-the-week field under, which ' +
+    '`automated_tasks_list` reports as `dow`. Read a number in 0 to 7 as that ' +
+    'day and do not go further than the agreement above. ' +
+    '`weekday` is null where the system reported no list this tool could read ' +
+    '— no such field, a value that is not a list, or a list holding an entry ' +
+    'that is not a whole number from 0 to 7 — AND NOTHING HERE SEPARATES THOSE ' +
+    'CAUSES. A partial list is never returned, because a list one day shorter ' +
+    'would say the window does not apply on that day, which is a claim this ' +
+    'read did not establish. AN EMPTY `weekday` IS A DIFFERENT ANSWER and is ' +
+    'reported as itself: the system sent a list and it names no day. ' +
+    '`enabled: true` BESIDE AN EMPTY `weekday` IS REPORTED AS THAT ' +
+    'COMBINATION AND IS NOT RESOLVED. Nothing on this surface says what the ' +
+    'system does with a window that names no day, so do not report such a ' +
+    'system as one where resilvering is prioritised, and do not report it as ' +
+    'one where the window is off. ' +
+    'THIS IS THE CONFIGURATION AND NOTHING ELSE. It does NOT establish that a ' +
+    'resilver is running, that one ever ran, how far along one is, or how long ' +
+    'one took, and no field above is evidence about any of that. A device ' +
+    'being replaced right now is visible in `storage_pool_topology`, which ' +
+    'lists the outgoing and incoming disks beneath the member being replaced. ' +
+    '`storage_scrub_history` covers the sibling operation and reports scrubs ' +
+    'rather than resilvers — a pool whose most recent scan was a resilver ' +
+    'reports `UNKNOWN` there, which is that tool refusing to read a resilver ' +
+    'as a scrub and is not a report on the resilver. ' +
+    'THIS TOOL ONLY READS. It does not change the window, does not start, ' +
+    'pause or stop a resilver, and does not replace a disk — ' +
+    '`pool.resilver.update` is the mutating counterpart and is not in this ' +
+    'catalog. The middleware row id is not reported: there is one such ' +
+    'configuration, and an id names nothing outside the middleware. NO field ' +
+    'beyond `enabled`, `begin`, `end` and `weekday` is returned, whatever a ' +
+    'later TrueNAS release adds to this payload. A configuration that could ' +
+    'not be read at all is an error naming what the system said, not a result ' +
+    'of nulls.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }) {
+    const config = await firstValueFrom(system.client.api.call('pool.resilver.config'));
+    // Guarded rather than reached into, for the reason `ups_config` gives: a
+    // system answering with something that is not a configuration would
+    // otherwise throw naming a property, and the caller would see the name of a
+    // field rather than the read that failed. Fatal rather than mapped to
+    // nulls, because a result of nulls is indistinguishable from a system that
+    // has configured no window and only one of the two was read.
+    const settings = recordOrNull(config);
+    if (settings === null) {
+      throw new Error('pool.resilver.config did not answer with a resilver configuration');
+    }
+    // Named one at a time rather than trimmed, and read through a guard even
+    // where the client declares the field, which is #91: a declared type is a
+    // claim about what the middleware sends and not the value received. Every
+    // one of these is optional on the declared entry besides.
+    return {
+      enabled: booleanOrNull(settings['enabled']),
+      begin: textOrNull(settings['begin']),
+      end: textOrNull(settings['end']),
+      weekday: weekdayList(settings['weekday']),
+    };
   },
 };
