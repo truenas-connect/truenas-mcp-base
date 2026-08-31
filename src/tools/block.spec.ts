@@ -705,6 +705,18 @@ describe('nvmeof_list', () => {
       });
     });
 
+    it('reports a transport this catalog does not recognise as null', async () => {
+      // The three values are read off the OLDEST supported directory (#101), so
+      // a later TrueNAS can send a fourth. Passing it through would put a word
+      // in a field whose type holds three, and a caller switching on it would
+      // fall through every arm.
+      expect(
+        await onlyPort({
+          ['nvmet.port.query']: [port({ addr_trtype: 'ROCE', addr_adrfam: 'IB' })],
+        }),
+      ).toMatchObject({ transport: null, address_family: null });
+    });
+
     it('reports an FC port as a transport rather than as FC hardware', async () => {
       expect(
         await onlyPort({

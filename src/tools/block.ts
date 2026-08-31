@@ -367,7 +367,10 @@ export const iscsiList: ReadOnlyTool = {
     'system with more than one portal, which address a given target is reachable ' +
     'at is not answered here. `id` is the portal\'s numeric identity, `tag` the ' +
     'portal group number the system knows it by, and `comment` the label it was ' +
-    'given, null where it has none. `listen` is where that portal accepts ' +
+    'given; EVERY ONE OF THE THREE IS NULL WHERE THE SYSTEM REPORTED NO ' +
+    'READABLE VALUE, which for `comment` is also a portal that was never ' +
+    'labelled, and a portal with a null `id` or `tag` is one this tool could ' +
+    'not identify rather than one that is not there. `listen` is where that portal accepts ' +
     'connections, one entry per address, with `ip` the address and `port` the ' +
     'TCP port; either is null where the system reported no readable value. A ' +
     'LISTEN ADDRESS OF `0.0.0.0` IS NOT AN ADDRESS: it is the wildcard, and ' +
@@ -630,6 +633,30 @@ function serviceId(value: unknown): string | number | null {
   return typeof value === 'number' ? numberOrNull(value) : textOrNull(value);
 }
 
+/** The transports a port can be carried over, as the pinned surface declares them. */
+const TRANSPORTS = ['TCP', 'RDMA', 'FC'] as const;
+
+/** The address families a port's address can be in, on the same surface. */
+const ADDRESS_FAMILIES = ['IPV4', 'IPV6', 'FC'] as const;
+
+/**
+ * One member of a declared string union, or null for anything else.
+ *
+ * The union is read rather than passed through, which is #101's rule about a
+ * mapping keyed off `ApiSurface`: that surface is the OLDEST supported TrueNAS
+ * directory, so a later release can send a transport these three do not name
+ * with nothing failing to compile. Passing the value through would put a fourth
+ * value in a field whose type says it holds one of three, and a caller
+ * switching on it would fall through every arm. Null is the honest answer, and
+ * the description says it covers a value this catalog does not recognise as
+ * well as one the system did not report.
+ */
+function oneOf<T extends string>(allowed: readonly T[], value: unknown): T | null {
+  return typeof value === 'string' && (allowed as readonly string[]).includes(value)
+    ? (value as T)
+    : null;
+}
+
 /**
  * One NVMe-oF port: an address the system accepts NVMe-oF connections on, and
  * the subsystems published through it.
@@ -663,8 +690,8 @@ async function readPorts(system: SystemHandle): Promise<Omit<Port, 'subsystems'>
       // does not follow it — the same pairing a namespace's `nsid` and `id`
       // have above.
       index: numberOrNull(port.index),
-      transport: port.addr_trtype ?? null,
-      address_family: port.addr_adrfam ?? null,
+      transport: oneOf(TRANSPORTS, port.addr_trtype),
+      address_family: oneOf(ADDRESS_FAMILIES, port.addr_adrfam),
       address: textOrNull(port.addr_traddr),
       service_id: serviceId(port.addr_trsvcid),
       enabled: reported ? booleanOrNull(port.enabled) : null,
@@ -853,7 +880,12 @@ export const nvmeofList: ReadOnlyTool = {
     'different numbers, and neither follows the other. `transport` is `TCP`, ' +
     '`RDMA` or `FC` (the payload\'s `addr_trtype`), `address_family` `IPV4`, ' +
     '`IPV6` or `FC` (`addr_adrfam`), and `address` the address it listens on ' +
-    '(`addr_traddr`). `service_id` is what it answers on (`addr_trsvcid`): a ' +
+    '(`addr_traddr`). EITHER OF THE FIRST TWO IS NULL WHERE THE SYSTEM ' +
+    'REPORTED NO VALUE OR ONE THIS CATALOG DOES NOT RECOGNISE, and those are ' +
+    'not distinguished: the three values each can take are read off the oldest ' +
+    'supported TrueNAS, so a later release adding a fourth reports null here ' +
+    'rather than a word a caller cannot switch on — and a null transport is ' +
+    'never a port carried over nothing. `service_id` is what it answers on (`addr_trsvcid`): a ' +
     'TCP port number on a TCP port and something else on an FC one, REPORTED ' +
     'AS THE SYSTEM SPELLED IT — as a number or as text — and never converted ' +
     'between the two, because the payload declares both and fixing one would ' +
