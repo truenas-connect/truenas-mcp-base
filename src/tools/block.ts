@@ -874,13 +874,17 @@ export const nvmeofList: ReadOnlyTool = {
     'system carries and which say nothing about where it listens. ' +
     '`subsystems` on a port names which subsystems are published through it, ' +
     'each as the `subsystem_id` and `subsystem` name the join\'s own record ' +
-    'spelled; `subsystem_id` is joinable against the `id` of an entry in THIS ' +
-    'RESULT\'S TOP-LEVEL `subsystems` LIST, which is where the NQN an initiator ' +
-    'connects to is reported rather than repeated here. An ' +
-    'entry whose `subsystem_id` is null is a publication naming a subsystem ' +
-    'this tool could not identify: it is kept, because dropping it would say ' +
-    'the port publishes less than it does, and it cannot be joined against the ' +
-    'listing. AN EMPTY `subsystems` AND A NULL ONE ARE DIFFERENT ANSWERS: empty ' +
+    'spelled. THEY ARE WHAT THE PUBLICATION CLAIMED RATHER THAN A LOOKUP: an ' +
+    'entry is reported here whether or not its `subsystem_id` answers to an ' +
+    'entry in this result\'s top-level `subsystems` list, so a caller joining ' +
+    'the two can find nothing under it — the reads are separate round trips, ' +
+    'and a subsystem deleted between them leaves a publication naming it. Such ' +
+    'an entry is KEPT, because dropping it would say the port publishes less ' +
+    'than it does. An entry whose `subsystem_id` is null is a publication ' +
+    'naming a subsystem this tool could not identify at all, and is kept for ' +
+    'the same reason. WHERE THE JOIN DOES LAND, the top-level entry is where ' +
+    'the NQN an initiator connects to is reported, rather than repeated here. ' +
+    'AN EMPTY `subsystems` AND A NULL ONE ARE DIFFERENT ANSWERS: empty ' +
     'means the publications were read and none names this port, so nothing is ' +
     'reachable through it; null means they could not be read at all, or that ' +
     'this port carries no `id` for a publication to be joined on. AN EMPTY ' +
@@ -911,7 +915,9 @@ export const nvmeofList: ReadOnlyTool = {
     'and null where it named none. WHILE IT IS NOT EMPTY THE PER-PORT ' +
     '`subsystems` LISTS ARE INCOMPLETE, and an empty one there is not a port ' +
     'publishing nothing. Where the port read itself failed there is nothing to ' +
-    'attribute against and every publication lands in it. This tool reads only ' +
+    'attribute against and every publication lands in it; where the ' +
+    'PUBLICATION read failed it is EMPTY, because nothing was read to place, ' +
+    'and every port\'s `subsystems` is null instead. This tool reads only ' +
     'NVMe-oF: iSCSI targets are `iscsi_list`, Fibre Channel host adapters and ' +
     'ports are `fc_list`, and SMB or NFS shares are ' +
     '`shares_list`. WHICH PORTS A SUBSYSTEM IS PUBLISHED ON IS READ FROM ' +

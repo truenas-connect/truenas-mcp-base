@@ -301,7 +301,7 @@ Two things that rule does not decide on its own:
   **The trigger can also be met by GROWING tools rather than by adding one, and
   then there is no new tool whose block is the one to move.** #138 grew two of `block.ts`'s three
   tools past the three-line margin `block.spec.ts` had recorded for itself, so
-  `iscsi_list` — the largest block the ticket touched — took `iscsi-list.spec.ts`
+  `iscsi_list` — one of the two blocks it had open — took `iscsi-list.spec.ts`
   and the other two stayed. What decides which block moves is that it is one the
   ticket already has open and that moving it brings the file back under 1,500:
   moving a block the ticket did not touch is the re-homing #121 rules out, and

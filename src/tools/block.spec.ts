@@ -734,6 +734,19 @@ describe('nvmeof_list', () => {
       ]);
     });
 
+    it('reports a publication naming a subsystem this listing does not report', async () => {
+      // The two are separate round trips, so a subsystem deleted between them
+      // leaves a publication naming it. It is kept under its port — dropping it
+      // would say the port publishes less than it does — and the description
+      // says outright that these fields are the publication's claim rather
+      // than a lookup, so a caller joining them can find nothing.
+      const only = await onlyPort({
+        ['nvmet.port_subsys.query']: [portJoin({ subsys: subsystem({ id: 9, name: 'gone' }) })],
+      });
+      expect(only['subsystems']).toEqual([{ subsystem_id: 9, subsystem: 'gone' }]);
+      expect(nvmeofList.description).toContain('RATHER THAN A LOOKUP');
+    });
+
     it('sets aside a publication naming a port this listing does not report', async () => {
       const listing = await listed({
         ['nvmet.port_subsys.query']: [
@@ -820,8 +833,8 @@ describe('nvmeof_list', () => {
  * exception is checked each time this file grows, and the margin it recorded —
  * three lines — is what #138 spent. That ticket grew `iscsi_list` and
  * `nvmeof_list`, so `iscsi_list` took the spec named for it and this block did
- * not move: the trigger is a file size, and moving the largest block a ticket
- * touched brought this one back under it. A tool added to this family now
+ * not move: the trigger is a file size, and moving either of the two blocks
+ * that ticket had open brought this one back under it. A tool added to this family now
  * measures again against what is left rather than against the old number.
  */
 describe('fc_list', () => {

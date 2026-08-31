@@ -7,9 +7,10 @@ import { iscsiList } from '@/tools/index';
  * That file was 1,497 lines with a stated margin of three, and #138 grows two
  * of its three tools — so the merged file would be well over the 1,500-line
  * trigger and the split is by tool, this one taking the spec named for it.
- * `nvmeof_list` and `fc_list` stay in the module's own spec: re-homing tests a
- * ticket did not have to touch is a separate change (#121), and a part-split is
- * not a half-finished state to tidy.
+ * `nvmeof_list` and `fc_list` stay in the module's own spec: moving one block is
+ * what the file size asked for, moving a block it did not ask for is the
+ * re-homing #121 rules out, and a part-split is not a half-finished state to
+ * tidy.
  */
 describe('iscsi_list', () => {
   /**
