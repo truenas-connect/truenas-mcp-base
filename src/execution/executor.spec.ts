@@ -581,3 +581,87 @@ describe('ToolExecutor — audit', () => {
     ]);
   });
 });
+
+describe('ToolExecutor — result guidance', () => {
+  /**
+   * A read-only tool whose handler succeeds or fails per system, so a test can
+   * produce a result carrying no data without reaching for the role gate —
+   * which would report a denial rather than a handler failure.
+   */
+  function guidedSetup(options: { guidance?: string; failOn?: string[] } = {}) {
+    const registry = new SystemRegistry();
+    for (const name of ['a', 'b']) {
+      registry.add({ name, client: {} as TrueNasApiClient } as SystemHandle);
+    }
+    const failOn = options.failOn ?? [];
+    const tool: ReadOnlyTool = {
+      name: 'guided',
+      description: 'selection text',
+      ...(options.guidance !== undefined ? { resultGuidance: options.guidance } : {}),
+      inputSchema: { type: 'object', properties: {} },
+      requiredRole: Role.ReadOnly,
+      mutating: false,
+      handler: async ({ system }) => {
+        if (failOn.includes(system.name)) {
+          throw new Error(`down: ${system.name}`);
+        }
+        return `${system.name}-ok`;
+      },
+    };
+    const catalog = new ToolCatalog();
+    catalog.register(tool);
+    const build = (): ToolExecutor =>
+      new ToolExecutor({ catalog, registry, confirmations: new ConfirmationService() });
+    return { build, executor: build() };
+  }
+
+  /** Narrowing helper: every outcome below is a RESULTS one. */
+  async function run(executor: ToolExecutor): Promise<{ guidance?: string }> {
+    const outcome = await executor.execute('guided', { systems: 'all' });
+    if (outcome.type !== 'RESULTS') {
+      throw new Error('expected RESULTS');
+    }
+    return outcome;
+  }
+
+  it('attaches the guidance to the first result that carries data', async () => {
+    const { executor } = guidedSetup({ guidance: 'read nulls as not-read' });
+    expect((await run(executor)).guidance).toBe('read nulls as not-read');
+  });
+
+  it('does not repeat it on later calls in the same session', async () => {
+    const { executor } = guidedSetup({ guidance: 'read nulls as not-read' });
+    await run(executor);
+    expect((await run(executor)).guidance).toBeUndefined();
+    expect((await run(executor)).guidance).toBeUndefined();
+  });
+
+  it('omits it entirely for a tool that declares none', async () => {
+    const { executor } = guidedSetup();
+    expect((await run(executor)).guidance).toBeUndefined();
+  });
+
+  it('still attaches it when only some systems answered', async () => {
+    const { executor } = guidedSetup({ guidance: 'partial', failOn: ['b'] });
+    expect((await run(executor)).guidance).toBe('partial');
+  });
+
+  it('withholds it from an all-error result and keeps it for the next success', async () => {
+    // The point of the SUCCESS requirement: a result with nothing to read must
+    // not spend the one delivery, or every later call that does carry data is
+    // unguided.
+    const failing = guidedSetup({ guidance: 'kept', failOn: ['a', 'b'] });
+    expect((await run(failing.executor)).guidance).toBeUndefined();
+
+    const healthy = guidedSetup({ guidance: 'kept' });
+    expect((await run(healthy.executor)).guidance).toBe('kept');
+  });
+
+  it('is per executor, so a new session receives it again', async () => {
+    const { build } = guidedSetup({ guidance: 'fresh' });
+    const first = build();
+    await run(first);
+    expect((await run(first)).guidance).toBeUndefined();
+    expect((await run(build())).guidance).toBe('fresh');
+  });
+});

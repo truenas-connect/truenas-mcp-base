@@ -115,3 +115,32 @@ describe('ToolCatalog', () => {
     expect(tool.inputSchema['properties']).toEqual({});
   });
 });
+
+describe('ToolCatalog — result guidance is never advertised', () => {
+  /**
+   * The load-bearing property of the split. `resultGuidance` exists because
+   * `tools/list` is rendered into every host's context on every session; a
+   * field that leaked into the advertised shape would restore exactly the cost
+   * it was cut to remove, and would do it silently — every test above would
+   * still pass. `list()` maps named fields, so this holds structurally; it is
+   * pinned because the failure is invisible rather than because the mapping
+   * looks fragile.
+   */
+  it('omits it from the advertised tool, which still carries the description', () => {
+    const catalog = new ToolCatalog();
+    catalog.register({
+      name: 'guided',
+      description: 'selection text',
+      resultGuidance: 'interpretation text',
+      inputSchema: { type: 'object', properties: {} },
+      requiredRole: Role.ReadOnly,
+      mutating: false,
+      handler: async () => null,
+    } satisfies ReadOnlyTool);
+
+    const [advertised] = catalog.list(Role.Full);
+    expect(advertised?.description).toBe('selection text');
+    expect(advertised).not.toHaveProperty('resultGuidance');
+    expect(JSON.stringify(advertised)).not.toContain('interpretation text');
+  });
+});

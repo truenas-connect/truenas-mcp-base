@@ -37,7 +37,18 @@ export type ExecutionOutcome =
       key: string;
       message: string;
     }
-  | { type: 'RESULTS'; tool: string; results: SystemResult<unknown>[] };
+  | {
+      type: 'RESULTS';
+      tool: string;
+      results: SystemResult<unknown>[];
+      /**
+       * The tool's {@link Tool.resultGuidance}, present only on the first
+       * result this executor returns for it that carries any data. An adapter
+       * renders it alongside the results; absent means it has already been
+       * delivered in this session, or the tool declares none.
+       */
+      guidance?: string;
+    };
 
 export interface ToolExecutorOptions {
   catalog: ToolCatalog;
@@ -69,6 +80,16 @@ export class ToolExecutor {
   private readonly roleMapper: RoleMapper;
   private readonly now: () => number;
   private readonly onAuditError: (error: unknown, event: AuditEvent) => void;
+  /**
+   * Tools whose {@link Tool.resultGuidance} has already been delivered. Held
+   * on the instance, which is what makes "once per session" true: both
+   * deployment modes build one executor per session, the same assumption
+   * {@link ConfirmationService} already makes about pending tokens. A
+   * deployment that shared one executor across sessions would leak this — and
+   * would have to re-scope the confirmation store in the same change, so the
+   * two move together or neither does.
+   */
+  private readonly guidanceDelivered = new Set<string>();
 
   constructor(options: ToolExecutorOptions) {
     this.catalog = options.catalog;
@@ -124,7 +145,7 @@ export class ToolExecutor {
       if (fanned.length > 0) {
         this.record(tool, 'read', rawToolArgs, fanned);
       }
-      return { type: 'RESULTS', tool: tool.name, results };
+      return this.results(tool, results);
     }
 
     // Mutating: the role gate is all-or-nothing — the plan the user approves
@@ -173,7 +194,7 @@ export class ToolExecutor {
       // returning a confirmable PLAN would let the LLM mint a token for an
       // execution the core already knows cannot proceed as planned.
       if (steps.every((step) => step.status === 'ERROR')) {
-        return { type: 'RESULTS', tool: tool.name, results: steps };
+        return this.results(tool, steps);
       }
       const planned = steps
         .filter((step) => step.status === 'SUCCESS')
@@ -226,7 +247,33 @@ export class ToolExecutor {
     }
     const results = await fanOut(targets, (system) => tool.execute({ system }, args));
     this.record(tool, 'execute', args, results);
-    return { type: 'RESULTS', tool: tool.name, results };
+    return this.results(tool, results);
+  }
+
+  /**
+   * Builds a RESULTS outcome, attaching the tool's result guidance the first
+   * time in this session that it answers with any data.
+   *
+   * **At least one SUCCESS is required, and that is the whole rule.** Guidance
+   * says how to read values; a result carrying none has nothing to read, so
+   * spending the one delivery on it would leave the caller unguided for every
+   * later call that does carry data. It also means a plan that failed on every
+   * system — returned as RESULTS above rather than as an approvable plan —
+   * never consumes it, without that path needing to know this exists.
+   *
+   * Marked delivered only when it is actually attached, so a tool that never
+   * succeeds keeps its guidance for the call that eventually does.
+   */
+  private results(tool: Tool, results: SystemResult<unknown>[]): ExecutionOutcome {
+    const outcome = { type: 'RESULTS' as const, tool: tool.name, results };
+    if (tool.resultGuidance === undefined || this.guidanceDelivered.has(tool.name)) {
+      return outcome;
+    }
+    if (!results.some((result) => result.status === 'SUCCESS')) {
+      return outcome;
+    }
+    this.guidanceDelivered.add(tool.name);
+    return { ...outcome, guidance: tool.resultGuidance };
   }
 
   /** Splits targets into role-satisfying systems and structured denials. */
