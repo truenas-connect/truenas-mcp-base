@@ -1334,6 +1334,54 @@ forwarded, so the fact replaces it; here the raw field is safe to report and is
 the evidence for the companion's reading. Add the reading, keep the field, and
 say in the description which combination means what.
 
+### A read fails the tool only where the others describe its subject (#135)
+
+`iscsi_list` and `nvmeof_list` each let ONE read fail the whole tool —
+`iscsi.target.query` and `nvmet.subsys.query` — and catch the rest into a
+`failures` list. `fc_list` catches all three of its reads and has no primary one.
+That is not the new tool being more careful; it is the same test answered
+differently by the subject.
+
+**Ask what the other reads are ABOUT.** An extent and a session are both facts
+about a target, so a listing with no targets has nothing for either to describe
+and returning it would be returning a shape with nowhere to put anything. An FC
+host adapter, an FC port and a port's link state are three facts about a
+protocol rather than three parts of one entity: a system whose `fcport.query`
+failed still has adapters worth reporting, and its status rows are still worth
+reporting under `unmatched_status`. So no read there is entitled to fail the
+tool, and the acceptance criterion that a system without the hardware answers
+cleanly falls out of that rather than needing a check of its own.
+
+**A `supported` field is a claim, and this tool does not make one.**
+`nvmeof_list` reports `supported: false` off an absent-method rejection, which
+is the strongest thing available to it. `fc.capable` — declared on the pinned
+surface, `params: []`, `response: boolean` — would be a stronger and simpler
+answer for FC, and it is NOT read here: #135's scope names three methods and a
+fourth read is a decision a ticket should make deliberately. What the tool does
+instead is refuse to imply one: its description says outright that the catalog
+cannot say whether a system has FC hardware and that empty `hosts` and `ports`
+do not distinguish absent hardware from unconfigured hardware. **Where a
+question the API can answer is out of scope, say the catalog cannot answer it —
+never let an empty list imply the answer.**
+
+### An unconfirmed allowlist can reach the JOIN, not just the field names (#135)
+
+`fcport.status` answers `unknown[]` — no declared row shape at all — so its four
+reported fields are #98's considered guess, with `unreported_fields` built from
+the keys that produced a value. What is new is that the guess extends to the key
+the rows are ATTRIBUTED on: `port` is the only field the status rows and
+`fcport.query` plausibly share, and if that is wrong nothing joins.
+
+**Make a wrong join visible in the shape rather than in the field.** Every
+status row that names no listed port goes to `unmatched_status` rather than
+being dropped, so a join key that does not hold produces empty per-port `status`
+lists beside a full `unmatched_status` — which reads as "this tool could not
+place these" and not as "these ports report nothing about their links". Dropping
+them, or filing them under a port anyway, both produce an answer that looks
+correct and is not. This is `attribute`'s reason in `nvmeof_list` one level up:
+there the unconfirmed part is whether an id answers to a listed subsystem, here
+it is whether the key exists at all.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

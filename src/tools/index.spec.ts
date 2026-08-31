@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the fifty-eight sketch tools', () => {
+  it('registers the fifty-nine sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -40,6 +40,7 @@ describe('createDefaultCatalog', () => {
       'nfs_clients',
       'iscsi_list',
       'nvmeof_list',
+      'fc_list',
       'users_list',
       'directory_services_status',
       'privileges_list',
@@ -354,5 +355,9 @@ describe('createDefaultCatalog', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain(
       'privileges_list',
     );
+  });
+
+  it('advertises fc_list to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).toContain('fc_list');
   });
 });

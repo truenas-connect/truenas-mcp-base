@@ -113,6 +113,7 @@ export {
   nfsClients,
   iscsiList,
   nvmeofList,
+  fcList,
   usersList,
   directoryServicesStatus,
   privilegesList,

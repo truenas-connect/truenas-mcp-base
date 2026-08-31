@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { failingSystem } from '@/testing/fake-systems';
-import { iscsiList, nvmeofList } from '@/tools/index';
+import { fcList, iscsiList, nvmeofList } from '@/tools/index';
 
 describe('iscsi_list', () => {
   /**
@@ -1043,5 +1043,410 @@ describe('nvmeof_list', () => {
       'nvmet.host_subsys.query',
     ]);
     await listing;
+  });
+});
+
+/**
+ * Here rather than in a spec of its own, under #87's default: the split
+ * exception is checked and was not met. `block.spec.ts` was 1,047 lines and this
+ * block is around 400, so the merged file is about 1,446 — short of the
+ * 1,500-line trigger, which is #97's case rather than #121's.
+ */
+describe('fc_list', () => {
+  /**
+   * A host adapter as `fc.fc_host.query` reports one. `npiv` is optional on the
+   * declared entity and is present here; the cases about it absent build a row
+   * without it rather than overriding it to undefined, since the tool reads
+   * whether the KEY is there.
+   */
+  const host = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    alias: 'fc0',
+    wwpn: '0x21000024ff0a1b2c',
+    wwpn_b: '0x21000024ff0a1b2d',
+    npiv: 2,
+    ...over,
+  });
+
+  /**
+   * A port as `fcport.query` reports one. `target` is an open record on the
+   * declared entity and carries more than the id this tool reduces it to, which
+   * is what the reduction has to drop.
+   */
+  const port = (over: Record<string, unknown> = {}) => ({
+    id: 3,
+    port: 'fc0',
+    wwpn: '0x21000024ff0a1b2c',
+    wwpn_b: '0x21000024ff0a1b2d',
+    target: { id: 11, name: 'tgt0', alias: 'VMware datastore', mode: 'FC' },
+    ...over,
+  });
+
+  /**
+   * A status row as `fcport.status` might report one. Every key here is a guess
+   * — the payload is an open record the middleware declares nothing about — so
+   * `extra` stands for the keys a real system carries that the allowlist does
+   * not name, which is what `unreported_fields` is for.
+   */
+  const status = (over: Record<string, unknown> = {}) => ({
+    port: 'fc0',
+    port_type: 'NPort (fabric via point-to-point)',
+    port_state: 'Online',
+    speed: '16 Gbit',
+    ...over,
+  });
+
+  type Listing = {
+    hosts: Record<string, unknown>[] | null;
+    ports: Record<string, unknown>[] | null;
+    failures: Record<string, unknown>[];
+    unmatched_status: Record<string, unknown>[];
+  };
+
+  const listed = async (
+    rows: Partial<Record<string, unknown>> = {},
+    failures: Partial<Record<string, unknown>> = {},
+  ): Promise<Listing> => {
+    const { ctx } = failingSystem(
+      {
+        ['fc.fc_host.query']: [host()],
+        ['fcport.query']: [port()],
+        ['fcport.status']: [status()],
+        ...rows,
+      },
+      failures,
+    );
+    return (await fcList.handler(ctx, {})) as Listing;
+  };
+
+  /** The single host of a listing, for the cases about one adapter's fields. */
+  const onlyHost = async (over: Record<string, unknown> = {}) => {
+    const listing = await listed({ ['fc.fc_host.query']: [host(over)] });
+    return (listing.hosts ?? [])[0];
+  };
+
+  /** The single port of a listing, for the cases about one port's fields. */
+  const onlyPort = async (
+    over: Record<string, unknown> = {},
+    rows: Partial<Record<string, unknown>> = {},
+  ) => {
+    const listing = await listed({ ['fcport.query']: [port(over)], ...rows });
+    return (listing.ports ?? [])[0];
+  };
+
+  /** The single status row attributed to the single port. */
+  const onlyStatus = async (over: Record<string, unknown> = {}) => {
+    const listing = await listed({ ['fcport.status']: [status(over)] });
+    return ((listing.ports ?? [])[0]['status'] as Record<string, unknown>[])[0];
+  };
+
+  it('is advertised as read-only and non-mutating', () => {
+    expect(fcList.mutating).toBe(false);
+    expect(fcList.name).toBe('fc_list');
+  });
+
+  it('reads the three FC methods and nothing else', async () => {
+    const { ctx, query, call } = failingSystem({
+      ['fc.fc_host.query']: [host()],
+      ['fcport.query']: [port()],
+      ['fcport.status']: [status()],
+    });
+    await fcList.handler(ctx, {});
+    expect(query.mock.calls.map(([method]) => method)).toEqual([
+      'fc.fc_host.query',
+      'fcport.query',
+    ]);
+    expect(call.mock.calls.map(([method]) => method)).toEqual(['fcport.status']);
+  });
+
+  describe('host adapters', () => {
+    it('reports the adapter and both controllers’ WWPNs', async () => {
+      expect(await onlyHost()).toEqual({
+        id: 1,
+        alias: 'fc0',
+        wwpn: '0x21000024ff0a1b2c',
+        wwpn_b: '0x21000024ff0a1b2d',
+        npiv: 2,
+        npiv_reported: true,
+      });
+    });
+
+    it('reports a single-controller appliance’s absent peer WWPN as null', async () => {
+      expect((await onlyHost({ wwpn_b: null }))['wwpn_b']).toBeNull();
+    });
+
+    it('reports an empty alias as no value rather than as a name', async () => {
+      expect((await onlyHost({ alias: '' }))['alias']).toBeNull();
+    });
+
+    it('reports an id that did not read as a number as null', async () => {
+      expect((await onlyHost({ id: 'first' }))['id']).toBeNull();
+    });
+
+    // The companion field #134 established over the same `field?: T` signature:
+    // one null, two causes, and only this separates them.
+    it('reports npiv_reported false where the system omitted the field', async () => {
+      const { ctx } = failingSystem({
+        ['fc.fc_host.query']: [{ id: 1, alias: 'fc0', wwpn: null, wwpn_b: null }],
+        ['fcport.query']: [],
+        ['fcport.status']: [],
+      });
+      const listing = (await fcList.handler(ctx, {})) as Listing;
+      expect((listing.hosts ?? [])[0]).toMatchObject({ npiv: null, npiv_reported: false });
+    });
+
+    it('reports npiv_reported true beside a null npiv where the value did not read', async () => {
+      expect(await onlyHost({ npiv: 'two' })).toMatchObject({
+        npiv: null,
+        npiv_reported: true,
+      });
+    });
+
+    it('reports a zero npiv as a count rather than as an absence', async () => {
+      expect(await onlyHost({ npiv: 0 })).toMatchObject({ npiv: 0, npiv_reported: true });
+    });
+
+    // `Object.hasOwn` rather than `in`, which walks the prototype (#101). Only
+    // the flag is asserted: reading `host.npiv` walks the chain like any
+    // property access, so an inherited key still produces a value — what must
+    // not happen is that value being ADVERTISED as one the system reported.
+    it('does not read an inherited key as a reported field', async () => {
+      const inherited = Object.create({ npiv: 4 }) as Record<string, unknown>;
+      Object.assign(inherited, { id: 1, alias: 'fc0', wwpn: null, wwpn_b: null });
+      const { ctx } = failingSystem({
+        ['fc.fc_host.query']: [inherited],
+        ['fcport.query']: [],
+        ['fcport.status']: [],
+      });
+      const listing = (await fcList.handler(ctx, {})) as Listing;
+      expect((listing.hosts ?? [])[0]['npiv_reported']).toBe(false);
+    });
+  });
+
+  describe('ports and the target they are mapped to', () => {
+    it('reduces the target record to its id and drops the rest of it', async () => {
+      expect(await onlyPort()).toEqual({
+        id: 3,
+        port: 'fc0',
+        wwpn: '0x21000024ff0a1b2c',
+        wwpn_b: '0x21000024ff0a1b2d',
+        target_mapped: true,
+        target_id: 11,
+        status: [
+          {
+            port: 'fc0',
+            port_type: 'NPort (fabric via point-to-point)',
+            port_state: 'Online',
+            speed: '16 Gbit',
+            unreported_fields: [],
+          },
+        ],
+      });
+    });
+
+    it('reports a port mapped to no target as target_mapped false', async () => {
+      expect(await onlyPort({ target: null })).toMatchObject({
+        target_mapped: false,
+        target_id: null,
+      });
+    });
+
+    it('separates an unreadable target record from a port mapped to nothing', async () => {
+      expect(await onlyPort({ target: 'tgt0' })).toMatchObject({
+        target_mapped: null,
+        target_id: null,
+      });
+    });
+
+    it('does not read a list as a target record', async () => {
+      expect(await onlyPort({ target: [{ id: 11 }] })).toMatchObject({
+        target_mapped: null,
+        target_id: null,
+      });
+    });
+
+    it('reports a mapping whose target carried no readable id as mapped anyway', async () => {
+      expect(await onlyPort({ target: { name: 'tgt0' } })).toMatchObject({
+        target_mapped: true,
+        target_id: null,
+      });
+    });
+
+    it('reports a port name the system did not send as null', async () => {
+      expect((await onlyPort({ port: '' }))['port']).toBeNull();
+    });
+  });
+
+  describe('the unconfirmed status allowlist', () => {
+    it('names every key a row carried whose value it does not report', async () => {
+      expect((await onlyStatus({ physical_port_state: 'Online', node_name: '0x2000' }))[
+        'unreported_fields'
+      ]).toEqual(['node_name', 'physical_port_state']);
+    });
+
+    // The likelier failure of an unconfirmed allowlist is a right key over an
+    // unexpected value type, and a list built from the ALLOWLIST would hide it:
+    // it would answer "every key is reported" beside a null field.
+    it('names a key whose value the guard rejected, not only one nobody looked for', async () => {
+      const row = await onlyStatus({ speed: 16 });
+      expect(row['speed']).toBeNull();
+      expect(row['unreported_fields']).toEqual(['speed']);
+    });
+
+    it('reports an empty unreported_fields where every key it carried is reported', async () => {
+      expect((await onlyStatus())['unreported_fields']).toEqual([]);
+    });
+
+    it('sorts the names so two systems reporting the same keys answer alike', async () => {
+      expect((await onlyStatus({ zeta: 1, alpha: 2 }))['unreported_fields']).toEqual([
+        'alpha',
+        'zeta',
+      ]);
+    });
+
+    it('keeps an entry that was not a record at all, as a row of nulls', async () => {
+      const listing = await listed({ ['fcport.status']: ['Online'] });
+      expect(listing.unmatched_status).toEqual([
+        {
+          port: null,
+          port_type: null,
+          port_state: null,
+          speed: null,
+          unreported_fields: null,
+        },
+      ]);
+    });
+
+    it('tells a non-record entry from a record that named no port', async () => {
+      const listing = await listed({ ['fcport.status']: [{ port_state: 'Online' }] });
+      expect(listing.unmatched_status).toEqual([
+        {
+          port: null,
+          port_type: null,
+          port_state: 'Online',
+          speed: null,
+          unreported_fields: [],
+        },
+      ]);
+    });
+  });
+
+  describe('attributing a status row to a port', () => {
+    it('files every row naming one port under it', async () => {
+      const listing = await listed({
+        ['fcport.status']: [status(), status({ port_state: 'Linkdown' })],
+      });
+      const rows = (listing.ports ?? [])[0]['status'] as Record<string, unknown>[];
+      expect(rows.map((row) => row['port_state'])).toEqual(['Online', 'Linkdown']);
+      expect(listing.unmatched_status).toEqual([]);
+    });
+
+    it('sets aside a row naming a port no listed port answers to', async () => {
+      const listing = await listed({ ['fcport.status']: [status({ port: 'fc9' })] });
+      expect((listing.ports ?? [])[0]['status']).toEqual([]);
+      expect(listing.unmatched_status).toHaveLength(1);
+      expect(listing.unmatched_status[0]['port']).toBe('fc9');
+    });
+
+    it('reports an empty status where the read succeeded and named no port here', async () => {
+      const listing = await listed({ ['fcport.status']: [] });
+      expect((listing.ports ?? [])[0]['status']).toEqual([]);
+      expect(listing.failures).toEqual([]);
+    });
+
+    it('reports a null status for a port the system did not name', async () => {
+      expect((await onlyPort({ port: '' }))['status']).toBeNull();
+    });
+
+    it('sets aside every row where the port read failed', async () => {
+      const listing = await listed({}, { ['fcport.query']: new Error('down') });
+      expect(listing.ports).toBeNull();
+      expect(listing.unmatched_status).toHaveLength(1);
+    });
+  });
+
+  describe('a read that failed', () => {
+    it('names the host read and still answers the other two', async () => {
+      const listing = await listed({}, { ['fc.fc_host.query']: new Error('no such method') });
+      expect(listing.hosts).toBeNull();
+      expect(listing.ports).toHaveLength(1);
+      expect(listing.failures).toEqual([{ source: 'hosts', error: 'no such method' }]);
+    });
+
+    it('names the port read and still answers the other two', async () => {
+      const listing = await listed({}, { ['fcport.query']: { reason: 'denied' } });
+      expect(listing.ports).toBeNull();
+      expect(listing.hosts).toHaveLength(1);
+      expect(listing.failures).toEqual([{ source: 'ports', error: 'denied' }]);
+    });
+
+    // Null rather than empty: an empty `status` says the read placed nothing on
+    // this port, which is a claim about the link a failed read never made.
+    it('names the status read and reports a null status rather than an empty one', async () => {
+      const listing = await listed({}, { ['fcport.status']: new Error('timed out') });
+      expect((listing.ports ?? [])[0]['status']).toBeNull();
+      expect(listing.unmatched_status).toEqual([]);
+      expect(listing.failures).toEqual([{ source: 'port_status', error: 'timed out' }]);
+    });
+
+    it('names all three in read order where none of them answered', async () => {
+      const listing = await listed(
+        {},
+        {
+          ['fc.fc_host.query']: new Error('a'),
+          ['fcport.query']: new Error('b'),
+          ['fcport.status']: new Error('c'),
+        },
+      );
+      expect(listing).toEqual({
+        hosts: null,
+        ports: null,
+        failures: [
+          { source: 'hosts', error: 'a' },
+          { source: 'ports', error: 'b' },
+          { source: 'port_status', error: 'c' },
+        ],
+        unmatched_status: [],
+      });
+    });
+  });
+
+  // The common case the ticket names: an appliance with no FC hardware. It must
+  // answer rather than throw, and an empty answer is not a failure.
+  it('answers cleanly on a system with no Fibre Channel hardware', async () => {
+    const listing = await listed({
+      ['fc.fc_host.query']: [],
+      ['fcport.query']: [],
+      ['fcport.status']: [],
+    });
+    expect(listing).toEqual({ hosts: [], ports: [], failures: [], unmatched_status: [] });
+  });
+
+  describe('its description', () => {
+    // The load-bearing readings, pinned so a later edit cannot quietly drop
+    // them: each is a claim the normalization actually delivers and a caller
+    // acts on differently for having read it.
+    it('says which WWPN is which controller and what a null second one means', () => {
+      expect(fcList.description).toContain('THE TWO CONTROLLERS OF AN HA PAIR');
+      expect(fcList.description).toContain('`ha_status`');
+    });
+
+    it('says the status field names are unconfirmed', () => {
+      expect(fcList.description).toContain('THE FIELD NAMES IN A STATUS ROW ARE UNCONFIRMED');
+    });
+
+    it('says an empty status and a null one are different answers', () => {
+      expect(fcList.description).toContain(
+        'AN EMPTY `status` AND A NULL ONE ARE DIFFERENT ANSWERS',
+      );
+    });
+
+    it('refuses to answer whether the system has FC at all', () => {
+      expect(fcList.description).toContain('THERE IS NO `supported` FIELD');
+    });
+
+    it('says it reports no sessions', () => {
+      expect(fcList.description).toContain('CONFIGURATION AND LINK STATE AND NOT SESSIONS');
+    });
   });
 });
