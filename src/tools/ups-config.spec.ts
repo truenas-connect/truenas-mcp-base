@@ -169,17 +169,19 @@ describe('ups_config', () => {
   });
 
   it('collapses the explicit null the payload uses into the same unreadable answer', async () => {
-    // `nocommwarntime` is declared `number | null`, so the system CAN say it
-    // records no tolerance — and nothing in this result separates that from a
-    // value this tool could not read. The description says so rather than
-    // offering a companion field for a distinction a caller would not act on
-    // differently (#134).
-    expect(await one({ nocommwarntime: null })).toMatchObject({
-      no_communication_warn_time: null,
-    });
-    expect(await one({ nocommwarntime: 'soon' })).toMatchObject({
-      no_communication_warn_time: null,
-    });
+    // `nocommwarntime` and `shutdowncmd` are the two fields declared nullable,
+    // so on each the system CAN say it recorded no value — and nothing in this
+    // result separates that from a value this tool could not read. The
+    // description says so rather than offering a companion field for a
+    // distinction a caller would not act on differently (#134).
+    for (const unreadable of [null, 'soon']) {
+      expect(await one({ nocommwarntime: unreadable })).toMatchObject({
+        no_communication_warn_time: null,
+      });
+    }
+    for (const unreadable of [null, 7]) {
+      expect(await one({ shutdowncmd: unreadable })).toMatchObject({ shutdown_command: null });
+    }
   });
 
   it('nulls text it could not read, including text of no characters', async () => {
@@ -300,8 +302,13 @@ describe('ups_config', () => {
     expect(upsConfig.description).toContain('WHETHER OR NOT A UPS HAS EVER BEEN SET UP');
     expect(upsConfig.description).toContain('THE UPS MONITOR PASSWORD IS NOT RETURNED');
     // And that `shutdown_command` is operator-supplied text, which is the
-    // condition #97 attaches to passing such a field through at all.
+    // condition #97 attaches to passing such a field through at all — and that
+    // its null is not evidence the system runs no command, since the payload
+    // declares the field nullable and the two causes collapse.
     expect(upsConfig.description).toContain('IT IS OPERATOR-SUPPLIED TEXT');
+    expect(upsConfig.description).toContain(
+      'A null `shutdown_command` is therefore NOT evidence that the system runs no command',
+    );
   });
 
   it('asks for the configuration, and never mutates', async () => {

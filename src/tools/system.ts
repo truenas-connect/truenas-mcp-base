@@ -1355,7 +1355,7 @@ export const systemNtpStatus: ReadOnlyTool = {
  * the line at a mutating tool's approval text instead. This is a listing, so the
  * precedent applies, and the warning comes with it.
  *
- * FOUR MORE DECLARED FIELDS ARE LEFT OUT, FOR TWO REASONS, AND EVERY OMISSION IS
+ * SIX MORE DECLARED FIELDS ARE LEFT OUT, AND EVERY ONE OF THOSE OMISSIONS IS
  * NAMED IN THE DESCRIPTION per #102's corollary:
  *
  * - **`options` and `optionsupsd`** are free-form driver and daemon option
@@ -1463,10 +1463,13 @@ export const upsConfig: ReadOnlyTool = {
     'COULD READ, and a null is never a zero, never a false and never an empty ' +
     'string — it is "this was not established". For the text fields that ' +
     'covers a value the system sent as empty text, which names nothing a ' +
-    'caller could act on; for `no_communication_warn_time` it ALSO covers the ' +
-    'explicit null the payload uses, and THOSE TWO COLLAPSE TO ONE ANSWER ' +
-    'here — nothing in this result separates "the system recorded no ' +
-    'tolerance" from "this tool could not read the one it recorded". ' +
+    'caller could act on. FOR `shutdown_command` AND ' +
+    '`no_communication_warn_time` IT ALSO COVERS THE EXPLICIT NULL THE PAYLOAD ' +
+    'ITSELF USES, AND THOSE TWO CAUSES COLLAPSE TO ONE ANSWER HERE: nothing in ' +
+    'this result separates "the system recorded no shutdown command" from ' +
+    '"this tool could not read the one it recorded", or "the system recorded ' +
+    'no tolerance" from the same. A null `shutdown_command` is therefore NOT ' +
+    'evidence that the system runs no command on the way down. ' +
     'THE UPS MONITOR PASSWORD IS NOT RETURNED, and neither is whether one is ' +
     'set: this tool does not report `monpwd` in any form, nor the `monuser` ' +
     'beside it, nor the `extrausers` daemon-user configuration, because those ' +
@@ -1510,6 +1513,11 @@ export const upsConfig: ReadOnlyTool = {
       mode: textOrNull(settings['mode']),
       shutdown: textOrNull(settings['shutdown']),
       shutdown_timer: numberOrNull(settings['shutdowntimer']),
+      // Declared `string | null`, so this null covers the system's own explicit
+      // null — no command recorded — as well as a value this tool could not
+      // read. The two collapse, as `no_communication_warn_time`'s do below, and
+      // the description says so rather than offering a companion field for a
+      // distinction a caller would not act on differently (#134).
       shutdown_command: textOrNull(settings['shutdowncmd']),
       powerdown: booleanOrNull(settings['powerdown']),
       // No unit suffix, on #96's first ground: the surface declares none, and
