@@ -32,6 +32,7 @@ import {
   systemInfo,
   systemNtpStatus,
   updateStatus,
+  upsConfig,
 } from '@/tools/system';
 import {
   automatedTaskSetEnabled,
@@ -44,7 +45,7 @@ import {
 } from '@/tools/tasks';
 import { vmDevices, vmLogs, vmsList } from '@/tools/vms';
 
-/** The sketch's catalog: fifty-four read-only tools plus six mutating tools. */
+/** The sketch's catalog: fifty-five read-only tools plus six mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -55,6 +56,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(securityConfig);
   catalog.register(systemGeneralConfig);
   catalog.register(systemNtpStatus);
+  catalog.register(upsConfig);
   catalog.register(poolStatus);
   catalog.register(poolTopology);
   catalog.register(scrubHistory);
@@ -167,6 +169,7 @@ export {
   systemNtpStatus,
   tasksRecentRuns,
   updateStatus,
+  upsConfig,
   usersList,
   vmDevices,
   vmLogs,
