@@ -1,6 +1,7 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ReadOnlyTool } from '@/catalog/tool';
+import { booleanOrNull, recordOrNull, textOrNull } from '@/tools/common';
 
 /** A ZFS property as the middleware reports it. The client declares the property
  * object on the dataset fields it names, but types its `parsed` value `unknown`
@@ -249,5 +250,147 @@ export const quotaReport: ReadOnlyTool = {
         (row.quota_used_percent !== null && row.quota_used_percent >= threshold) ||
         (row.refquota_used_percent !== null && row.refquota_used_percent >= threshold),
     );
+  },
+};
+
+/**
+ * Which pool holds middleware's own state, and where that state is mounted.
+ *
+ * The system dataset holds the audit databases, service configuration and
+ * Samba's private data, and it lives on ONE pool. The consequence operators
+ * meet at the wrong moment is that the pool holding it cannot be exported or
+ * detached — "why will this pool not export" was a question nothing in this
+ * catalog could answer, and the answer is one unread setting. It is also what
+ * sharpens a reading of the rest of the catalog: a DEGRADED pool that happens to
+ * hold the system dataset is a different finding from a DEGRADED pool holding
+ * data alone.
+ *
+ * **`pool` and `pool_set` are one fact in two fields, and the second is the one
+ * that carries the meaning.** A pool an administrator chose is a decision; a
+ * pool middleware settled on by itself is not, and reporting `pool` alone loses
+ * the whole distinction. The caution the description draws from a false —
+ * that such a pool must not be relied on to stay where it is — follows from what
+ * the flag RECORDS rather than from anything measured here: this tool does not
+ * read middleware's selection behaviour and states nothing about where an
+ * automatic choice would move to. A null is neither value, and reading it as a
+ * false would report an administrator's decision as an accident.
+ *
+ * **`path`'s null is left unsettled, deliberately, which is #120's rule reaching
+ * a field rather than a side effect.** The client declares `path: string | null`
+ * and says nothing anywhere about what an explicit null indicates; no live
+ * system was available here to watch one. The two readings available — the
+ * dataset is not mounted, or the system reported no path — are not separable
+ * from this payload, so the description says so instead of choosing. Asserting
+ * either would be worse than saying nothing, because a caller cannot tell a
+ * guess from a reading, and the guess that costs is "unmounted, so the pool is
+ * free".
+ *
+ * **No companion field splits that null**, which is where this differs from
+ * #134. A companion earns its place where the causes behind one null are ones a
+ * caller would act on DIFFERENTLY; here the explicit null's own meaning is the
+ * thing that is unknown, so separating it from an unreadable value would hand a
+ * caller a distinction it still could not act on. One null, and a description
+ * that names both causes.
+ *
+ * **Three declared fields are dropped rather than reported**, and that is #102
+ * rather than tidying. `id` is a middleware row id and there is only ever one
+ * system dataset. `basename` and `uuid` are middleware's own internal naming for
+ * the dataset: the surface declares both and states nothing about what either
+ * NAMES, so reporting one means describing it, and the only descriptions worth
+ * having are readings the surface does not support — that `basename` is a
+ * dataset id joinable to `storage_list_datasets`, or that `uuid` identifies the
+ * node whose state lives under it. Neither answers a question about the system
+ * that `pool` and `path` do not already answer. All three omissions are named in
+ * the description, per #102's corollary, so a later reader can tell a decision
+ * from a field nobody saw.
+ *
+ * The read is a single call and there are no sections: a `systemdataset.config`
+ * that fails is an error naming what the system said, the same shape
+ * `system_general_config` takes, and there is no second read for it to be
+ * partial about.
+ */
+export const systemDatasetConfig: ReadOnlyTool = {
+  name: 'system_dataset_config',
+  description:
+    'Which ZFS pool holds the TrueNAS SYSTEM DATASET, and where that dataset is ' +
+    "mounted. The system dataset holds middleware's own state — the audit " +
+    "databases, service configuration and Samba's private data — and it lives " +
+    'on one pool. THE POOL NAMED HERE CANNOT BE EXPORTED OR DETACHED WHILE IT ' +
+    'HOLDS THE SYSTEM DATASET, which is the answer to "why will this pool not ' +
+    'export". That restriction is middleware behaviour this tool does NOT read ' +
+    'and does not verify; what it reports is which pool the setting names. A ' +
+    'system has one system dataset, so this returns a single object rather than ' +
+    'a list. ' +
+    '`pool` is the name of the pool holding it, as the system spelled it. IT ' +
+    'JOINS TO `name` IN `storage_pool_status`, which is what connects this ' +
+    "setting to that pool's health — a DEGRADED pool holding the system dataset " +
+    'is a sharper finding than a DEGRADED pool holding data alone. A `pool` ' +
+    'that does NOT appear in `storage_pool_status` is not evidence that the ' +
+    'pool is absent: that tool reads the data pools, and the BOOT POOL is not ' +
+    'among them, so a system dataset sitting on the boot pool names a pool it ' +
+    'will never report. `boot_pool_status` is where the boot pool is reported. ' +
+    '`pool` AND `pool_set` ARE READ TOGETHER OR NOT AT ALL, and reporting the ' +
+    'pool without the flag loses the distinction the flag exists for. ' +
+    '`pool_set` is whether the system records an EXPLICIT CHOICE of that pool. ' +
+    'True is an administrator having chosen it, so the pool is a decision. ' +
+    'False is the system recording no such choice, so the pool is one ' +
+    'middleware settled on by itself — and a pool nobody committed to must not ' +
+    'be relied on to stay where it is. THIS TOOL DOES NOT READ THE SELECTION ' +
+    'BEHAVIOUR BEHIND THAT and does not state where an automatic choice would ' +
+    'move to or when; the caution follows from what a false records, not from ' +
+    'anything measured here. A NULL `pool_set` IS NOT A FALSE — it is the ' +
+    'system having reported no value this tool could read as a boolean, and ' +
+    "reading it as \"nobody chose\" would report an administrator's decision as " +
+    'an accident. ' +
+    '`path` is where the system dataset is mounted, as the system spelled it. ' +
+    'WHAT A NULL `path` MEANS COULD NOT BE ESTABLISHED. The API declares the ' +
+    'field nullable and states nowhere what an explicit null indicates, and no ' +
+    'live system was available to settle it. The two readings it might carry — ' +
+    'the dataset is not currently mounted, or the system simply reported no ' +
+    'path — are NOT distinguished by anything in this result, and this tool ' +
+    'will not guess between them. Null also covers a value this tool could not ' +
+    'read as text, which is not separated from the explicit null either. SO A ' +
+    'NULL `path` IS NOT EVIDENCE that the system dataset is absent, that it is ' +
+    'unmounted, or that the pool named above is free to export. ' +
+    'EVERY FIELD IS NULL WHERE THE SYSTEM REPORTED NO VALUE THIS TOOL COULD ' +
+    'READ, and a null is "this was not established" rather than a default — ' +
+    'never a false, never an empty string. ' +
+    "WHAT IS NOT REPORTED: middleware's own internal naming for the dataset. " +
+    'The row id, the dataset basename and the dataset uuid are all declared by ' +
+    'the API and all left out, because the surface states nothing about what ' +
+    'either name names and a meaning read off a field name is a guess a caller ' +
+    'could not tell from a reading. In particular NOTHING RETURNED HERE JOINS ' +
+    'TO `storage_list_datasets`, whose `id` is a dataset id this tool does not ' +
+    'report — the join this tool offers is the pool one, above. ' +
+    'THIS TOOL ONLY READS. It does not move the system dataset to another pool ' +
+    'and it does not list the pools it could be moved to; those are ' +
+    '`systemdataset.update` and `systemdataset.pool_choices`, and neither is in ' +
+    'this catalog. A configuration that could not be read at all is an error ' +
+    'naming what the system said, not a result of nulls.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }) {
+    const answer = await firstValueFrom(system.client.api.call('systemdataset.config'));
+    // Guarded rather than reached into, for the reason `system_general_config`
+    // gives: a system answering with something that is not a configuration
+    // would otherwise throw naming a property, and the caller would be shown
+    // the name of a field rather than the read that failed.
+    const config = recordOrNull(answer);
+    if (config === null) {
+      throw new Error('systemdataset.config did not answer with a system dataset configuration');
+    }
+    // Named one at a time, so a field a later TrueNAS release adds to this
+    // payload does not appear in the result without a change here. Every one is
+    // read through a guard even though the client declares all three required
+    // or explicitly nullable, which is the #91 decision: a declared type is a
+    // claim about what the middleware sends and not the value received.
+    return {
+      pool: textOrNull(config['pool']),
+      // Beside `pool` rather than folded into it: the two are one fact and the
+      // flag is what says whether the pool is a decision or a default.
+      pool_set: booleanOrNull(config['pool_set']),
+      path: textOrNull(config['path']),
+    };
   },
 };
