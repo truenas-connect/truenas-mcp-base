@@ -1048,9 +1048,11 @@ describe('nvmeof_list', () => {
 
 /**
  * Here rather than in a spec of its own, under #87's default: the split
- * exception is checked and was not met. `block.spec.ts` was 1,047 lines and this
- * block is around 400, so the merged file is about 1,446 — short of the
- * 1,500-line trigger, which is #97's case rather than #121's.
+ * exception is checked and was not met. This file was 1,047 lines and this
+ * block is around 450, so the merged file is 1,497 — under the 1,500-line
+ * trigger, which is #97's case rather than #121's. THE MARGIN IS THREE LINES:
+ * the next tool added to this family meets the exception on arrival, and takes
+ * its own spec named for it rather than growing this one.
  */
 describe('fc_list', () => {
   /**
