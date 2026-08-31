@@ -42,9 +42,11 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `automated_task_set_enabled`, `snapshot_clone` — `cloudsync_run` the only one
   that starts a background job, which it watches for a bounded time and then
   reports on rather than waiting out. `snapshot_clone` is the additive route
-  back to a snapshot's data: it adds a dataset and alters nothing, which is
-  what lets the catalog decline the rollback that answers the same question
-  destructively. `destructiveness`
+  back to a snapshot's data: it deletes nothing and modifies no dataset that
+  exists, which is what lets the catalog decline the rollback that answers the
+  same question destructively — though the clone it adds does pin its source
+  snapshot, which cannot then be destroyed while that clone is there, and its
+  description leads with that. `destructiveness`
   is about a tool's own operation and not about the data that operation acts
   on: `cloudsync_run` starts a task whose own `transfer_mode` may delete data
   for good, which its description and its plan state and this field does not.

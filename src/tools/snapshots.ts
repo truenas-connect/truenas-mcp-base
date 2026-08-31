@@ -60,9 +60,13 @@ function createParams(args: SnapshotArgs): CallParams<ApiSurface, 'pool.snapshot
  * inlined, because written to a `const` it widens to `string[][]` and no longer
  * satisfies the filter tuple; `extra` is typed by the client as an open record,
  * so nothing about it is inferred from the literal and there is nothing to
- * widen. What the hoisting buys is that {@link datasetExists} and the plan step
- * naming that read cannot drift apart — a plan describing a call the tool does
- * not make is the defect #119 is about.
+ * widen. What the hoisting buys is that the options {@link datasetExists} reads
+ * with and the ones its plan step names cannot drift apart. The FILTER is still
+ * written twice — inlined below for the reason above, and again in
+ * {@link datasetReadParams} — so that half is held by the spec instead, which
+ * takes the read step back out of the plan and asserts `execute` made its call
+ * with it. A plan describing a call the tool does not make is the defect #119
+ * is about, and only one of these two halves is closed by construction.
  */
 const DATASET_READ_OPTIONS = { extra: { retrieve_children: false, properties: ['used'] } };
 
@@ -747,12 +751,15 @@ export const snapshotClone: MutatingTool = {
     'not the error. `snapshot` is the full `dataset@snapshot` name as ' +
     '`snapshots_list` reports it in `name`; `destination` is the full name of ' +
     'the dataset to create, in the form `storage_list_datasets` reports as ' +
-    '`id`. PLANNING FAILS, NAMING WHAT WAS WRONG, in exactly two cases: where ' +
-    'this system lists no snapshot under the name given, and where a dataset ' +
-    'already exists at the destination. It checks nothing else — whether the ' +
-    "destination's parent dataset exists, and whether the pool has room, are " +
-    'the middleware\'s to refuse, and this tool does not offer a second ' +
-    'opinion about either. `dataset_properties` IS NOT ACCEPTED and none is ' +
+    '`id`. PLANNING FAILS AND NAMES WHAT WAS WRONG in two cases: where this ' +
+    'system lists no snapshot under the name given, and where a dataset ' +
+    'already exists at the destination. THOSE ARE THE TWO IT CHECKS FOR, not ' +
+    'the only two ways planning fails — a malformed argument, or a read that ' +
+    'did not complete, fails it too and names neither. Nothing else about the ' +
+    "call is checked: whether the destination's parent dataset exists, and " +
+    'whether the pool has room, are the middleware\'s to refuse, and this ' +
+    'tool does not offer a second opinion about either. ' +
+    '`dataset_properties` IS NOT ACCEPTED and none is ' +
     'sent: the clone takes the source snapshot\'s own properties. NOTHING ' +
     'HERE TOUCHES THE CLONE AFTERWARDS — this tool does not promote it, ' +
     'delete it or set anything on it, and no other tool in this catalog does ' +
