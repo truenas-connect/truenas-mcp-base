@@ -1129,3 +1129,188 @@ export const systemGeneralConfig: ReadOnlyTool = {
     };
   },
 };
+
+/** One configured NTP server, as this tool reports it. */
+interface NtpServer {
+  address: string | null;
+  prefer: boolean | null;
+  burst: boolean | null;
+  iburst: boolean | null;
+  minpoll: number | null;
+  maxpoll: number | null;
+}
+
+/**
+ * The servers the system listed, one entry each, in the order it listed them.
+ *
+ * Not sorted, unlike {@link configuredServices}: that one reads a keyed object,
+ * whose key order means nothing and would otherwise make two reads of the same
+ * unchanged configuration differ. This reads a list the system itself ordered,
+ * and re-ordering it would be this tool's own opinion about a sequence the
+ * middleware chose.
+ *
+ * AN ENTRY THAT COULD NOT BE READ IS KEPT, as a row of nulls, which is the #93
+ * direction rule rather than leniency. Dropping it would move the list towards
+ * EMPTY — and empty is this tool's one positive finding, "nothing is configured
+ * to discipline the clock". A server this tool cannot read is not a server that
+ * is not there, so it stays and it still makes `servers_configured` true. Same
+ * answer {@link rebootReasons} arrives at about a reason, and the opposite of
+ * the all-or-nothing reading `strictTextList` takes of an audit scope.
+ *
+ * A row that is not a record at all is read as an empty one, so every field
+ * lands on the same null the guards already give an absent field, and the entry
+ * is still counted.
+ *
+ * Every field is read through a guard even where the client declares it, which
+ * is the #91 decision: a declared type is a claim about what the middleware
+ * sends and not the value received. The three booleans are optional on that
+ * declaration, so null here covers a field the system did not report as well as
+ * one it reported unreadably — and neither is `false`, which is the one reading
+ * the ticket names as unacceptable.
+ */
+function ntpServers(rows: readonly unknown[]): NtpServer[] {
+  return rows.map((row) => {
+    const held: Record<string, unknown> = recordOrNull(row) ?? {};
+    return {
+      address: textOrNull(held['address']),
+      prefer: booleanOrNull(held['prefer']),
+      burst: booleanOrNull(held['burst']),
+      iburst: booleanOrNull(held['iburst']),
+      minpoll: numberOrNull(held['minpoll']),
+      maxpoll: numberOrNull(held['maxpoll']),
+      // `id` is a middleware row id, dropped by being absent from this
+      // allowlist as `services_status` drops a service's. Nothing in this
+      // catalog takes one: `system.ntpserver.update` and `.delete` are the
+      // methods that would, and both are mutating and not registered here.
+      // Growing this tool the field is what #119 describes doing deliberately,
+      // on the ticket that needs it.
+    };
+  });
+}
+
+/**
+ * Which servers the clock is configured to be disciplined against — and,
+ * emphatically, not whether it is.
+ *
+ * Nothing else in the catalog reports time synchronisation at all, and it sits
+ * underneath data most of the rest of it returns: every timestamp reported by
+ * `audit_log_query`, `snapshots_list`, `tasks_recent_runs` and
+ * `storage_scrub_history` is only as trustworthy as the clock that wrote it,
+ * and `system_general_config` reports the ZONE those times are expressed in
+ * without reporting whether the instant behind them is right.
+ *
+ * THE CENTRAL LIMITATION IS THE WHOLE DESIGN OF THIS TOOL.
+ * `system.ntpserver.query` answers with the configured server list and nothing
+ * else: not whether any of them answered, not the offset, not the stratum, not
+ * when the clock last stepped. A description implying the clock is correct
+ * because servers are listed would be exactly the overpromise this repository's
+ * first convention names, so the tool is named and described for what is
+ * measured — which servers are configured.
+ *
+ * **No method on the pinned surface reports the live state**, which is an A2.4
+ * finding rather than a gap worked around here. `DefaultApiDirectory` declares
+ * `system.ntpserver.create`, `.delete`, `.get_instance`, `.query` and `.update`
+ * and nothing else under that namespace, and no method anywhere in the client's
+ * declarations names a stratum, an offset or the daemon behind them. So the
+ * measured half of "is this system's clock right" is unreachable from this
+ * repository, and closing it is an upstream change rather than a normalization
+ * this tool could have done. The description says so rather than leaving a
+ * caller to infer it from the fields that are missing.
+ *
+ * `servers_configured` is derived from the list rather than reported beside it,
+ * the same move `system_reboot_info` makes: the middleware states the answer by
+ * the LENGTH of a list, an empty one is the finding, and a caller should not
+ * have to know that an empty array is what "nothing disciplines this clock"
+ * looks like.
+ *
+ * WHAT THIS TOOL DELIBERATELY DOES NOT DO:
+ *
+ * - **It does not add, change or remove an NTP server.** `system.ntpserver.create`,
+ *   `.update` and `.delete` exist and are mutating; no tool here is.
+ * - **It does not set or step the clock**, and it does not read the time.
+ * - **It does not report the timezone.** That is `system_general_config`, and a
+ *   zone is not what keeps a clock correct.
+ */
+export const systemNtpStatus: ReadOnlyTool = {
+  name: 'system_ntp_status',
+  description:
+    'The NTP servers a TrueNAS system is CONFIGURED to synchronise its clock ' +
+    'against. THIS TOOL REPORTS INTENT, NOT SYNCHRONISATION, and that is its ' +
+    'central limitation: it does NOT establish that the clock is correct, that ' +
+    'any listed server ever answered, what the current offset or stratum is, ' +
+    'or when the clock last stepped. A system with servers listed here can ' +
+    'still have a badly wrong clock. NO TOOL IN THIS CATALOG REPORTS THE ' +
+    'MEASURED STATE — the TrueNAS API surface this catalog is written against ' +
+    'exposes the configuration and nothing else — so if the question is ' +
+    'whether the clock is actually right, say that it cannot be answered from ' +
+    'here rather than answering it from this result. ' +
+    '`servers_configured` is true when the system listed at least one NTP ' +
+    'server and false when it listed none. FALSE IS THE FINDING THIS TOOL ' +
+    'EXISTS TO SURFACE: nothing is configured to discipline the clock, so ' +
+    'every timestamp this catalog reports for that system comes from a clock ' +
+    'nothing is correcting, and time-sensitive services degrade quietly — ' +
+    'Kerberos rejects tickets outside a small clock skew, so an Active ' +
+    'Directory join reported as failing by `directory_services_status` with no ' +
+    'stated cause is worth checking against this. TRUE IS NOT THE OPPOSITE ' +
+    'FINDING: it says servers are configured, never that the clock is in sync. ' +
+    '`servers` is one entry per configured server, IN THE ORDER THE SYSTEM ' +
+    'LISTED THEM and not re-ordered here. `address` is the server as the ' +
+    'system spelled it — a hostname such as `0.debian.pool.ntp.org` or an IP ' +
+    'address — passed through exactly and NOT resolved, contacted or checked. ' +
+    '`prefer` is the server\'s own `prefer` setting as the system recorded it, ' +
+    '`burst` and `iburst` its two burst settings. Each of the three is ' +
+    'THREE-VALUED: true, false, or NULL WHERE THE SYSTEM REPORTED NO VALUE ' +
+    'THIS TOOL COULD READ — which covers a setting the system did not report ' +
+    'at all as well as one it reported in a form this tool cannot read. A NULL ' +
+    'IS NOT A FALSE and must never be reported as the setting being off: ' +
+    'nothing has been established about it. `minpoll` and `maxpoll` are the ' +
+    'polling bounds the system recorded for that server, reported as the bare ' +
+    'numbers they arrive as. THE API STATES NO UNIT FOR EITHER, so neither ' +
+    'carries one in its name and NEITHER IS TO BE CONVERTED OR PRESENTED AS ' +
+    'SECONDS, MINUTES OR ANY OTHER UNIT — report the number as itself and say ' +
+    'the unit is unstated. Each is null where the system reported no number ' +
+    'this tool could read. AN ENTRY WHOSE FIELDS ARE ALL NULL IS STILL A ' +
+    'SERVER THE SYSTEM HAS CONFIGURED: it is returned rather than dropped, and ' +
+    'it still makes `servers_configured` true, because a server this tool ' +
+    'could not read is not a server that is not there. AN EMPTY `servers` IS ' +
+    'THE SYSTEM HAVING BEEN READ AND HAVING LISTED NO SERVERS — it is never a ' +
+    'failed read, because a configuration that could not be read at all is an ' +
+    'error naming what the system said rather than an empty list. The ' +
+    'middleware row id of each server is NOT reported: nothing in this catalog ' +
+    'takes one, since adding, changing and removing a server are all mutating ' +
+    'and none of them is here. NO field beyond those named above is returned, ' +
+    'whatever a later TrueNAS release adds to an NTP server record. THIS TOOL ' +
+    'ONLY READS. It does not add, change or remove an NTP server, and it does ' +
+    'not set, step or read the clock. The system\'s TIMEZONE is a different ' +
+    'question and is `system_general_config` — a zone is the frame a time is ' +
+    'expressed in, not anything that keeps the time correct.',
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }) {
+    // No filters and no options, as `services_status` asks for none: a system
+    // holds a handful of NTP servers, every field reported is part of the row
+    // as it stands, and the question this answers is about all of them.
+    const answer = await firstValueFrom(system.client.api.query('system.ntpserver.query'));
+    // Guarded rather than mapped straight, and on this tool that is not
+    // defensiveness for its own sake. The client DECLARES a list, and #91's
+    // rule is that a declared type is a claim about what the middleware sends
+    // rather than the value received — so a system answering with something
+    // that is not a list would reach `servers_configured` as a false, which is
+    // this tool's one positive finding and the most costly thing it could get
+    // wrong. Fatal instead, and named for the read rather than for a property.
+    if (!Array.isArray(answer)) {
+      throw new Error('system.ntpserver.query did not answer with a list of NTP servers');
+    }
+    const servers = ntpServers(answer);
+    return {
+      // Derived rather than read, as `system_reboot_info` derives
+      // `reboot_required` from its own list: the middleware states the answer
+      // by the length of a list and a caller should not have to know that.
+      // Never null — a list that could not be read stopped the call above, so
+      // there is no third case here to report.
+      servers_configured: servers.length > 0,
+      servers,
+    };
+  },
+};

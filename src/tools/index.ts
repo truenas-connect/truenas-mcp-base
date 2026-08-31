@@ -30,6 +30,7 @@ import {
   rebootInfo,
   systemGeneralConfig,
   systemInfo,
+  systemNtpStatus,
   updateStatus,
 } from '@/tools/system';
 import {
@@ -43,7 +44,7 @@ import {
 } from '@/tools/tasks';
 import { vmDevices, vmLogs, vmsList } from '@/tools/vms';
 
-/** The sketch's catalog: fifty read-only tools plus six mutating tools. */
+/** The sketch's catalog: fifty-one read-only tools plus six mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -53,6 +54,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(auditConfig);
   catalog.register(securityConfig);
   catalog.register(systemGeneralConfig);
+  catalog.register(systemNtpStatus);
   catalog.register(poolStatus);
   catalog.register(poolTopology);
   catalog.register(scrubHistory);
@@ -156,6 +158,7 @@ export {
   systemGeneralConfig,
   systemHealthReport,
   systemInfo,
+  systemNtpStatus,
   tasksRecentRuns,
   updateStatus,
   usersList,

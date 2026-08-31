@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Role } from '@/interfaces';
 import { fakeSystem, failingSystem } from '@/testing/fake-systems';
 import {
   auditConfig,
   auditLogQuery,
   rebootInfo,
   systemGeneralConfig,
+  systemNtpStatus,
   updateStatus,
 } from '@/tools/index';
 
@@ -1170,5 +1172,177 @@ describe('system_general_config', () => {
     await systemGeneralConfig.handler(ctx, {});
     expect(call.mock.calls.map((args) => args[0])).toEqual(['system.general.config']);
     expect(query).not.toHaveBeenCalled();
+  });
+});
+
+describe('system_ntp_status', () => {
+  /** An NTP server row as `system.ntpserver.query` reports one. */
+  const server = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    address: '0.debian.pool.ntp.org',
+    burst: false,
+    iburst: true,
+    prefer: false,
+    minpoll: 6,
+    maxpoll: 10,
+    ...over,
+  });
+
+  const reported = async (rows: unknown): Promise<Record<string, unknown>> => {
+    const { ctx } = fakeSystem({ ['system.ntpserver.query']: rows });
+    return (await systemNtpStatus.handler(ctx, {})) as Record<string, unknown>;
+  };
+
+  /** The `servers` list of a read, whatever the rows were. */
+  const listed = async (rows: unknown[]): Promise<Record<string, unknown>[]> =>
+    (await reported(rows))['servers'] as Record<string, unknown>[];
+
+  /** One server, differing only in the fields the case is about. */
+  const one = async (over: Record<string, unknown>): Promise<Record<string, unknown>> =>
+    (await listed([server(over)]))[0];
+
+  it('maps a server to its address and its polling settings', async () => {
+    expect(await reported([server()])).toEqual({
+      servers_configured: true,
+      servers: [
+        {
+          address: '0.debian.pool.ntp.org',
+          prefer: false,
+          burst: false,
+          iburst: true,
+          minpoll: 6,
+          maxpoll: 10,
+        },
+      ],
+    });
+  });
+
+  it('carries no field the tool does not name, including one a later release adds', async () => {
+    const rows = await listed([server({ force: true })]);
+    expect(Object.keys(rows[0])).toEqual([
+      'address',
+      'prefer',
+      'burst',
+      'iburst',
+      'minpoll',
+      'maxpoll',
+    ]);
+  });
+
+  it('does not report the middleware row id', async () => {
+    // Nothing in this catalog takes one: adding, changing and removing a server
+    // are all mutating and none of them is registered here.
+    const rows = await listed([server({ id: 7 })]);
+    expect(rows[0]).not.toHaveProperty('id');
+    expect(JSON.stringify(rows)).not.toContain('7');
+  });
+
+  it('reads an unreported option as null and never as false', async () => {
+    // The acceptance criterion this tool turns on: `prefer` absent is not
+    // `prefer` switched off, and rendering it as false would report a choice
+    // nobody made.
+    for (const option of ['prefer', 'burst', 'iburst'] as const) {
+      expect(await one({ [option]: true })).toMatchObject({ [option]: true });
+      expect(await one({ [option]: false })).toMatchObject({ [option]: false });
+      for (const unreadable of [undefined, null, 'true', 1, {}]) {
+        expect(await one({ [option]: unreadable })).toMatchObject({ [option]: null });
+      }
+    }
+  });
+
+  it('reports the polling bounds as the bare numbers they arrive as, keeping a zero', async () => {
+    // No unit is carried in either name, per #96: the API declares none, and a
+    // suffix is a claim a caller converts on.
+    expect(await one({ minpoll: 0, maxpoll: 17 })).toMatchObject({ minpoll: 0, maxpoll: 17 });
+    for (const unreadable of [undefined, null, '6', Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(await one({ minpoll: unreadable })).toMatchObject({ minpoll: null });
+      expect(await one({ maxpoll: unreadable })).toMatchObject({ maxpoll: null });
+    }
+  });
+
+  it('nulls an address it could not read, so the entry names no server', async () => {
+    for (const unreadable of [undefined, null, '', 7]) {
+      expect(await one({ address: unreadable })).toMatchObject({ address: null });
+    }
+  });
+
+  it('reads a system with no NTP servers as the finding rather than an empty list', async () => {
+    // The whole reason `servers_configured` is derived here: an empty array is
+    // what "nothing is configured to discipline this clock" looks like, and a
+    // caller should not have to know that.
+    expect(await reported([])).toEqual({ servers_configured: false, servers: [] });
+  });
+
+  it('keeps an entry it could not read, as a row of nulls that still counts', async () => {
+    // The #93 direction rule. Dropping it would move the list towards EMPTY,
+    // and empty is this tool's one positive finding — so a server this tool
+    // cannot read must not read as a server that is not there.
+    const nulls = {
+      address: null,
+      prefer: null,
+      burst: null,
+      iburst: null,
+      minpoll: null,
+      maxpoll: null,
+    };
+    for (const unreadable of [null, undefined, 7, 'ntp', []]) {
+      expect(await reported([unreadable])).toEqual({
+        servers_configured: true,
+        servers: [nulls],
+      });
+    }
+  });
+
+  it('lists the servers in the order the system listed them', async () => {
+    // The system ordered this list; re-ordering it would be this tool's own
+    // opinion about a sequence the middleware chose.
+    const rows = await listed([
+      server({ id: 1, address: 'tick.example.invalid' }),
+      server({ id: 2, address: 'aaa.example.invalid' }),
+      server({ id: 3, address: 'tock.example.invalid' }),
+    ]);
+    expect(rows.map((row) => row['address'])).toEqual([
+      'tick.example.invalid',
+      'aaa.example.invalid',
+      'tock.example.invalid',
+    ]);
+  });
+
+  it('fails rather than reporting no servers when the payload is not a list', async () => {
+    // The costly mistake: a payload this tool cannot read reaching
+    // `servers_configured` as a false, which is a positive finding about the
+    // clock that nothing established.
+    for (const answer of [null, undefined, 'servers', 7, {}]) {
+      await expect(reported(answer)).rejects.toThrow(
+        'system.ntpserver.query did not answer with a list of NTP servers',
+      );
+    }
+  });
+
+  it('fails rather than reporting no servers when the read could not be made', async () => {
+    const { ctx } = failingSystem({}, { ['system.ntpserver.query']: new Error('connection reset') });
+    await expect(systemNtpStatus.handler(ctx, {})).rejects.toThrow('connection reset');
+  });
+
+  it('states that it reports configuration rather than synchronisation', async () => {
+    // The tool's central limitation lives in prose, and prose is one edit away
+    // from being undone — so the claim is pinned here (#128).
+    expect(systemNtpStatus.description).toContain('REPORTS INTENT, NOT SYNCHRONISATION');
+    expect(systemNtpStatus.description).toContain(
+      'NO TOOL IN THIS CATALOG REPORTS THE MEASURED STATE',
+    );
+    // No field of the result offers one either, so a caller cannot read a
+    // stratum or an offset out of it and believe it was measured.
+    const result = await reported([server()]);
+    expect(Object.keys(result)).toEqual(['servers_configured', 'servers']);
+  });
+
+  it('asks for the servers, and never mutates', async () => {
+    const { ctx, call, query } = fakeSystem({ ['system.ntpserver.query']: [] });
+    await systemNtpStatus.handler(ctx, {});
+    expect(query).toHaveBeenCalledWith('system.ntpserver.query');
+    expect(call).not.toHaveBeenCalled();
+    expect(systemNtpStatus.mutating).toBe(false);
+    expect(systemNtpStatus.requiredRole).toBe(Role.ReadOnly);
   });
 });

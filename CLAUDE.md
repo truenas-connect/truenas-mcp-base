@@ -1258,6 +1258,50 @@ reading one middleware field differently is the expected outcome of that rule
 rather than drift; what would be drift is copying whichever sibling was read
 first.
 
+### The measured half of a question can be absent from the surface (#133)
+
+`system_ntp_status` reports which NTP servers a system is configured to
+discipline its clock against, and **nothing about whether the clock is actually
+right** — no offset, no stratum, no last step. That is not a normalization this
+tool declined to do. The pinned surface declares five methods under
+`system.ntpserver` — `create`, `delete`, `get_instance`, `query`, `update` — and
+`query` answers the stored configuration; nothing anywhere in the client's
+declarations names a stratum, an offset, or the daemon behind them. **The
+measured half is unreachable from this repository**, the same way
+`filesystem.file_tail_follow` is unreachable in #72, and closing it is an
+upstream change rather than something a tool here could compose.
+
+**Say so in the description, and say it about the CATALOG rather than about the
+tool.** A caller told only that *this* tool reports configuration will go
+looking for the tool that reports the measurement, and there is not one. This is
+#120's rule — a side effect that could not be established is stated, not settled
+— reaching a fact that could not be READ at all: the honest answer is that the
+question cannot be answered from here, and a tool whose subject is the
+configuration must not let a caller infer the measurement from it.
+
+**The empty list is the finding, and it is derived rather than reported beside
+the list.** A system with no NTP server configured is a system with nothing
+disciplining its clock, which is the one positive claim this read supports —
+`servers_configured` is `servers.length > 0` for the reason `system_reboot_info`
+derives `reboot_required` the same way: the middleware states the answer by the
+length of a list and a caller should not have to know that. Two consequences
+follow, and both are #93's direction rule:
+
+- **An entry that could not be read is KEPT, as a row of nulls, and still
+  counts.** Dropping it moves the list towards empty, and empty is the finding —
+  a server this tool cannot read is not a server that is not there.
+- **A payload that is not a list is fatal, not empty.** The client declares an
+  array and #91 says a declared type is a claim about what arrives; a system
+  answering with something else would otherwise reach `servers_configured` as a
+  `false`, which is a positive claim about the clock that nothing established.
+
+**An optional boolean the payload omits is null and never false** — `prefer`,
+`burst` and `iburst` are all optional on the declared entry, and rendering an
+absent one as `false` would report a choice nobody made. `minpoll` and `maxpoll`
+carry no unit in their names under #96's first ground: the API declares none, and
+nothing about a polling bound fixes one the way SMART fixes a drive temperature
+in Celsius.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

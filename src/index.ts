@@ -84,6 +84,7 @@ export {
   auditConfig,
   securityConfig,
   systemGeneralConfig,
+  systemNtpStatus,
   poolStatus,
   poolTopology,
   scrubHistory,
