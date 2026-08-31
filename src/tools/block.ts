@@ -923,10 +923,13 @@ export const nvmeofList: ReadOnlyTool = {
     '`shares_list`. WHICH PORTS A SUBSYSTEM IS PUBLISHED ON IS READ FROM ' +
     '`ports[].subsystems` AND NOT FROM THE SUBSYSTEM ROW, which carries no port ' +
     'field: a subsystem named in no port\'s `subsystems` is one nothing ' +
-    'publishes and so is not reachable over the network — but ONLY where the ' +
-    'port and publication reads both succeeded and no publication is ' +
-    'unattributed. Where either read failed, or a publication could not be ' +
-    'placed, that absence says nothing.',
+    'publishes and so is not reachable over the network — but ONLY WHERE EVERY ' +
+    'PUBLICATION WAS READ, PLACED AND IDENTIFIED, which is four conditions a ' +
+    'caller has to check together: `failures` names neither `ports` nor ' +
+    '`port_subsystems`, `unattributed_port_subsystems` is empty, and no ' +
+    '`subsystems` entry anywhere carries a null `subsystem_id`. ANY ONE OF ' +
+    'THOSE IS A PUBLICATION THAT COULD HAVE BEEN THIS SUBSYSTEM\'S, and the ' +
+    'absence then establishes nothing.',
   inputSchema: { type: 'object', properties: {} },
   requiredRole: Role.ReadOnly,
   mutating: false,
