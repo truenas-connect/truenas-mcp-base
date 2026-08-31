@@ -39,9 +39,12 @@ confirmation UX, audit sinks) enters through injected interfaces.
   Mutating family, all of them two-phase plan/confirm and all
   `destructiveness: 'reversible'`: `snapshots_create`, `alerts_dismiss`,
   `alerts_restore`, `scheduled_task_set_enabled`, `cloudsync_run`,
-  `automated_task_set_enabled` — `cloudsync_run` the only one that starts a
-  background job, which it watches for a bounded time and then reports on
-  rather than waiting out. `destructiveness`
+  `automated_task_set_enabled`, `snapshot_clone` — `cloudsync_run` the only one
+  that starts a background job, which it watches for a bounded time and then
+  reports on rather than waiting out. `snapshot_clone` is the additive route
+  back to a snapshot's data: it adds a dataset and alters nothing, which is
+  what lets the catalog decline the rollback that answers the same question
+  destructively. `destructiveness`
   is about a tool's own operation and not about the data that operation acts
   on: `cloudsync_run` starts a task whose own `transfer_mode` may delete data
   for good, which its description and its plan state and this field does not.

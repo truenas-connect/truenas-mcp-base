@@ -6,12 +6,16 @@ import {
   MAX_TIME_MS,
   MiddlewareDate,
   effectiveLimit,
+  errorText,
   numberOrNull,
   recordOrNull,
   textOrNull,
 } from '@/tools/common';
 
-/** Snapshots family: the snapshots that exist, and taking a new one. */
+/**
+ * Snapshots family: the snapshots that exist, taking a new one, and cloning one
+ * into a new dataset.
+ */
 
 /**
  * The one mutating tool in the sketch — exists to exercise the two-phase
@@ -49,8 +53,53 @@ function createParams(args: SnapshotArgs): CallParams<ApiSurface, 'pool.snapshot
 }
 
 /**
- * Existence check for a dataset the caller named. Both tools in this family
- * use it, for different reasons.
+ * The options every dataset-existence read in this file is made with.
+ *
+ * Hoisted, where `storage.ts` inlines its filter and #115 requires a `select`
+ * to be inlined: neither reason reaches here. The filter below is still
+ * inlined, because written to a `const` it widens to `string[][]` and no longer
+ * satisfies the filter tuple; `extra` is typed by the client as an open record,
+ * so nothing about it is inferred from the literal and there is nothing to
+ * widen. What the hoisting buys is that {@link datasetExists} and the plan step
+ * naming that read cannot drift apart — a plan describing a call the tool does
+ * not make is the defect #119 is about.
+ */
+const DATASET_READ_OPTIONS = { extra: { retrieve_children: false, properties: ['used'] } };
+
+/**
+ * The two positional params a dataset-existence read reaches the middleware
+ * with, for the plan step that names one.
+ *
+ * `api.query(method, filters, options)` dispatches `[filters, options]`, so a
+ * step naming only the filter would show the user a call one argument shorter
+ * than the one that runs.
+ */
+function datasetReadParams(dataset: string): unknown {
+  return [[['id', '=', dataset]], DATASET_READ_OPTIONS];
+}
+
+/**
+ * Whether this system lists a dataset under the name given.
+ *
+ * The filter is bandwidth and the check on the response is the control: an
+ * unrecognised query parameter is dropped rather than refused, so a filter that
+ * did not apply comes back as every dataset on the system and is
+ * indistinguishable from one that matched everything. Reading the length alone
+ * would then answer "it exists" for any name at all — which for the two callers
+ * below means a listing that never reports a missing dataset, and a clone plan
+ * that refuses every destination.
+ */
+async function datasetExists(ctx: ToolContext, dataset: string): Promise<boolean> {
+  const matches = await firstValueFrom(
+    ctx.system.client.api.query('pool.dataset.query', [['id', '=', dataset]], DATASET_READ_OPTIONS),
+  );
+  return matches.some((row) => stringOrNull(row['id']) === dataset);
+}
+
+/**
+ * {@link datasetExists} as a failure, for the two tools that need a named
+ * dataset to be there. `snapshot_clone` reads the same fact for the opposite
+ * question and so calls the guard above directly.
  *
  * For `snapshots_create` it is a plan-time check and advisory by design:
  * execute deliberately does not re-check (the "pure function of (args,
@@ -62,12 +111,7 @@ function createParams(args: SnapshotArgs): CallParams<ApiSurface, 'pool.snapshot
  * come back empty.
  */
 async function assertDatasetExists(ctx: ToolContext, dataset: string): Promise<void> {
-  const matches = await firstValueFrom(
-    ctx.system.client.api.query('pool.dataset.query', [['id', '=', dataset]], {
-      extra: { retrieve_children: false, properties: ['used'] },
-    }),
-  );
-  if (matches.length === 0) {
+  if (!(await datasetExists(ctx, dataset))) {
     throw new Error(`Dataset "${dataset}" does not exist`);
   }
 }
@@ -570,6 +614,244 @@ export const snapshotsList: ReadOnlyTool = {
       snapshots: rows.sort(byNewestFirst).map((entry) => entry.row),
       truncated: snapshots.length > limit,
       limit,
+    };
+  },
+};
+
+/**
+ * `snapshot_clone`: the additive route back to a snapshot's data.
+ *
+ * "Get back the version from before" is the question a snapshot exists to
+ * answer, and the obvious route to it — rolling the dataset back — destroys
+ * everything written since. A tool composing that is rejected at registration
+ * (`catalog/catalog.ts`) and there is none here. Cloning answers the same
+ * question additively: the snapshot's contents appear as a new dataset, the
+ * original is untouched, and the caller copies out what it needs. This is what
+ * lets the catalog decline rollback without declining recovery.
+ *
+ * WHAT THE PLAN NAMES IS WHAT `execute` CALLS. `pool.snapshot.clone` answers a
+ * bare `true` — no entity, so there is nothing to read the outcome off — which
+ * places this with `alerts_dismiss` (#119) rather than with
+ * `scheduled_task_set_enabled` (#121): `execute` re-reads the destination to
+ * establish that the dataset is now there, and the plan names that read as a
+ * step. The read runs after the call rather than before it, and the steps are
+ * in that order for the same reason they are in `alerts_dismiss` — a plan is a
+ * list of the calls `execute` makes, in the order it makes them.
+ *
+ * PLAN-TIME VALIDATION, AND WHERE IT STOPS. The plan reads the source snapshot
+ * to fail on a name no snapshot has, and the destination to fail where a
+ * dataset already exists there — the middleware would refuse both, and a plan
+ * naming a call certain to fail is a plan wasting an approval. It does NOT
+ * check that the destination's parent exists or that the pool has room; those
+ * are the middleware's to refuse, and re-implementing them here would be a
+ * second opinion that drifts.
+ *
+ * `dataset_properties` IS DECLARED ON THE CALL AND IS NOT ACCEPTED. It is
+ * `{[k: string]: unknown}` — an open record, the same shape and the same reason
+ * as `app.upgrade`'s `values`: a tool cannot allowlist what it does not name,
+ * and an open record forwarded from a caller is the boundary this repository
+ * does not cross. The clone takes the snapshot's own properties.
+ *
+ * `destructiveness: 'reversible'` RECORDS THE OPERATION, per
+ * {@link Destructiveness}'s own declaration. This one is the easy case — the
+ * operation adds a dataset and removes nothing, so there is no account of the
+ * data to come apart from the field the way `cloudsync_run`'s does. What the
+ * description must not do is let that read as "undoing this is easy": undoing a
+ * clone means deleting the dataset it made, and no tool here deletes one.
+ */
+
+/** The two arguments the tool takes. */
+interface CloneArgs {
+  snapshot: string;
+  destination: string;
+}
+
+/**
+ * The caller's arguments, or the error naming what is missing.
+ *
+ * Strict, as `snapshots_create`'s `dataset` is and `alerts_dismiss`'s `uuid`
+ * is: neither of these can be read as anything else without cloning a snapshot
+ * nobody named, or naming a destination nobody asked for.
+ */
+function parseCloneArgs(args: Record<string, unknown>): CloneArgs {
+  const snapshot = args['snapshot'];
+  const destination = args['destination'];
+  if (typeof snapshot !== 'string' || snapshot.length === 0) {
+    throw new Error('"snapshot" is required');
+  }
+  if (typeof destination !== 'string' || destination.length === 0) {
+    throw new Error('"destination" is required');
+  }
+  return { snapshot, destination };
+}
+
+/**
+ * The clone call's own params.
+ *
+ * `dataset_properties` is optional on the declared argument and is absent here
+ * rather than sent empty — an empty record is a request to set nothing, and
+ * omitting the key is the tool never having had an opinion.
+ */
+function cloneParams(args: CloneArgs): CallParams<ApiSurface, 'pool.snapshot.clone'> {
+  return [{ snapshot: args.snapshot, dataset_dst: args.destination }];
+}
+
+/**
+ * Whether this system lists the snapshot the caller named.
+ *
+ * The response is checked rather than counted, for {@link datasetExists}'s
+ * reason: a dropped filter answers with every snapshot on the system, and a
+ * length test would then plan a clone of a snapshot that does not exist.
+ *
+ * BOTH `id` AND `name` ARE COMPARED. The client declares them as two separate
+ * required `string` fields on a snapshot row and states no relationship between
+ * them — the same shape as an alert's `uuid` and `id` (#119) — so matching only
+ * one of them would fail the plan for a snapshot that is plainly there on a
+ * system where they differ. `pool.snapshot.clone` takes the name either way.
+ *
+ * One property is asked for because this read needs none and the middleware is
+ * not documented to read an empty list as "no properties"; a snapshot row
+ * otherwise carries every ZFS property of the snapshot, on every row of a
+ * listing this filter may not have narrowed.
+ */
+async function snapshotExists(ctx: ToolContext, snapshot: string): Promise<boolean> {
+  const matches = await firstValueFrom(
+    ctx.system.client.api.query('pool.snapshot.query', [['id', '=', snapshot]], {
+      extra: { properties: ['creation'] },
+    }),
+  );
+  return matches.some(
+    (row) => stringOrNull(row['id']) === snapshot || stringOrNull(row['name']) === snapshot,
+  );
+}
+
+export const snapshotClone: MutatingTool = {
+  name: 'snapshot_clone',
+  description:
+    'Creates a new ZFS dataset from an existing snapshot, so the data in that ' +
+    'snapshot can be read and copied out without altering the dataset it was ' +
+    'taken of. Two-phase: called without a confirmation_token it returns a ' +
+    'plan for user approval; called with one it creates the clone. THIS ' +
+    'DELETES NOTHING AND CHANGES NOTHING THAT EXISTS. The source snapshot and ' +
+    'the dataset it was taken of are untouched, and everything written since ' +
+    'the snapshot was taken is still there — which is what makes this the ' +
+    'route back to a snapshot\'s contents, since rolling a dataset back would ' +
+    'discard that work and no tool here does it. THE CLONE PINS THE SNAPSHOT ' +
+    'IT CAME FROM: a clone shares its blocks with that snapshot, so the ' +
+    'snapshot cannot be destroyed while the clone exists and the space it ' +
+    'references stays in use. That reaches retention — a snapshot ' +
+    '`snapshots_list` reports a `scheduled_removal` for may still be there ' +
+    'after that time once it has been cloned. Standard ZFS refuses to destroy ' +
+    'a snapshot with dependent clones; HOW TRUENAS REPORTS A REMOVAL THAT ' +
+    'THEN FAILS IS (unconfirmed) here, so what is claimed is the pinning and ' +
+    'not the error. `snapshot` is the full `dataset@snapshot` name as ' +
+    '`snapshots_list` reports it in `name`; `destination` is the full name of ' +
+    'the dataset to create, in the form `storage_list_datasets` reports as ' +
+    '`id`. PLANNING FAILS, NAMING WHAT WAS WRONG, in exactly two cases: where ' +
+    'this system lists no snapshot under the name given, and where a dataset ' +
+    'already exists at the destination. It checks nothing else — whether the ' +
+    "destination's parent dataset exists, and whether the pool has room, are " +
+    'the middleware\'s to refuse, and this tool does not offer a second ' +
+    'opinion about either. `dataset_properties` IS NOT ACCEPTED and none is ' +
+    'sent: the clone takes the source snapshot\'s own properties. NOTHING ' +
+    'HERE TOUCHES THE CLONE AFTERWARDS — this tool does not promote it, ' +
+    'delete it or set anything on it, and no other tool in this catalog does ' +
+    'either. From that point it is an ordinary dataset, and ' +
+    '`storage_list_datasets` is where it is visible. So `destructiveness: ' +
+    "'reversible'` records that this operation removes nothing; it does not " +
+    'mean the clone can be undone from here, which would mean deleting the ' +
+    'dataset it made. The result reports the two arguments as they were sent, ' +
+    'under `snapshot` and `destination`, and what the read immediately after ' +
+    'the clone call found: `destination_found` is true where a dataset with ' +
+    'that name was listed, false where that read completed and listed none, ' +
+    'and NULL WHERE THE READ ITSELF FAILED, with `destination_read_error` ' +
+    'naming why and null in the other two cases. A null is not a failed ' +
+    'clone — the call had already been accepted by then, and this tool simply ' +
+    'could not establish the outcome; `storage_list_datasets` settles it. ' +
+    '`destination_found: false` is the one to act on: the call did not reject ' +
+    'and the dataset was not there to read back.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      snapshot: {
+        type: 'string',
+        minLength: 1,
+        description:
+          'The snapshot to clone, as its full `dataset@snapshot` name — the ' +
+          '`name` `snapshots_list` reports, e.g. "tank/media@nightly-1", on ' +
+          'the system being targeted.',
+      },
+      destination: {
+        type: 'string',
+        minLength: 1,
+        description:
+          'Full name of the dataset to create, e.g. "tank/media-restore". ' +
+          'Must not already exist; planning fails naming it if it does. Its ' +
+          'parent must exist, which this tool does not check.',
+      },
+    },
+    required: ['snapshot', 'destination'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const args = parseCloneArgs(rawArgs);
+    // Named one by one, which is also what drops a `dataset_properties` a
+    // caller supplied: an unknown key normalized away never reaches `plan`,
+    // `execute` or the confirmation key.
+    return { snapshot: args.snapshot, destination: args.destination };
+  },
+  async plan(ctx, rawArgs) {
+    const args = parseCloneArgs(rawArgs);
+    // Each failure names the argument the caller supplied, because that is the
+    // part of it a caller can check. `assertDatasetExists` fails the same way
+    // for `snapshots_create`.
+    if (!(await snapshotExists(ctx, args.snapshot))) {
+      throw new Error(`No snapshot named "${args.snapshot}" on this system`);
+    }
+    if (await datasetExists(ctx, args.destination)) {
+      throw new Error(`A dataset already exists at "${args.destination}"`);
+    }
+    return [
+      {
+        method: 'pool.snapshot.clone',
+        params: cloneParams(args),
+        description:
+          `Clone snapshot "${args.snapshot}" into a new dataset ` +
+          `"${args.destination}". The snapshot and the dataset it was taken ` +
+          'of are not modified and nothing is deleted. The new dataset shares ' +
+          'its blocks with the snapshot, which then cannot be destroyed while ' +
+          'the clone exists.',
+      },
+      {
+        method: 'pool.dataset.query',
+        params: datasetReadParams(args.destination),
+        description:
+          `Read "${args.destination}" back, to report whether the clone is ` +
+          'there. Changes nothing.',
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const args = parseCloneArgs(rawArgs);
+    await firstValueFrom(ctx.system.client.api.call('pool.snapshot.clone', cloneParams(args)));
+    // Caught rather than thrown: this read exists to describe the outcome, and
+    // letting it fail the call would report a clone that was accepted as a
+    // failure. Same seam as `alerts_dismiss`'s lookup, on the other side of
+    // the mutation.
+    let found: boolean | null = null;
+    let readError: string | null = null;
+    try {
+      found = await datasetExists(ctx, args.destination);
+    } catch (reason) {
+      readError = errorText(reason);
+    }
+    return {
+      snapshot: args.snapshot,
+      destination: args.destination,
+      destination_found: found,
+      destination_read_error: readError,
     };
   },
 };

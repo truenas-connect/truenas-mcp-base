@@ -1736,6 +1736,68 @@ report a removal date it will survive. Stated in the description as the reading
 a caller is most likely to get wrong, since side-by-side fields are what an
 implied relationship looks like from the outside (#138).
 
+### The read a plan names can come after the mutation (#153)
+
+`snapshot_clone` returns two plan steps in the order `pool.snapshot.clone`,
+then `pool.dataset.query` — the mutation first and the read second, where
+`alerts_dismiss` and `scheduled_task_set_enabled` both read first. #119's rule
+is unchanged and is what produces the difference: a `PlanStep` is a call
+`execute` will make, so the steps are the calls in the order `execute` makes
+them. Those tools read BEFORE the call because the fact they report — whether
+the alert was already dismissed, whether the task was already enabled — is only
+readable beforehand. `pool.snapshot.clone` answers a bare `true`, so the only
+thing left to establish is whether the dataset is now there, and that is only
+readable afterwards. **Ask when the fact the result reports is readable, and put
+the step there** — a plan that lists a read first because the sibling tool does
+is a plan describing an order that will not happen.
+
+The plan step's `params` and the call `execute` makes come from one helper, and
+a test takes the step out of the plan and asserts the `query` spy was called
+with it. Two hand-written copies of the same params is how a plan stops being
+true one edit at a time, and nothing else in the repository would catch it.
+
+### An existence check reads the response, not the row count (#153)
+
+`assertDatasetExists` counted rows: an empty list meant the dataset was not
+there. It now finds a row whose `id` IS the name asked for, and `snapshot_clone`
+reads its source the same way. This is #121's *never act on the first row of a
+filtered read* applied to a guard rather than to a listing, and the guard is
+where it bites hardest — an unrecognised query parameter is dropped rather than
+refused, so a filter that did not apply comes back as the whole table, which a
+count reads as "it exists". **That fails in opposite directions on one call**:
+`snapshots_list` would stop reporting a dataset that is not there, and
+`snapshot_clone` would refuse every destination on the system. Neither looks
+like a filter problem from the outside.
+
+**Both declared name fields are compared for the snapshot.** A snapshot row
+declares `id` and `name` as two separate required strings and the surface states
+no relationship between them — the same shape as an alert's `uuid` and `id`
+(#119) — so a match on either is what keeps the plan from failing for a snapshot
+that is plainly there. #91's rule reaching an equality nobody wrote down.
+
+### `reversible` is not "this catalog can undo it" (#153)
+
+`snapshot_clone` adds a dataset and removes nothing, so `destructiveness` is the
+easy case — there is no account of the data to come apart from the field the way
+`cloudsync_run`'s does (#122, #128). The trap is one level over: a field saying
+`reversible` beside an operation that plainly removes nothing invites the
+reading *undoing this is easy*, and undoing a clone means deleting the dataset
+it made, which **no tool here does**. The description says that outright, next
+to the field's own meaning. **Where a tool's operation is genuinely reversible
+and the catalog still cannot reverse it, say so** — the field records the
+operation, and a caller reads a reversal it could ask for into it otherwise.
+
+The other half is the fact the operation's own shape hides. A clone shares
+blocks with its source snapshot, so **creating one pins that snapshot
+indefinitely** — it cannot be destroyed while the clone exists, and the space it
+references stays in use, including where a `scheduled_removal` `snapshots_list`
+reports would have taken it. An additive operation with a lasting consequence
+elsewhere is exactly what a caller will not infer, so it is in the description
+before anything about the result. How TrueNAS's retention path REPORTS a removal
+that then fails is marked `(unconfirmed)`, in `pool_resilver_config`'s form
+(#141): what is claimed is the pinning, which the ZFS semantics fix, and not the
+error, which was not read off a live system.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
