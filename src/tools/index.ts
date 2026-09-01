@@ -22,7 +22,12 @@ import {
 import { securityConfig } from '@/tools/security';
 import { servicesStatus } from '@/tools/services';
 import { shareAccess, sharesList } from '@/tools/shares';
-import { createSnapshot, snapshotClone, snapshotsList } from '@/tools/snapshots';
+import {
+  createSnapshot,
+  snapshotClone,
+  snapshotSetHold,
+  snapshotsList,
+} from '@/tools/snapshots';
 import { listDatasets, poolStatus, quotaReport, systemDatasetConfig } from '@/tools/storage';
 import {
   auditConfig,
@@ -113,6 +118,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(automatedTaskSetEnabled);
   catalog.register(snapshotClone);
   catalog.register(snapshotTaskRun);
+  catalog.register(snapshotSetHold);
   return catalog;
 }
 
@@ -166,6 +172,7 @@ export {
   shareAccess,
   sharesList,
   snapshotClone,
+  snapshotSetHold,
   snapshotsList,
   snapshotTaskRun,
   snapshotTasksList,

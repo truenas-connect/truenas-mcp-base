@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { of } from 'rxjs';
 import { Role } from '@/interfaces';
 import { fakeSystem, failingSystem } from '@/testing/fake-systems';
-import { createSnapshot, snapshotClone, snapshotsList } from '@/tools/index';
+import { createSnapshot, snapshotClone, snapshotSetHold, snapshotsList } from '@/tools/index';
 
 describe('snapshots_list', () => {
   /**
@@ -805,5 +806,442 @@ describe('snapshot_clone', () => {
     expect(snapshotClone.description).toContain('NOTHING HERE TOUCHES THE CLONE AFTERWARDS');
     expect(snapshotClone.description).toContain('storage_list_datasets');
     expect(snapshotClone.description).toContain('`dataset_properties` IS NOT ACCEPTED');
+  });
+});
+
+describe('snapshot_set_hold', () => {
+  const SNAPSHOT = 'tank/media@nightly-1';
+
+  /** The two positional params every hold-state read is made with. */
+  const HOLD_READ = [
+    [['OR', [[['id', '=', SNAPSHOT]], [['name', '=', SNAPSHOT]]]]],
+    { extra: { properties: ['creation'], holds: true } },
+  ];
+
+  /** A snapshot row as a hold-state read reports one, trimmed to what is read. */
+  const holdRow = (over: Record<string, unknown> = {}) => ({
+    id: SNAPSHOT,
+    name: SNAPSHOT,
+    holds: {},
+    ...over,
+  });
+
+  /** The row a held snapshot answers with: the `truenas` tag, count normalised. */
+  const heldRow = (over: Record<string, unknown> = {}) => holdRow({ holds: { truenas: 1 }, ...over });
+
+  /** A system where the snapshot is there and unheld — the plannable state. */
+  const plannable = (over: Partial<Record<string, unknown>> = {}) =>
+    fakeSystem({ ['pool.snapshot.query']: [holdRow()], ...over });
+
+  /**
+   * A system whose hold-state read answers differently each time it is made.
+   *
+   * `fakeSystem` answers every read of one method from the same map, so it
+   * cannot express a snapshot whose state moved — which is the whole of what
+   * `changed` compares. The last reading is repeated once the list runs out.
+   */
+  const holdingSystem = (readings: unknown[]) => {
+    const fake = fakeSystem({
+      ['pool.snapshot.hold']: null,
+      ['pool.snapshot.release']: null,
+    });
+    let made = 0;
+    fake.query.mockImplementation(() => of(readings[Math.min(made++, readings.length - 1)]));
+    return fake;
+  };
+
+  it('normalizes args: names the three it takes and drops everything else', () => {
+    expect(
+      snapshotSetHold.normalizeArgs?.({
+        snapshot: SNAPSHOT,
+        held: true,
+        recursive: true,
+        tag: 'mine',
+      }),
+    ).toEqual({ snapshot: SNAPSHOT, held: true, recursive: true });
+  });
+
+  it('requires a snapshot and a held boolean, and refuses a non-boolean recursive', async () => {
+    const { ctx } = plannable();
+    for (const bad of [undefined, '', 123, null, {}]) {
+      await expect(snapshotSetHold.plan(ctx, { snapshot: bad, held: true })).rejects.toThrow(
+        /"snapshot" is required/,
+      );
+    }
+    // `held` is the whole difference between protecting a snapshot and removing
+    // every hold on it, so a coerced "false" would release one the caller asked
+    // to hold.
+    for (const bad of [undefined, null, 'true', 1, {}]) {
+      await expect(snapshotSetHold.plan(ctx, { snapshot: SNAPSHOT, held: bad })).rejects.toThrow(
+        /"held" is required and must be a boolean/,
+      );
+    }
+    await expect(
+      snapshotSetHold.plan(ctx, { snapshot: SNAPSHOT, held: true, recursive: 'yes' }),
+    ).rejects.toThrow(/"recursive" must be a boolean/);
+  });
+
+  it('plans the hold-state read and the hold, in that order', async () => {
+    const { ctx } = plannable();
+    expect(await snapshotSetHold.plan(ctx, { snapshot: SNAPSHOT, held: true })).toEqual([
+      {
+        method: 'pool.snapshot.query',
+        params: HOLD_READ,
+        description:
+          `Read the hold state of "${SNAPSHOT}", to report whether it was already in the ` +
+          'state this call moves it to. Changes nothing. This same read is made again ' +
+          'immediately after the call, to report the state that resulted.',
+      },
+      {
+        method: 'pool.snapshot.hold',
+        params: [SNAPSHOT, { recursive: false }],
+        description:
+          `Place TrueNAS's hold on snapshot "${SNAPSHOT}". It carries no \`truenas\` tag, ` +
+          'so this will place one.',
+      },
+    ]);
+  });
+
+  it('plans a release naming every hold tag it removes, not only TrueNAS\'s', async () => {
+    // The asymmetry is the finding this tool carries: `release` passes no tag,
+    // which the middleware documents as removing all of them — including holds
+    // `snapshots_list` never reported.
+    const { ctx } = fakeSystem({ ['pool.snapshot.query']: [heldRow()] });
+    const [, mutation] = await snapshotSetHold.plan(ctx, { snapshot: SNAPSHOT, held: false });
+    expect(mutation.method).toBe('pool.snapshot.release');
+    expect(mutation.params).toEqual([SNAPSHOT, { recursive: false }]);
+    expect(mutation.description).toContain('THIS REMOVES EVERY HOLD TAG ON IT');
+    expect(mutation.description).toContain('placed outside TrueNAS');
+    expect(mutation.description).toContain('this will remove it, along with any other hold tag');
+  });
+
+  it('says a release of an unheld snapshot may still remove a hold it cannot see', async () => {
+    // "It is not held, so this changes nothing" would be the plan claiming to
+    // know about tags this tool never reads.
+    const { ctx } = plannable();
+    const [, mutation] = await snapshotSetHold.plan(ctx, { snapshot: SNAPSHOT, held: false });
+    expect(mutation.description).toContain('this is not an error');
+    expect(mutation.description).toContain('a hold placed under any other tag would still be removed');
+  });
+
+  it('says a hold on an already-held snapshot changes nothing and is not an error', async () => {
+    const { ctx } = fakeSystem({ ['pool.snapshot.query']: [heldRow()] });
+    const [, mutation] = await snapshotSetHold.plan(ctx, { snapshot: SNAPSHOT, held: true });
+    expect(mutation.description).toContain(
+      'It already carries that tag, so this changes nothing and is not an error.',
+    );
+  });
+
+  it('claims neither state where the hold state could not be read', async () => {
+    // A snapshot listed with no readable holds payload is neither already there
+    // nor about to move, and the plan must say so rather than pick one.
+    const { ctx } = fakeSystem({ ['pool.snapshot.query']: [holdRow({ holds: 'not a record' })] });
+    const [, mutation] = await snapshotSetHold.plan(ctx, { snapshot: SNAPSHOT, held: true });
+    expect(mutation.description).toContain(
+      "Whether TrueNAS's hold tag is on it could not be read, so this may change nothing.",
+    );
+  });
+
+  it('names the recursive scope in the plan and passes it to the call', async () => {
+    const { ctx } = plannable();
+    const [, mutation] = await snapshotSetHold.plan(ctx, {
+      snapshot: SNAPSHOT,
+      held: false,
+      recursive: true,
+    });
+    expect(mutation.description).toContain('RECURSIVELY');
+    expect(mutation.description).toContain('reaches more than the one snapshot named');
+    expect(mutation.params).toEqual([SNAPSHOT, { recursive: true }]);
+
+    const { ctx: executing, call } = holdingSystem([[holdRow()]]);
+    await snapshotSetHold.execute(executing, { snapshot: SNAPSHOT, held: false, recursive: true });
+    expect(call).toHaveBeenCalledWith('pool.snapshot.release', [SNAPSHOT, { recursive: true }]);
+  });
+
+  it('does not call a recursive hold of an already-held snapshot a no-op', async () => {
+    // The state is read off the one snapshot named while the call reaches every
+    // child of it, so "this changes nothing" would tell an approver a call is a
+    // no-op while it places holds on children that carry no tag — wrong in the
+    // reassuring direction, in the text approval is given against.
+    const { ctx } = fakeSystem({ ['pool.snapshot.query']: [heldRow()] });
+    const [, mutation] = await snapshotSetHold.plan(ctx, {
+      snapshot: SNAPSHOT,
+      held: true,
+      recursive: true,
+    });
+    expect(mutation.description).toContain(
+      'The snapshot named already carries that tag, so this changes nothing for the ' +
+        'snapshot named and is not an error.',
+    );
+    expect(mutation.description).toContain(
+      "Its children's hold state was not read, so nothing here says what this does to them.",
+    );
+    expect(mutation.description).not.toContain('so this changes nothing and is not an error');
+  });
+
+  it('scopes every other effect sentence to the snapshot named on a recursive call', async () => {
+    // One reading, four remaining sentences: each names its subject and none of
+    // them may reach past it.
+    const unread = "Its children's hold state was not read";
+    const systems = [
+      { held: true, rows: [holdRow()], says: 'so this will place one.' },
+      {
+        held: false,
+        rows: [heldRow()],
+        says: 'The snapshot named carries that tag, so this will remove it,',
+      },
+      {
+        held: false,
+        rows: [holdRow()],
+        says: 'The snapshot named carries no `truenas` tag, so this is not an error',
+      },
+      {
+        held: true,
+        rows: [holdRow({ holds: 'not a record' })],
+        says:
+          "Whether TrueNAS's hold tag is on the snapshot named could not be read, so this " +
+          'may change nothing for the snapshot named.',
+      },
+    ];
+    for (const { held, rows, says } of systems) {
+      const { ctx } = fakeSystem({ ['pool.snapshot.query']: rows });
+      const [, mutation] = await snapshotSetHold.plan(ctx, {
+        snapshot: SNAPSHOT,
+        held,
+        recursive: true,
+      });
+      expect(mutation.description).toContain(says);
+      expect(mutation.description).toContain(unread);
+    }
+  });
+
+  it('leaves the non-recursive sentences saying nothing about children', async () => {
+    // The clause is a recursive call's alone: on a call that reaches one
+    // snapshot there are no children for it to be about.
+    const { ctx } = fakeSystem({ ['pool.snapshot.query']: [heldRow()] });
+    const [, mutation] = await snapshotSetHold.plan(ctx, { snapshot: SNAPSHOT, held: true });
+    expect(mutation.description).not.toContain('children');
+  });
+
+  it('names the read step with the params execute actually makes it with', async () => {
+    // The plan step and both of `execute`'s reads come from one helper for the
+    // options and are written twice for the filter, so this is what keeps the
+    // two halves in step.
+    const { ctx } = plannable();
+    const [readStep] = await snapshotSetHold.plan(ctx, { snapshot: SNAPSHOT, held: true });
+    const { ctx: executing, query } = holdingSystem([[holdRow()]]);
+    await snapshotSetHold.execute(executing, { snapshot: SNAPSHOT, held: true });
+    expect(query).toHaveBeenCalledWith(readStep.method, ...(readStep.params as unknown[]));
+  });
+
+  it('fails the plan, naming the snapshot, where no snapshot has that name', async () => {
+    const { ctx } = plannable({ ['pool.snapshot.query']: [] });
+    await expect(snapshotSetHold.plan(ctx, { snapshot: SNAPSHOT, held: true })).rejects.toThrow(
+      new RegExp(`No snapshot named "${SNAPSHOT}" on this system`),
+    );
+  });
+
+  it('reads the snapshot off the response rather than the row count', async () => {
+    // A dropped filter answers with every snapshot on the system, which a count
+    // would read as "it exists" — and the holds reported would be a different
+    // snapshot's.
+    const { ctx } = plannable({
+      ['pool.snapshot.query']: [holdRow({ id: 'tank/other@nightly-1', name: 'tank/other@nightly-1' })],
+    });
+    await expect(snapshotSetHold.plan(ctx, { snapshot: SNAPSHOT, held: true })).rejects.toThrow(
+      /No snapshot named/,
+    );
+  });
+
+  it('matches the snapshot on either declared name field', async () => {
+    const { ctx: byName } = plannable({
+      ['pool.snapshot.query']: [holdRow({ id: 'something-else' })],
+    });
+    await expect(
+      snapshotSetHold.plan(byName, { snapshot: SNAPSHOT, held: true }),
+    ).resolves.toHaveLength(2);
+
+    const { ctx: byId } = plannable({ ['pool.snapshot.query']: [holdRow({ name: 'something-else' })] });
+    await expect(
+      snapshotSetHold.plan(byId, { snapshot: SNAPSHOT, held: true }),
+    ).resolves.toHaveLength(2);
+  });
+
+  it('asks the system for hold state under either name field', async () => {
+    // `fakeSystem` answers every filter with the same rows, so the two cases
+    // above pass whatever this read asked for — the filter and `holds: true`
+    // are asserted here instead. Without `holds`, every reading would be null
+    // and every `changed` with it.
+    const { ctx, query } = plannable();
+    await snapshotSetHold.plan(ctx, { snapshot: SNAPSHOT, held: true });
+    expect(query).toHaveBeenCalledWith('pool.snapshot.query', ...HOLD_READ);
+  });
+
+  it('reads the state, holds the snapshot, and reads it back', async () => {
+    const { ctx, call, query } = holdingSystem([[holdRow()], [heldRow()]]);
+    const result = await snapshotSetHold.execute(ctx, { snapshot: SNAPSHOT, held: true });
+    expect(call).toHaveBeenCalledWith('pool.snapshot.hold', [SNAPSHOT, { recursive: false }]);
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({
+      snapshot: SNAPSHOT,
+      requested_held: true,
+      recursive: false,
+      previous_lookup: 'FOUND',
+      previous_read_error: null,
+      previously_held: false,
+      resulting_lookup: 'FOUND',
+      resulting_read_error: null,
+      resulting_held: true,
+      changed: true,
+    });
+  });
+
+  it('reports holding an already-held snapshot as changed: false, not as an error', async () => {
+    const { ctx } = holdingSystem([[heldRow()], [heldRow()]]);
+    expect(await snapshotSetHold.execute(ctx, { snapshot: SNAPSHOT, held: true })).toMatchObject({
+      previously_held: true,
+      resulting_held: true,
+      changed: false,
+    });
+  });
+
+  it('reports releasing an unheld snapshot as changed: false, not as an error', async () => {
+    const { ctx, call } = holdingSystem([[holdRow()], [holdRow()]]);
+    expect(await snapshotSetHold.execute(ctx, { snapshot: SNAPSHOT, held: false })).toMatchObject({
+      previously_held: false,
+      resulting_held: false,
+      changed: false,
+    });
+    // `changed: false` here does not say nothing was removed — a hold under
+    // another tag is invisible to both readings — which is why the call is
+    // still made and the description says so.
+    expect(call).toHaveBeenCalledWith('pool.snapshot.release', [SNAPSHOT, { recursive: false }]);
+  });
+
+  it('derives changed from the two readings rather than from the request', async () => {
+    // A system that accepted the call and applied nothing: the request says
+    // held, both readings say otherwise, and `changed` follows the readings.
+    const { ctx } = holdingSystem([[holdRow()], [holdRow()]]);
+    expect(await snapshotSetHold.execute(ctx, { snapshot: SNAPSHOT, held: true })).toMatchObject({
+      requested_held: true,
+      previously_held: false,
+      resulting_held: false,
+      changed: false,
+    });
+  });
+
+  it('makes the call, and reports null, where the read before it failed', async () => {
+    // Skipping the mutation for a read that failed would be `execute` branching
+    // on state read at execution time, which the confirmation token cannot bind.
+    const { ctx, call } = failingSystem(
+      { ['pool.snapshot.hold']: null },
+      { ['pool.snapshot.query']: { reason: 'connection reset' } },
+    );
+    expect(await snapshotSetHold.execute(ctx, { snapshot: SNAPSHOT, held: true })).toEqual({
+      snapshot: SNAPSHOT,
+      requested_held: true,
+      recursive: false,
+      previous_lookup: 'UNREADABLE',
+      previous_read_error: 'connection reset',
+      previously_held: null,
+      resulting_lookup: 'UNREADABLE',
+      resulting_read_error: 'connection reset',
+      resulting_held: null,
+      changed: null,
+    });
+    expect(call).toHaveBeenCalledWith('pool.snapshot.hold', [SNAPSHOT, { recursive: false }]);
+  });
+
+  it('does not fail the tool where only the read after the call failed', async () => {
+    // The mutation had already landed by then. Rejecting here would report a
+    // hold that was placed as a failure.
+    const { ctx, query } = holdingSystem([[holdRow()]]);
+    query.mockImplementationOnce(() => of([holdRow()]));
+    query.mockImplementationOnce(() => {
+      throw new Error('socket closed');
+    });
+    expect(await snapshotSetHold.execute(ctx, { snapshot: SNAPSHOT, held: true })).toMatchObject({
+      previous_lookup: 'FOUND',
+      previously_held: false,
+      resulting_lookup: 'UNREADABLE',
+      resulting_read_error: 'socket closed',
+      resulting_held: null,
+      changed: null,
+    });
+  });
+
+  it('reports a read that completed and listed nothing as NOT_FOUND', async () => {
+    // The snapshot cleared between the plan and the confirmation. The call is
+    // still made, because what runs must be what was approved.
+    const { ctx, call } = holdingSystem([[]]);
+    expect(await snapshotSetHold.execute(ctx, { snapshot: SNAPSHOT, held: true })).toMatchObject({
+      previous_lookup: 'NOT_FOUND',
+      previous_read_error: null,
+      previously_held: null,
+      resulting_lookup: 'NOT_FOUND',
+      resulting_held: null,
+      changed: null,
+    });
+    expect(call).toHaveBeenCalledWith('pool.snapshot.hold', [SNAPSHOT, { recursive: false }]);
+  });
+
+  it('reports a snapshot that was listed with no readable hold state as FOUND beside a null', async () => {
+    // The fourth cause of a null reading, which the lookup alone cannot
+    // separate from the other three.
+    const { ctx } = holdingSystem([[holdRow({ holds: 'not a record' })]]);
+    expect(await snapshotSetHold.execute(ctx, { snapshot: SNAPSHOT, held: true })).toMatchObject({
+      previous_lookup: 'FOUND',
+      previously_held: null,
+      resulting_lookup: 'FOUND',
+      resulting_held: null,
+      changed: null,
+    });
+  });
+
+  it('reads each hold state as TrueNAS\'s own tag and never as any ZFS hold', async () => {
+    // The middleware normalises the count, and a payload that is not a record —
+    // including a system that ignored the `holds` request — is null and never
+    // false: `false` says nothing is protecting this snapshot, and a caller
+    // acting on that prunes it.
+    const { ctx } = holdingSystem([[holdRow({ holds: { truenas: 0 } })]]);
+    expect(await snapshotSetHold.execute(ctx, { snapshot: SNAPSHOT, held: true })).toMatchObject({
+      previously_held: false,
+    });
+
+    const { ctx: absent } = holdingSystem([[holdRow({ holds: undefined })]]);
+    expect(await snapshotSetHold.execute(absent, { snapshot: SNAPSHOT, held: true })).toMatchObject({
+      previously_held: null,
+    });
+  });
+
+  it('is registered as a Full-role reversible mutation', () => {
+    // `reversible` records that the operation destroys no data. It does not
+    // mean a release can be undone from here, which the description says.
+    expect(snapshotSetHold.requiredRole).toBe(Role.Full);
+    expect(snapshotSetHold.mutating).toBe(true);
+    expect(snapshotSetHold.destructiveness).toBe('reversible');
+  });
+
+  it('states the asymmetry, the narrow reading and the release it cannot undo', () => {
+    // Every one of these is a reading a caller would otherwise get wrong, and
+    // prose is the only place they can be stated — so they are pinned rather
+    // than left to a later edit.
+    expect(snapshotSetHold.description).toContain(
+      '`held: false` REMOVES EVERY HOLD TAG ON THE SNAPSHOT, NOT ONLY TRUENAS\'S',
+    );
+    expect(snapshotSetHold.description).toContain('(unconfirmed)');
+    expect(snapshotSetHold.description).toContain(
+      "EACH READING IS TRUENAS'S OWN HOLD TAG AND NOT ANY ZFS HOLD",
+    );
+    expect(snapshotSetHold.description).toContain(
+      'A `changed: false` ON A RELEASE THEREFORE DOES NOT MEAN NOTHING WAS REMOVED',
+    );
+    expect(snapshotSetHold.description).toContain(
+      'IT DOES NOT MEAN A RELEASE CAN BE UNDONE FROM HERE',
+    );
+    expect(snapshotSetHold.description).toContain(
+      'ALL THREE ARE READ FROM THE SNAPSHOT NAMED AND ESTABLISH NOTHING ABOUT ITS CHILDREN',
+    );
+    expect(snapshotSetHold.description).toContain('snapshots_list');
   });
 });

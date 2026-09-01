@@ -39,7 +39,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
   Mutating family, all of them two-phase plan/confirm and all
   `destructiveness: 'reversible'`: `snapshots_create`, `alerts_dismiss`,
   `alerts_restore`, `scheduled_task_set_enabled`, `cloudsync_run`,
-  `automated_task_set_enabled`, `snapshot_clone`, `snapshot_task_run` —
+  `automated_task_set_enabled`, `snapshot_clone`, `snapshot_task_run`,
+  `snapshot_set_hold` —
   `cloudsync_run` and `snapshot_task_run` the two that start a background job,
   which each watches for a bounded time and then reports on rather than waiting
   out. `snapshot_clone` is the additive route
@@ -47,7 +48,14 @@ confirmation UX, audit sinks) enters through injected interfaces.
   exists, which is what lets the catalog decline the rollback that answers the
   same question destructively — though the clone it adds does pin its source
   snapshot, which cannot then be destroyed while that clone is there, and its
-  description leads with that. `destructiveness`
+  description leads with that. `snapshot_set_hold` is the one mutation that
+  prevents data loss rather than risking it: it places TrueNAS's hold on a
+  snapshot, or removes the holds on one, and since nothing here deletes a named
+  snapshot it is the only protection the catalog can offer the snapshot an
+  operator would recover from. The two directions are not symmetric — placing a
+  hold adds the `truenas` tag alone, removing one removes every hold tag on the
+  snapshot, including any this catalog never reported — which its description
+  and its plan both state. `destructiveness`
   is about a tool's own operation and not about the data that operation acts
   on: `cloudsync_run` starts a task whose own `transfer_mode` may delete data
   for good, and `snapshot_task_run` starts a run that ends in a system-wide

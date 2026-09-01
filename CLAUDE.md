@@ -1906,6 +1906,84 @@ a response, and `src/testing/fake-systems.ts` stubs `call` and `query` off one
 method→response map. Two copies now exist, which is when a shared fixture could
 be designed from evidence — a later ticket's call, not a side effect of this one.
 
+### One call made twice is named once, and the step says when (#156)
+
+`snapshot_set_hold` returns **two** plan steps and `execute` makes **three**
+calls. `pool.snapshot.hold` and `pool.snapshot.release` answer `null`, so there
+is no updated entity to read the outcome off (#121) and the state has to be read
+both before and after — which is `alerts_dismiss`'s position (#119) with a
+second read on the far side of the mutation. Both reads are the SAME call: same
+method, same params, from one helper. Listing it twice would show an approver
+two entries it has no way to tell apart, so it is named once and that step's own
+description says it runs again immediately after the call. That is the seam
+`cloudsync_run` uses for the `core.get_jobs` its tracking issues (#122), reached
+for a different reason — there the params do not exist until the approved call
+has been made, here they are identical to a step already in the plan.
+
+**#119 is unchanged and this is not an exception to it.** The rule is that
+nothing `execute` calls may be missing from the approval; a repeated call is not
+a further call to disclose, it is the same one happening twice, and the plan says
+so in words. **Ask whether an approver reading the plan could be surprised by a
+call `execute` makes** — that is the test, not whether the step count equals the
+call count.
+
+### The two directions of one mutation need not be symmetric (#156)
+
+`held: true` places TrueNAS's own hold tag and only that tag; `held: false`
+removes **every** hold tag on the snapshot, including any placed outside TrueNAS
+that `snapshots_list` never reported — its `held` is the `truenas` tag alone
+(#155). The middleware's own methods are what differ: `hold` names the tag,
+`release` names none, and the second is documented as removing all of them.
+
+**A tool with a discriminator must not describe one arm and let the other
+inherit it.** The description and the plan step both state the asymmetry, and
+the plan's already-in-the-target-state sentence refuses the obvious wording for
+a release: *"it is not held, so this changes nothing"* is the tool claiming to
+know about tags it never reads. What it says instead is that this is not an
+error AND that a hold under another tag would still be removed.
+
+That reaches the result, which is where it is easiest to miss. `changed`
+compares the two readings, and both readings are the `truenas` tag — so
+**`changed: false` on a release does not mean nothing was removed**. Said
+outright, because side-by-side fields are what an implied completeness looks
+like from the outside (#138), and a caller reading `changed: false` as "no
+effect" is the one reading that costs a snapshot's protection.
+
+**A sentence derived from a state read may not reach past what was read, and
+`recursive` is where that bites.** `readHoldState` queries the one snapshot
+named while the call reaches every child of it, so the plan's
+already-in-the-target-state sentence — *"it already carries that tag, so this
+changes nothing"* — was true of the snapshot and false of the operation, in the
+reassuring direction, in the one text a person reads before approving. The
+effect sentence therefore takes `recursive`: each arm names the snapshot it is
+about and says outright that the children's hold state was not read, which is
+all a read of one snapshot supports. The same scoping is owed by the result,
+where the three readings above are the named snapshot's alone — so a recursive
+hold of an already-held snapshot reports `changed: false` having placed holds on
+children, which the description states beside the release reading it sits next
+to.
+
+**A scope sentence beside an effect sentence does not scope it.**
+`recursiveSentence` already said the call reaches more than the snapshot named,
+one clause earlier, and the no-op claim still read as being about the call —
+adjacency is not qualification, which is #138's implied-join finding arriving in
+a single paragraph of prose.
+
+**`reversible` is #153's trap again, one tool over.** The operation destroys no
+data — it changes what may destroy a snapshot later — but a release is not
+undoable from here: setting the hold again places the `truenas` tag and only
+that tag, so a foreign tag a release removed is restored by nothing in this
+catalog. Where a tool's operation is reversible in principle and this catalog
+still cannot reverse it, say so.
+
+**Whether a hold actually stops retention destroying the snapshot is
+`(unconfirmed)`**, in `pool_resilver_config`'s form (#141). What is claimed is
+the ZFS mechanism — a hold makes the destroy itself fail, and
+`annotate_snapshots` never reads holds, so `snapshots_list` can report a
+`scheduled_removal` for a snapshot that survives it. How TrueNAS reports or
+recovers from a destroy that fails was not read off a live system, and asserting
+a guessed side effect is worse than saying nothing (#120).
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

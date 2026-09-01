@@ -141,4 +141,5 @@ export {
   automatedTaskSetEnabled,
   snapshotClone,
   snapshotTaskRun,
+  snapshotSetHold,
 } from '@/tools/index';
