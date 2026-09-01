@@ -69,6 +69,7 @@ describe('createDefaultCatalog', () => {
       'automated_task_set_enabled',
       'snapshot_clone',
       'snapshot_task_run',
+      'snapshot_set_hold',
     ]);
   });
 
@@ -105,6 +106,12 @@ describe('createDefaultCatalog', () => {
   it('does not advertise snapshot_task_run to a read-only credential', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(
       'snapshot_task_run',
+    );
+  });
+
+  it('does not advertise snapshot_set_hold to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(
+      'snapshot_set_hold',
     );
   });
 

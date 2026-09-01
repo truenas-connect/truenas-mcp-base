@@ -13,8 +13,8 @@ import {
 } from '@/tools/common';
 
 /**
- * Snapshots family: the snapshots that exist, taking a new one, and cloning one
- * into a new dataset.
+ * Snapshots family: the snapshots that exist, taking a new one, cloning one
+ * into a new dataset, and protecting one from destruction.
  */
 
 /**
@@ -882,6 +882,368 @@ export const snapshotClone: MutatingTool = {
       destination: args.destination,
       destination_found: found,
       destination_read_error: readError,
+    };
+  },
+};
+
+/**
+ * `snapshot_set_hold`: the one snapshot mutation that PREVENTS data loss.
+ *
+ * Deleting a snapshot and rolling a dataset back are both rejected at
+ * registration (`catalog/catalog.ts`), so a hold is the only protection this
+ * catalog can offer the snapshot an operator would recover from — and the
+ * cheapest safety move before anything risky, since retention, a periodic
+ * snapshot task or a person can otherwise destroy it while the risky work is
+ * still in progress.
+ *
+ * ONE TOOL WITH A DISCRIMINATOR, WHICH IS #121's TEST AND NOT #97's.
+ * `pool.snapshot.hold` and `pool.snapshot.release` take literally the same
+ * params — `(id, { recursive })` in, `null` out — so two tools would be two
+ * copies of one `plan`/`execute` pair differing in which method is dialled.
+ * Nothing is missing from a mutation, so there is no section to be the finding.
+ *
+ * THE TWO DIRECTIONS ARE NOT SYMMETRIC, AND THAT IS THE FINDING THIS TOOL
+ * CARRIES. `hold` adds the `truenas` tag and only that tag; `release` passes no
+ * tag at all, which the middleware documents as removing ALL hold tags. So a
+ * release removes holds this tool never placed and that `snapshots_list` never
+ * reported — its `held` is the `truenas` tag alone (#155). Reporting a narrower
+ * effect than the call has is this repository's most common finding pointed at
+ * a mutation, so the description and the plan both say it outright.
+ *
+ * THE METHOD ANSWERS `null`, SO THE OUTCOME IS READ BY RE-READING. That places
+ * this with `alerts_dismiss` (#119) rather than `scheduled_task_set_enabled`
+ * (#121): there is no updated entity to read the result off, so `execute` reads
+ * the hold state, makes the call, and reads it again. `changed` compares the
+ * two READINGS — a `changed` derived from the request would report a call the
+ * system accepted and did not apply as having changed something.
+ *
+ * THE PLAN NAMES TWO STEPS AND `execute` MAKES THREE CALLS, AND THAT IS
+ * DELIBERATE. The two reads are ONE call — same method, same params, from
+ * {@link holdReadParams} — made twice, so listing it twice would show an
+ * approver two entries it cannot tell apart. It is named once, and the step's
+ * own description says it runs again after the mutation, which is the seam
+ * `cloudsync_run` uses for the `core.get_jobs` its tracking issues (#122).
+ * Nothing `execute` calls is hidden from the approval, which is what #119 is
+ * about.
+ *
+ * `destructiveness: 'reversible'` RECORDS THE OPERATION: it destroys no data,
+ * and what it changes is what may destroy a snapshot later. It is #153's trap
+ * one tool over — a release is NOT undoable from here, because setting the hold
+ * again places the `truenas` tag and only that tag, so a foreign tag a release
+ * removed is restored by nothing in this catalog. The description says so.
+ */
+
+/** The three arguments the tool takes. */
+interface HoldArgs {
+  snapshot: string;
+  held: boolean;
+  recursive: boolean;
+}
+
+/**
+ * The caller's arguments, or the error naming what is wrong with them.
+ *
+ * `held` is required and strict for the reason it exists: it is the whole
+ * difference between protecting a snapshot and removing every hold on it, and a
+ * coerced `"false"` would release one the caller asked to hold. `recursive` is
+ * strict for {@link parseArgs}'s reason — a silently-dropped `recursive` widens
+ * or narrows a call the user approved as the other one.
+ */
+function parseHoldArgs(args: Record<string, unknown>): HoldArgs {
+  const snapshot = args['snapshot'];
+  if (typeof snapshot !== 'string' || snapshot.length === 0) {
+    throw new Error('"snapshot" is required');
+  }
+  const held = args['held'];
+  if (typeof held !== 'boolean') {
+    throw new Error('"held" is required and must be a boolean');
+  }
+  const recursive = args['recursive'];
+  if (recursive != null && typeof recursive !== 'boolean') {
+    throw new Error('"recursive" must be a boolean');
+  }
+  return { snapshot, held, recursive: recursive === true };
+}
+
+/**
+ * The options every hold-state read in this file is made with.
+ *
+ * Hoisted for {@link DATASET_READ_OPTIONS}'s reason, and with the same half
+ * left open: the FILTER is written twice — inlined in {@link readHoldState}
+ * because written to a `const` it widens out of the filter tuple, and again in
+ * {@link holdReadParams} for the plan step — so a test takes the read step back
+ * out of the plan and asserts `execute` made its call with it.
+ *
+ * `holds: true` is what makes the middleware report hold state at all, and one
+ * property is asked for because this read needs none and an empty list is not
+ * documented to mean "no properties" — a snapshot row otherwise carries every
+ * ZFS property of the snapshot.
+ */
+const HOLD_READ_OPTIONS = { extra: { properties: ['creation'], holds: true } };
+
+/**
+ * The two positional params a hold-state read reaches the middleware with, for
+ * the plan step that names one.
+ */
+function holdReadParams(snapshot: string): unknown {
+  return [[['OR', [[['id', '=', snapshot]], [['name', '=', snapshot]]]]], HOLD_READ_OPTIONS];
+}
+
+/** What one hold-state read established. */
+interface HoldReading {
+  /** Whether the system listed a snapshot under the name given. */
+  listed: boolean;
+  /**
+   * TrueNAS's own hold tag, as {@link heldOf} reads it — null both where the
+   * snapshot was not listed and where it was listed and reported no hold state
+   * this tool can read.
+   */
+  held: boolean | null;
+}
+
+/**
+ * The hold state this system reports for the snapshot named.
+ *
+ * Both declared name fields are compared and the read asks both ways, for
+ * {@link snapshotExists}'s reason: `id` and `name` are two separate required
+ * strings with no stated relationship, and the response is checked rather than
+ * counted because a dropped filter answers with every snapshot on the system.
+ * Reading the first row of that would report a different snapshot's holds.
+ */
+async function readHoldState(ctx: ToolContext, snapshot: string): Promise<HoldReading> {
+  const matches = await firstValueFrom(
+    ctx.system.client.api.query(
+      'pool.snapshot.query',
+      [['OR', [[['id', '=', snapshot]], [['name', '=', snapshot]]]]],
+      HOLD_READ_OPTIONS,
+    ),
+  );
+  const row = matches.find(
+    (candidate) =>
+      stringOrNull(candidate['id']) === snapshot || stringOrNull(candidate['name']) === snapshot,
+  );
+  return row === undefined
+    ? { listed: false, held: null }
+    : { listed: true, held: heldOf(row['holds']) };
+}
+
+/** What a hold-state read did, where the reading alone cannot say. */
+function lookupOf(reading: HoldReading | null, error: string | null): string {
+  if (error !== null) return 'UNREADABLE';
+  return reading !== null && reading.listed ? 'FOUND' : 'NOT_FOUND';
+}
+
+/**
+ * What the plan says the call will do to the snapshot, given the state it is in
+ * now.
+ *
+ * Three cases and not two, as `alerts_dismiss`'s is: a snapshot whose hold
+ * state could not be read is neither already there nor about to move. The
+ * already-released case carries the asymmetry rather than reading as a no-op —
+ * "it is not held, so this changes nothing" would be the tool claiming to know
+ * about tags it cannot see.
+ */
+function holdEffectSentence(current: boolean | null, target: boolean): string {
+  if (current === null) {
+    return "Whether TrueNAS's hold tag is on it could not be read, so this may change nothing.";
+  }
+  if (target) {
+    return current
+      ? 'It already carries that tag, so this changes nothing and is not an error.'
+      : 'It carries no `truenas` tag, so this will place one.';
+  }
+  return current
+    ? 'It carries that tag, so this will remove it, along with any other hold tag on it.'
+    : 'It carries no `truenas` tag, so this is not an error — but a hold placed ' +
+        'under any other tag would still be removed, and this catalog cannot see one.';
+}
+
+/** The scope a recursive call reaches, for the plan step that names it. */
+function recursiveSentence(recursive: boolean): string {
+  return recursive
+    ? ' RECURSIVELY: this is applied to the snapshot\'s children as well as to it, ' +
+        'so it reaches more than the one snapshot named.'
+    : '';
+}
+
+export const snapshotSetHold: MutatingTool = {
+  name: 'snapshot_set_hold',
+  description:
+    "Places or removes TrueNAS's hold on one ZFS snapshot, so the snapshot can " +
+    'be protected from destruction or released again. Two-phase: called ' +
+    'without a confirmation_token it returns a plan for user approval; called ' +
+    'with one it sets the hold. A hold is the cheapest protection available ' +
+    'here for the snapshot an operator would recover from — this catalog has ' +
+    'no tool that deletes a named snapshot or rolls a dataset back, but ' +
+    'retention, a periodic snapshot task or a person can still destroy one, ' +
+    'and `snapshot_task_run` triggers a retention pass that does exactly that. ' +
+    '`snapshot` is the full `dataset@snapshot` name as `snapshots_list` ' +
+    'reports it in `name`, on the system being targeted. `held` says which of ' +
+    'the two to do and is required: true places the hold, false removes it. ' +
+    '`held: false` REMOVES EVERY HOLD TAG ON THE SNAPSHOT, NOT ONLY ' +
+    "TRUENAS'S. The two directions are not symmetric — placing a hold adds the " +
+    '`truenas` tag and only that tag, while removing one asks the system to ' +
+    'remove all hold tags, including any placed outside TrueNAS, by another ' +
+    'tool or by hand, which `snapshots_list` never reported and this tool ' +
+    "cannot see. `recursive` applies the same operation to the snapshot's " +
+    'children as well as to it, and a recursive release is the widest form of ' +
+    'that: it can remove holds this catalog never reported, on snapshots it ' +
+    'never named. Default false. PLANNING FAILS, NAMING THE SNAPSHOT, where ' +
+    'this system lists no snapshot under the name given. WHETHER A HOLD ' +
+    'ACTUALLY STOPS RETENTION DESTROYING THE SNAPSHOT IS (unconfirmed) HERE: a ' +
+    'ZFS hold makes the destroy itself fail, and `snapshots_list`\'s ' +
+    '`scheduled_removal` does not account for holds, so a held snapshot can ' +
+    'report a removal time and the removal can still be attempted — but how ' +
+    'TrueNAS reports or recovers from a destroy that fails was not read off a ' +
+    'live system and is not claimed here. SETTING A HOLD ON AN ALREADY-HELD ' +
+    'SNAPSHOT IS NOT AN ERROR, and neither is releasing one that is not held; ' +
+    'the plan says which of the two it is about to do. The result reports ' +
+    '`requested_held`, what was asked for; `previously_held`, the state read ' +
+    'immediately before the call; `resulting_held`, the state read immediately ' +
+    'after it; and `changed`, those two readings compared rather than the ' +
+    "request. EACH READING IS TRUENAS'S OWN HOLD TAG AND NOT ANY ZFS HOLD, the " +
+    'same reading `snapshots_list` reports as `held`: the system answers ' +
+    'whether the `truenas` tag is on the snapshot and nothing else, so ' +
+    '`previously_held: false` means "no `truenas` tag" rather than "nothing ' +
+    'was holding this". A `changed: false` ON A RELEASE THEREFORE DOES NOT ' +
+    'MEAN NOTHING WAS REMOVED — a hold under another tag is invisible to both ' +
+    'readings and would still have been removed. `previous_lookup` and ' +
+    '`resulting_lookup` say what each read did: `FOUND` is a read that named ' +
+    'this snapshot, `NOT_FOUND` a read that completed and listed none under ' +
+    'this name, and `UNREADABLE` a read that failed, with ' +
+    '`previous_read_error` and `resulting_read_error` naming why and null in ' +
+    'the other two cases. EACH HAS THREE VALUES AND ITS READING HAS FOUR ' +
+    'CAUSES FOR A NULL: the two failures above, and ALSO `FOUND` where the ' +
+    'snapshot was listed and reported no hold state this tool could read. So a ' +
+    'lookup alone does not tell them apart, and `FOUND` beside a null reading ' +
+    'is that fourth case. `changed` IS NULL WHERE EITHER READING IS, WHICH IS ' +
+    'NOT "NOTHING CHANGED". THE CALL IS MADE IN ALL OF THOSE CASES, because ' +
+    'what runs must be what was approved — and a read that failed after it is ' +
+    'not a failed call: the mutation had already landed and this tool simply ' +
+    'could not establish the outcome. `snapshots_list` with `report_held` ' +
+    "settles it. `destructiveness: 'reversible'` records that this operation " +
+    'destroys no data; it changes what may destroy a snapshot later and ' +
+    'destroys nothing itself. IT DOES NOT MEAN A RELEASE CAN BE UNDONE FROM ' +
+    'HERE: setting the hold again places the `truenas` tag and only that tag, ' +
+    'so any other tag a release removed is restored by nothing in this catalog.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      snapshot: {
+        type: 'string',
+        minLength: 1,
+        description:
+          'The snapshot to hold or release, as its full `dataset@snapshot` ' +
+          'name — the `name` `snapshots_list` reports, e.g. ' +
+          '"tank/media@nightly-1", on the system being targeted.',
+      },
+      held: {
+        type: 'boolean',
+        description:
+          "True places TrueNAS's hold on the snapshot; false removes the " +
+          'holds on it. FALSE REMOVES EVERY HOLD TAG, including any placed ' +
+          'outside TrueNAS that this catalog never reported.',
+      },
+      recursive: {
+        type: 'boolean',
+        default: false,
+        description:
+          "Apply the same operation to the snapshot's children as well as to " +
+          'it. Default false.',
+      },
+    },
+    required: ['snapshot', 'held'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const args = parseHoldArgs(rawArgs);
+    return { snapshot: args.snapshot, held: args.held, recursive: args.recursive };
+  },
+  async plan(ctx, rawArgs) {
+    const args = parseHoldArgs(rawArgs);
+    const reading = await readHoldState(ctx, args.snapshot);
+    // The failure names the argument the caller supplied, because that is the
+    // part of it a caller can check. `snapshot_clone` fails the same way.
+    if (!reading.listed) {
+      throw new Error(`No snapshot named "${args.snapshot}" on this system`);
+    }
+    return [
+      {
+        method: 'pool.snapshot.query',
+        params: holdReadParams(args.snapshot),
+        description:
+          `Read the hold state of "${args.snapshot}", to report whether it was ` +
+          'already in the state this call moves it to. Changes nothing. This ' +
+          'same read is made again immediately after the call, to report the ' +
+          'state that resulted.',
+      },
+      {
+        method: args.held ? 'pool.snapshot.hold' : 'pool.snapshot.release',
+        params: [args.snapshot, { recursive: args.recursive }],
+        description:
+          (args.held
+            ? `Place TrueNAS's hold on snapshot "${args.snapshot}".`
+            : `Remove the holds on snapshot "${args.snapshot}". THIS REMOVES EVERY ` +
+              'HOLD TAG ON IT, including any placed outside TrueNAS that this ' +
+              'catalog never reported.') +
+          recursiveSentence(args.recursive) +
+          ' ' +
+          holdEffectSentence(reading.held, args.held),
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const args = parseHoldArgs(rawArgs);
+    // Caught rather than thrown, as `alerts_dismiss`'s lookup is: this read
+    // exists to describe the outcome, and letting it fail the call would lose
+    // an approval the user has already given for a mutation that is still safe
+    // to make.
+    let previous: HoldReading | null = null;
+    let previousError: string | null = null;
+    try {
+      previous = await readHoldState(ctx, args.snapshot);
+    } catch (reason) {
+      previousError = errorText(reason);
+    }
+    // Unconditional, whatever the read said. Branching on state read at
+    // execution time is what the confirmation token cannot bind.
+    await firstValueFrom(
+      args.held
+        ? ctx.system.client.api.call('pool.snapshot.hold', [
+            args.snapshot,
+            { recursive: args.recursive },
+          ])
+        : ctx.system.client.api.call('pool.snapshot.release', [
+            args.snapshot,
+            { recursive: args.recursive },
+          ]),
+    );
+    // The mutation has landed by here, so this read may not fail the tool
+    // either — the result says the resulting state could not be established.
+    let resulting: HoldReading | null = null;
+    let resultingError: string | null = null;
+    try {
+      resulting = await readHoldState(ctx, args.snapshot);
+    } catch (reason) {
+      resultingError = errorText(reason);
+    }
+    const previouslyHeld = previous?.held ?? null;
+    const resultingHeld = resulting?.held ?? null;
+    return {
+      snapshot: args.snapshot,
+      requested_held: args.held,
+      recursive: args.recursive,
+      previous_lookup: lookupOf(previous, previousError),
+      previous_read_error: previousError,
+      previously_held: previouslyHeld,
+      resulting_lookup: lookupOf(resulting, resultingError),
+      resulting_read_error: resultingError,
+      resulting_held: resultingHeld,
+      // Both readings or nothing.
+      changed:
+        previouslyHeld === null || resultingHeld === null ? null : previouslyHeld !== resultingHeld,
     };
   },
 };
