@@ -39,9 +39,10 @@ confirmation UX, audit sinks) enters through injected interfaces.
   Mutating family, all of them two-phase plan/confirm and all
   `destructiveness: 'reversible'`: `snapshots_create`, `alerts_dismiss`,
   `alerts_restore`, `scheduled_task_set_enabled`, `cloudsync_run`,
-  `automated_task_set_enabled`, `snapshot_clone` — `cloudsync_run` the only one
-  that starts a background job, which it watches for a bounded time and then
-  reports on rather than waiting out. `snapshot_clone` is the additive route
+  `automated_task_set_enabled`, `snapshot_clone`, `snapshot_task_run` —
+  `cloudsync_run` and `snapshot_task_run` the two that start a background job,
+  which each watches for a bounded time and then reports on rather than waiting
+  out. `snapshot_clone` is the additive route
   back to a snapshot's data: it deletes nothing and modifies no dataset that
   exists, which is what lets the catalog decline the rollback that answers the
   same question destructively — though the clone it adds does pin its source
@@ -49,7 +50,10 @@ confirmation UX, audit sinks) enters through injected interfaces.
   description leads with that. `destructiveness`
   is about a tool's own operation and not about the data that operation acts
   on: `cloudsync_run` starts a task whose own `transfer_mode` may delete data
-  for good, which its description and its plan state and this field does not.
+  for good, and `snapshot_task_run` starts a run that ends in a system-wide
+  retention pass that destroys snapshots belonging to every periodic snapshot
+  task and not only the one being run — which each tool's description and plan
+  state and this field does not.
   `scheduled_task_set_enabled` and `automated_task_set_enabled` switch a task
   on or off between them and neither covers the other's kinds: the first takes
   the six that run on a schedule, and the second the init/shutdown scripts,

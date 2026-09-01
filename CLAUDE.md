@@ -1818,6 +1818,78 @@ that then fails is marked `(unconfirmed)`, in `pool_resilver_config`'s form
 (#141): what is claimed is the pinning, which the ZFS semantics fix, and not the
 error, which was not read off a live system.
 
+### A triggering tool states the SCOPE of the effect it does not author (#154)
+
+`snapshot_task_run` is the second job-backed tool and it copies `cloudsync_run`
+whole — `callAndGetJobId` and `trackJob` apart, a bounded watch that does not
+end the job, `ended` off the tracking completing, `job_id` off the correlation.
+Nothing in #122 needed rethinking, and none of it is re-argued in the code. What
+this ticket had to decide is the PLAN, and the decision generalises past this
+tool.
+
+**A run of a periodic snapshot task PRUNES, and the pruning reaches past the
+task named.** `pool.snapshottask.run` interrupts zettarepl's scheduler with the
+task, which goes round the same loop a scheduled fire goes round and ends in the
+retention pass — and that pass builds its owners from *every* periodic snapshot
+task on the system. So running task A can destroy snapshots owned by task B
+whose retention had lapsed and whose own tick had not come round. A plan reading
+"this takes a snapshot now" would omit a deletion, which is
+`transferModeSentence`'s defect in a second family.
+
+**So the plan states the MECHANISM and its SCOPE, and computes no outcome.** It
+says the run applies retention, says the pass is system-wide in those words,
+names the two protections that bound it — a snapshot whose name matches no
+task's naming schema is skipped, and the newest snapshot for a schema is kept
+where destroying it would leave none — and then points at `snapshots_list`'s
+`report_scheduled_removal`. Enumerating instead would be a second opinion about
+retention beside the middleware's own (#44), and it could not be sound anyway:
+that listing is bounded, and its own description says a truncated list cannot
+show a snapshot is absent. **Ask what an operation does and to what, and say
+that; do not compute what it will hit.**
+
+**The scope sentence needs the protections, and the protections need the scope
+sentence.** "Retention runs across every task" alone reads as "anything may go"
+and teaches an approver to discount the warning; the protections alone read as
+"only stale scheduled snapshots go", which is the claim the first sentence
+exists to refuse. Neither half is optional and they are one text
+(`RETENTION_PASS`) so that no later edit can keep one and drop the other.
+
+**None of that account is on the API surface, and the description says so.**
+Nothing the client declares says a run applies retention, says it applies
+system-wide, or says which snapshots survive — the reading comes from the
+TrueNAS implementation. That is #133's shape (the measured half of a question
+being unreachable from here) reaching an EFFECT rather than a fact, and #120's
+rule pointed the other way: a side effect that could not be established is
+stated rather than settled, and one that was established somewhere this
+repository cannot check is stated *as that*. Silence would have been read as
+"this only creates".
+
+**Only an explicit `false` refuses the plan.** `enabled` is optional on the
+entity and the middleware rejects a disabled task, so the plan reads it and
+fails at plan time naming the task — but a null is "the system reported no
+value", which is not the same answer as off, and failing on it would refuse a
+plan the middleware would have accepted. The unreadable case says the call may
+be rejected and names `scheduled_task_set_enabled` instead. That check is
+plan-time only, as `snapshots_create`'s dataset check is (#119), so a task
+disabled between plan and confirmation is refused by the middleware — stated in
+the description rather than fixed by re-reading, because `execute` re-reading
+would make it branch on state the confirmation token cannot bind.
+
+**The two tools keep separate watch bounds, equal though they are.** The bound
+is a ceiling on a TOOL's patience and not an estimate of its job (#122), so one
+shared constant would assert that the two ceilings must move together, which
+nothing requires. What IS shared is `schedulePhrase`, which now takes the
+pointer rather than a whole `TaskKind` — a second spelling of "the schedule
+could not be put into words" in one file is the drift `common.ts` was cut to
+stop, one size down. **Share a SENTENCE, not a number.**
+
+`tasks.spec.ts` was 1,352 lines and this block is several hundred more, so the
+#87 exception is met and the tests took `snapshot-task-run.spec.ts`. Its fake
+system is local, as `cloudsync-run.spec.ts`'s is: a job is a stream rather than
+a response, and `src/testing/fake-systems.ts` stubs `call` and `query` off one
+method→response map. Two copies now exist, which is when a shared fixture could
+be designed from evidence — a later ticket's call, not a side effect of this one.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
