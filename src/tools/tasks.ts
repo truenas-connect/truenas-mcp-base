@@ -2893,8 +2893,10 @@ const RETENTION_PASS =
   'snapshot task on this system rather than only the one being run, so snapshots belonging ' +
   'to OTHER tasks whose retention had already lapsed can be destroyed by this run. Two ' +
   "things it leaves alone: a snapshot whose name matches no task's naming schema is skipped " +
-  'entirely, so a snapshot taken by hand — through `snapshots_create` or otherwise — is not ' +
-  'at risk; and the newest snapshot for a naming schema is kept where destroying it would ' +
+  'entirely — which is a fact about the NAME and not about who took the snapshot, so a ' +
+  'snapshot taken by hand through `snapshots_create` or otherwise is outside this pass ONLY ' +
+  "where the name it was given matches no task's schema, and NOTHING IN THIS CATALOG CHECKS " +
+  'THAT; and the newest snapshot for a naming schema is kept where destroying it would ' +
   'leave that schema with none. THIS PLAN DOES NOT SAY WHICH SNAPSHOTS WILL BE DESTROYED ' +
   'and this tool does not compute it: call `snapshots_list` with `report_scheduled_removal` ' +
   'first, which reports the removal the middleware itself works out per snapshot.';
@@ -2916,10 +2918,13 @@ export const snapshotTaskRun: MutatingTool = {
     'SYSTEM-WIDE: it considers every periodic snapshot task on the system, not ' +
     'only the one being run, so snapshots owned by OTHER tasks whose retention ' +
     'had lapsed can be destroyed by this call. Two things it leaves alone: a ' +
-    "snapshot whose name matches no task's naming schema is skipped entirely, " +
-    'so a snapshot taken by hand is not at risk, and the newest snapshot for a ' +
-    'naming schema is kept where destroying it would leave that schema with ' +
-    'none. THIS TOOL DOES NOT ENUMERATE WHAT A RUN WILL DESTROY AND MUST NOT ' +
+    "snapshot whose name matches no task's naming schema is skipped entirely " +
+    '— WHICH IS A FACT ABOUT THE NAME AND NOT ABOUT WHO TOOK THE SNAPSHOT, so ' +
+    'a snapshot taken by hand through `snapshots_create` is outside this pass ' +
+    "ONLY where the name it was given matches no task's schema, and NOTHING " +
+    'HERE CHECKS THAT — and the newest snapshot for a naming schema is kept ' +
+    'where destroying it would leave that schema with none. THIS TOOL DOES ' +
+    'NOT ENUMERATE WHAT A RUN WILL DESTROY AND MUST NOT ' +
     'BE READ AS HAVING CHECKED: call `snapshots_list` with ' +
     '`report_scheduled_removal` beforehand, which reports the removal the ' +
     'middleware itself computes per snapshot. THAT WHOLE ACCOUNT OF THE ' +

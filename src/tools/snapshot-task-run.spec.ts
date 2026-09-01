@@ -125,6 +125,16 @@ describe('snapshot_task_run', () => {
       );
     });
 
+    it('keeps the naming-schema protection about the name rather than about the taker', () => {
+      // Pinned in both texts a reader can reach, because either one alone
+      // saying "a snapshot you took is safe" is the reassurance that costs
+      // data — `snapshots_create` takes the name from the caller.
+      expect(snapshotTaskRun.description).toContain(
+        'WHICH IS A FACT ABOUT THE NAME AND NOT ABOUT WHO TOOK THE SNAPSHOT',
+      );
+      expect(snapshotTaskRun.description).not.toContain('is not at risk');
+    });
+
     it('points at snapshots_list for what is due to be destroyed, and enumerates nothing', () => {
       expect(snapshotTaskRun.description).toContain('DOES NOT ENUMERATE WHAT A RUN WILL DESTROY');
       expect(snapshotTaskRun.description).toContain(
@@ -251,13 +261,27 @@ describe('snapshot_task_run', () => {
     it('states both protections, which is what bounds the alarm above', async () => {
       const text = await planText();
       expect(text).toContain(
-        "a snapshot whose name matches no task's naming schema is skipped entirely, so a " +
-          'snapshot taken by hand — through `snapshots_create` or otherwise — is not at risk',
+        "a snapshot whose name matches no task's naming schema is skipped entirely",
       );
       expect(text).toContain(
         'the newest snapshot for a naming schema is kept where destroying it would leave that ' +
           'schema with none',
       );
+    });
+
+    // The name is the whole of the first protection, and a plan that turned it
+    // into "a snapshot you took yourself is safe" would reassure the approver
+    // about the one case that is not: `snapshots_create` takes the name from
+    // the caller and checks it against no task's schema.
+    it('does not read the naming-schema protection as being about who took the snapshot', async () => {
+      const text = await planText();
+      expect(text).toContain(
+        'which is a fact about the NAME and not about who took the snapshot, so a snapshot ' +
+          'taken by hand through `snapshots_create` or otherwise is outside this pass ONLY ' +
+          "where the name it was given matches no task's schema, and NOTHING IN THIS CATALOG " +
+          'CHECKS THAT',
+      );
+      expect(text).not.toContain('is not at risk');
     });
 
     it('refuses to say which snapshots go, and points at where that is reported', async () => {

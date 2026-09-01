@@ -1854,6 +1854,22 @@ and teaches an approver to discount the warning; the protections alone read as
 exists to refuse. Neither half is optional and they are one text
 (`RETENTION_PASS`) so that no later edit can keep one and drop the other.
 
+**A protection stated as a CONDITION may not be restated as a class of
+snapshot, and this is where the description convention bites hardest.** The
+first protection is about the NAME: a snapshot whose name matches no task's
+naming schema is skipped. The first draft of both texts drew the obvious
+inference from it — *so a snapshot taken by hand is not at risk* — and that is
+false. `snapshots_create` takes the snapshot name straight from the caller
+(`required: ['dataset', 'name']`) and checks it against no task's schema, so a
+manual `tank/media@auto-2026-09-01_02-00` matches the periodic schema, is owned
+by the retention pass, and is destroyed by it. **A condition rewritten as a
+guarantee about who did something is a description promising more than the
+normalization delivers** — reached through an inference rather than through a
+field, which is why it survived a round. The failure direction is the costly
+one: the reader is reassured about the exact case that is unsafe, in the one
+text a person reads before approving. State the condition and say what does not
+check it.
+
 **None of that account is on the API surface, and the description says so.**
 Nothing the client declares says a run applies retention, says it applies
 system-wide, or says which snapshots survive — the reading comes from the
