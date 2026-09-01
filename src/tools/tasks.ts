@@ -65,6 +65,12 @@ import {
  * scheduled, so `scheduled_task_set_enabled`'s name cannot carry it. The two
  * together are what makes every `enabled` in this family's listings actionable;
  * neither name covers what the other does, and each description says so.
+ *
+ * `snapshot_task_run` is the fourth, and it is `cloudsync_run` for the family's
+ * other job-backed kind: it starts one of the tasks `snapshot_tasks_list`
+ * reports and names it in that listing's terms. What is not `cloudsync_run` is
+ * the plan, because a periodic snapshot run also applies retention, and the
+ * retention it applies is the system's rather than the task's.
  */
 
 /**
@@ -1458,15 +1464,21 @@ const NONE_REPORTED = '(the system reported none)';
  * pointer: it reads as the exact account being one call away, and the approver
  * who makes that call finds no such field and cannot tell a tool that omits it
  * from a task that has none.
+ *
+ * It takes the pointer rather than the whole {@link TaskKind} so that
+ * {@link snapshotTaskRun}, which has no `TaskKind` to hand, renders this
+ * sentence through the same function instead of writing a second account of it.
+ * Two spellings of "the schedule could not be put into words" in one file is
+ * exactly the drift `common.ts` was cut to stop, one level down.
  */
-function schedulePhrase(spec: TaskKind, row: Record<string, unknown>): string {
+function schedulePhrase(cronFieldsListedBy: string | null, row: Record<string, unknown>): string {
   const schedule = taskSchedule(row);
   const words = schedule === null ? null : describeSchedule(schedule);
   if (words !== null) return `schedule ${words}`;
   return `schedule ${
-    spec.cronFieldsListedBy === null
+    cronFieldsListedBy === null
       ? '(not rendered in words here, and no tool in this catalog reports its cron fields)'
-      : `(not rendered in words here; \`${spec.cronFieldsListedBy}\` reports its cron fields)`
+      : `(not rendered in words here; \`${cronFieldsListedBy}\` reports its cron fields)`
   }`;
 }
 
@@ -1482,7 +1494,7 @@ function describeTask(spec: TaskKind, row: Record<string, unknown>, id: number):
   const labelled = spec
     .label(row)
     .map(([name, value]) => `${name} ${value === null ? NONE_REPORTED : `"${value}"`}`);
-  return `the ${spec.noun} with ${[...labelled, schedulePhrase(spec, row)].join(', ')} (id ${id})`;
+  return `the ${spec.noun} with ${[...labelled, schedulePhrase(spec.cronFieldsListedBy, row)].join(', ')} (id ${id})`;
 }
 
 /**
@@ -2682,6 +2694,446 @@ export const automatedTaskSetEnabled: MutatingTool = {
         id,
         enabled,
       )),
+    };
+  },
+};
+
+/**
+ * `snapshot_task_run`: taking one periodic snapshot task's snapshot now, and
+ * the catalog's SECOND job-backed tool.
+ *
+ * THE JOB SHAPE IS {@link cloudsyncRun}'S AND IS COPIED RATHER THAN REDERIVED.
+ * `callAndGetJobId` and `trackJob` are called apart rather than through
+ * `api.job`, so the two failure eras stay separable; the watch is bounded and
+ * ending it does not end the job; `ended` is read from the tracking COMPLETING
+ * rather than from {@link ENDED_JOB_STATES}; `job_id` comes from the
+ * correlation and never from the tracking's last emission. Every reason for
+ * every one of those is written out at {@link cloudsyncRun} and in
+ * `CLAUDE.md`'s #122 decision, and none of them is re-argued here — what is
+ * written below is only what this tool has to decide for itself.
+ *
+ * WHAT IT HAS TO DECIDE FOR ITSELF IS THE PLAN, because a run of a periodic
+ * snapshot task PRUNES. `pool.snapshottask.run` does not stop at creating a
+ * snapshot: it interrupts zettarepl's scheduler with the task, which then goes
+ * round the same loop a scheduled fire goes round, ending in the retention
+ * pass. So a plan reading "this takes a snapshot now" would be a plan that
+ * omits a deletion — {@link transferModeSentence}'s defect in a second family,
+ * and the one reading that costs data.
+ *
+ * AND THE BLAST RADIUS IS WIDER THAN THE TASK NAMED. That retention pass builds
+ * its owners from every periodic snapshot task on the system, so running task A
+ * can destroy snapshots owned by task B whose retention had lapsed and whose
+ * own tick had not yet come round. The plan states the SCOPE, in those words.
+ *
+ * IT STILL DOES NOT SAY WHICH SNAPSHOTS. Two reasons, and they are different
+ * from each other. The middleware already computes that per snapshot, with the
+ * same owner-class retention the pass itself uses, and `snapshots_list` reports
+ * it as `scheduled_removal` — re-deriving it here would be the drifting second
+ * opinion composites exist to prevent (#44). And it could not be done soundly
+ * from this side anyway: that listing is bounded, and its own description says a
+ * truncated list cannot show a snapshot is absent. So this tool names the
+ * mechanism and its scope and POINTS, which is {@link TRANSFER_MODE_EFFECT}'s
+ * posture — say what the operation does, do not compute the outcome.
+ *
+ * THE ACCOUNT OF THE PRUNING IS NOT READ OFF THE API SURFACE, and that is
+ * stated in the description rather than glossed. Nothing the client declares
+ * says a run applies retention, says it applies system-wide, or says which
+ * snapshots survive; the account comes from the TrueNAS implementation. It is
+ * the strongest true thing this tool can tell a person before they approve, and
+ * it is not a normalization this repository can check — the same shape as
+ * `system_ntp_status` saying outright that the measured half of its question is
+ * not on this surface (#133).
+ *
+ * A DISABLED TASK IS REFUSED BY THE MIDDLEWARE, so the plan reads `enabled` and
+ * fails at plan time naming the task, rather than letting a raw rejection reach
+ * the caller at execute time. `enabled: false` is a positive claim and null is
+ * not, so ONLY AN EXPLICIT FALSE FAILS: a task whose switch could not be read is
+ * not a task that is off, and the plan says exactly that instead of guessing —
+ * `snapshot_tasks_list`'s own reading of the same field.
+ */
+
+/**
+ * How long {@link snapshotTaskRun} watches the job it started before reporting
+ * what it has and returning.
+ *
+ * ITS OWN NUMBER RATHER THAN {@link SYNC_WATCH_MS}, although the two are equal.
+ * The bound is a ceiling on a TOOL's patience and not an estimate of its job
+ * (#122), so sharing one constant between two tools would assert that the two
+ * ceilings must move together, which nothing here requires. Both are chosen to
+ * sit comfortably inside the shortest MCP host timeout in ordinary use, and the
+ * host's own deadline is not readable from here — `src/interfaces.ts` is the
+ * whole environment boundary and carries none.
+ */
+const SNAPSHOT_RUN_WATCH_MS = 30_000;
+
+/** Seconds, for the result, so the bound is reported in the unit it is stated in. */
+const SNAPSHOT_RUN_WATCH_SECONDS = SNAPSHOT_RUN_WATCH_MS / 1000;
+
+/** Where the ids this tool takes come from, in the one wording used throughout. */
+const SNAPSHOT_TASK_IDS_FROM = 'the ids this tool takes come from `snapshot_tasks_list`';
+
+/** The tool that switches a periodic snapshot task on, named the one way. */
+const SNAPSHOT_TASK_SWITCH = '`scheduled_task_set_enabled` with `kind` `periodic_snapshot`';
+
+/**
+ * The one argument this tool takes, or the error naming what is wrong with it.
+ *
+ * Strict for {@link parseRun}'s reason: the middleware holds these tasks under
+ * integer primary keys, and a coerced `"4"` or a `4.5` names no task.
+ */
+function parseSnapshotTaskId(args: Record<string, unknown>): number {
+  const id = args['id'];
+  if (typeof id !== 'number' || !Number.isInteger(id)) {
+    throw new Error('"id" is required and must be a whole number');
+  }
+  return id;
+}
+
+/**
+ * The params the job is started with, typed off the job directory — a disjoint
+ * key space from the call directory, so `CallParams` cannot name them.
+ */
+function snapshotRunParams(id: number): JobParams<ApiSurface, 'pool.snapshottask.run'> {
+  return [id];
+}
+
+/**
+ * The task in the terms `snapshot_tasks_list` reports it, for the human
+ * approving the plan.
+ *
+ * The dataset and the schedule are what make the approval meaningful — "run
+ * periodic snapshot task 4" says nothing about what is about to be snapshotted
+ * or how often the system does it unasked. The schedule goes through
+ * {@link schedulePhrase} so that a shape this file will not put into English
+ * reads as that rather than as a task without a schedule.
+ */
+function describePeriodicSnapshotTask(task: Record<string, unknown>, id: number): string {
+  const dataset = textOrNull(task['dataset']);
+  return `the periodic snapshot task with dataset ${
+    dataset === null ? NONE_REPORTED : `"${dataset}"`
+  }, ${schedulePhrase('snapshot_tasks_list', task)} (id ${id})`;
+}
+
+/**
+ * How much of the tree this run snapshots, or that it could not be read.
+ *
+ * Not defaulted to the narrow reading. An approver told nothing reads the
+ * silence as "just that dataset", and a recursive task on a pool root is the
+ * case where that assumption is most wrong — the same refusal
+ * {@link transferModeSentence} makes about a mode it cannot read.
+ */
+function recursionSentence(task: Record<string, unknown>): string {
+  const recursive = booleanOrNull(task['recursive']);
+  if (recursive === null) {
+    return (
+      "Whether it also snapshots that dataset's children could not be read, so how much of " +
+      'the tree this run snapshots is not established here.'
+    );
+  }
+  return recursive
+    ? "It snapshots that dataset AND ITS CHILDREN."
+    : 'It snapshots that dataset only, not its children.';
+}
+
+/**
+ * How long this task's own snapshots are kept, or that the retention could not
+ * be read.
+ *
+ * A task whose retention is unreadable is NOT a task that keeps its snapshots
+ * forever, and the sentence says so — the reading `snapshot_tasks_list` already
+ * spells out for the same two fields. Both are needed: a value with no unit
+ * names no duration, and a unit with no value names no duration either.
+ */
+function retentionSentence(task: Record<string, unknown>): string {
+  const value = numberOrNull(task['lifetime_value']);
+  const unit = textOrNull(task['lifetime_unit']);
+  if (value === null || unit === null) {
+    return (
+      "This task's own retention could not be read here, so how long the snapshot this run " +
+      'takes will be kept is NOT established — which is a gap in this reading rather than a ' +
+      'task that keeps its snapshots forever.'
+    );
+  }
+  return (
+    `Its own retention is ${value} ${unit}, as \`snapshot_tasks_list\` reports it, so the ` +
+    'snapshot this run takes is destroyed that long after it is taken.'
+  );
+}
+
+/**
+ * What the plan says about the switch, given that an explicit `false` has
+ * already failed the plan.
+ *
+ * So there are two cases here and not three: read as enabled, or not read at
+ * all. The second is stated as the rejection it may become rather than as a
+ * task that is fine — the middleware refuses a disabled task, and this tool
+ * cannot tell whether it is about to be refused.
+ */
+function snapshotTaskEnabledSentence(task: Record<string, unknown>): string {
+  return booleanOrNull(task['enabled']) === null
+    ? 'Whether the task is enabled could not be read, and the middleware REFUSES to run a ' +
+        `disabled task — so this call may be rejected; ${SNAPSHOT_TASK_SWITCH} is what ` +
+        'switches one on.'
+    : 'The task was enabled when this plan was made.';
+}
+
+/**
+ * What the run does beyond taking a snapshot, in the plan's own words.
+ *
+ * One string because it is one text: it says the same thing whatever the task
+ * is, and every clause in it is load-bearing. The scope sentence is what stops
+ * an approver reading "retention" as "this task's old snapshots"; the two
+ * protections are what stop the scope sentence reading as "anything may go";
+ * and the pointer is what a caller does instead of asking this tool to
+ * enumerate, which it must not.
+ */
+const RETENTION_PASS =
+  'RUNNING THIS DOES NOT ONLY TAKE A SNAPSHOT. The run ends in the same retention pass a ' +
+  'scheduled fire ends in, and THAT PASS IS SYSTEM-WIDE: it considers EVERY periodic ' +
+  'snapshot task on this system rather than only the one being run, so snapshots belonging ' +
+  'to OTHER tasks whose retention had already lapsed can be destroyed by this run. Two ' +
+  "things it leaves alone: a snapshot whose name matches no task's naming schema is skipped " +
+  'entirely — which is a fact about the NAME and not about who took the snapshot, so a ' +
+  'snapshot taken by hand through `snapshots_create` or otherwise is outside this pass ONLY ' +
+  "where the name it was given matches no task's schema, and NOTHING IN THIS CATALOG CHECKS " +
+  'THAT; and the newest snapshot for a naming schema is kept where destroying it would ' +
+  'leave that schema with none. THIS PLAN DOES NOT SAY WHICH SNAPSHOTS WILL BE DESTROYED ' +
+  'and this tool does not compute it: call `snapshots_list` with `report_scheduled_removal` ' +
+  'first, which reports the removal the middleware itself works out per snapshot.';
+
+export const snapshotTaskRun: MutatingTool = {
+  name: 'snapshot_task_run',
+  description:
+    'Runs one periodic snapshot task on this TrueNAS system now, without ' +
+    'waiting for its schedule, and reports how far it got. Two-phase: called ' +
+    'without a confirmation_token it returns a plan for user approval; called ' +
+    "with one it starts the run. `id` is the task's `id` as " +
+    '`snapshot_tasks_list` reports it, on the system being targeted, and ' +
+    'PLANNING AGAINST AN id NO PERIODIC SNAPSHOT TASK HAS FAILS naming that id ' +
+    '— so an approved plan is always about a task that existed when it was ' +
+    'made. The plan names the task the way that listing does: its dataset, ' +
+    "whether it recurses into that dataset's children, its schedule in words, " +
+    'and its retention. THIS RUN DOES NOT ONLY TAKE A SNAPSHOT — IT ALSO ' +
+    'APPLIES RETENTION, WHICH DESTROYS SNAPSHOTS, AND THE RETENTION PASS IS ' +
+    'SYSTEM-WIDE: it considers every periodic snapshot task on the system, not ' +
+    'only the one being run, so snapshots owned by OTHER tasks whose retention ' +
+    'had lapsed can be destroyed by this call. Two things it leaves alone: a ' +
+    "snapshot whose name matches no task's naming schema is skipped entirely " +
+    '— WHICH IS A FACT ABOUT THE NAME AND NOT ABOUT WHO TOOK THE SNAPSHOT, so ' +
+    'a snapshot taken by hand through `snapshots_create` is outside this pass ' +
+    "ONLY where the name it was given matches no task's schema, and NOTHING " +
+    'HERE CHECKS THAT — and the newest snapshot for a naming schema is kept ' +
+    'where destroying it would leave that schema with none. THIS TOOL DOES ' +
+    'NOT ENUMERATE WHAT A RUN WILL DESTROY AND MUST NOT ' +
+    'BE READ AS HAVING CHECKED: call `snapshots_list` with ' +
+    '`report_scheduled_removal` beforehand, which reports the removal the ' +
+    'middleware itself computes per snapshot. THAT WHOLE ACCOUNT OF THE ' +
+    'PRUNING IS READ FROM THE TRUENAS IMPLEMENTATION AND IS NOT SOMETHING THIS ' +
+    'CATALOG CAN CHECK: nothing the API surface declares says a run applies ' +
+    'retention, says it applies system-wide, or says which snapshots survive, ' +
+    'so this tool states the mechanism and its scope and reports nothing about ' +
+    'the outcome. A DISABLED TASK IS REFUSED BY THE MIDDLEWARE, so the plan ' +
+    'reads `enabled` and FAILS AT PLAN TIME, naming the task, where the task ' +
+    'is switched off — `scheduled_task_set_enabled` with `kind` ' +
+    '`periodic_snapshot` is what switches one back on. That check is made when ' +
+    'the plan is made and IS NOT REPEATED at execute time, so a task disabled ' +
+    'between the plan and the confirmation is rejected by the middleware ' +
+    'instead; and a task whose `enabled` could not be READ is not a task that ' +
+    'is off, so the plan says so and proceeds rather than guessing. THE RESULT ' +
+    'IS ABOUT THE JOB THIS CALL STARTED, AND "STARTED" IS NOT "SUCCEEDED". ' +
+    'Taking the snapshot is ordinarily quick and the retention pass behind it ' +
+    'need not be, so this tool WATCHES THE JOB FOR AT MOST `watched_seconds` ' +
+    'AND THEN RETURNS WHATEVER IT HAS, leaving the run going. It never waits ' +
+    'for the run to finish. THE WATCH ALSO ENDS IF FOLLOWING THE JOB FAILS — a ' +
+    'dropped connection, a failed read of the job list — and that is reported ' +
+    'as what was established rather than as the run having failed, since it ' +
+    'was already under way. A failure BEFORE anything was seen of the job ' +
+    'fails this call instead, and even then MAY STILL HAVE STARTED THE RUN: ' +
+    'check `tasks_recent_runs` rather than assuming nothing ran. `ended` is ' +
+    'whether the job was ESTABLISHED to have reached a state it will not move ' +
+    'out of. TRUE MEANS THE RUN IS OVER. FALSE MEANS NOTHING WAS ESTABLISHED ' +
+    'AND IS NOT ONE ANSWER — the run is still going, or the watch was cut ' +
+    'short by either of the failures above, or the job reached a state the ' +
+    'system does not treat as ending a run and so may or may not be over, or ' +
+    'the job reported a state this tool could not read, or no job was seen at ' +
+    'all. `state` and `job_id` narrow that and DO NOT PARTITION IT: a non-null ' +
+    '`state` beside `ended: false` is any of the first three and this tool ' +
+    'cannot say which, a null `state` beside a `job_id` is a job the system ' +
+    'NAMED and then said nothing readable about — following it failed, or the ' +
+    'watch ran out before anything came back, or the state it reported could ' +
+    'not be read, and this tool cannot say which of those either — and both ' +
+    'null is a job no event named within the watch OR one whose id was ' +
+    'unreadable and whose state was too. IN NONE OF THEM HAS ANYTHING FAILED, ' +
+    'AND IN NONE OF THEM HAS THE RETENTION PASS BEEN SHOWN NOT TO HAVE RUN. ' +
+    '`succeeded` is the answer to "did it work": true where the run ENDED in a ' +
+    'state this catalog reads as success, false where it ENDED in any other ' +
+    'state, and NULL WHERE NOTHING ESTABLISHED IT — which is every case above ' +
+    'where `ended` is false. A null `succeeded` IS NOT A FAILURE AND IS NOT A ' +
+    'SUCCESS, and A STATE THAT LOOKS LIKE A SUCCESS DOES NOT MAKE ONE: ' +
+    '`succeeded` is null beside a `state` of `SUCCESS` where the run was not ' +
+    'established to be over, since a job can still move out of a state this ' +
+    'tool merely saw. NO STATE THIS CATALOG DOES NOT KNOW IS EVER READ AS A ' +
+    'SUCCESS, whether the run ended in it or the watch ended without the run ' +
+    'ending — so a state a later TrueNAS release adds reports as itself and ' +
+    'never as a success. `state` is the state the system last reported, passed ' +
+    'through as the system spelled it and null where none was read; `SUCCESS` ' +
+    "and `FINISHED` are the two this tool counts as success. The job's " +
+    '`result` is NOT read and could not settle any of this: ' +
+    '`pool.snapshottask.run` returns nothing, so a finished job carries a null ' +
+    'result whether it worked or failed. `error` is the text the job recorded ' +
+    'and is null where it recorded none, so a job that ended without ' +
+    'succeeding and with a null `error` failed for a reason the system did not ' +
+    'record — it has not succeeded. `finished_at` is when the job ended, as an ' +
+    'ISO 8601 UTC timestamp, REPORTED ONLY WHERE `ended` IS TRUE — so it moves ' +
+    'with `ended` and never contradicts it — and NULL EVERYWHERE ELSE EVEN IF ' +
+    'THE JOB RECORD CARRIES A TIME, since a run that was not established to be ' +
+    'over has not been established to have ended then. It is also null where ' +
+    "the job ended and recorded no time this tool could read. `job_id` is the " +
+    "job's numeric identity, TAKEN FROM THE JOB EVENT THAT NAMED THIS REQUEST " +
+    'rather than from anything read about the job afterwards — so it is ' +
+    'reported even where the watch established nothing else at all — and it ' +
+    'MATCHES `id` IN `tasks_recent_runs`, WHICH IS HOW A RUN THAT WAS STILL ' +
+    'GOING IS FOLLOWED UP — this tool reports no progress percentage and no ' +
+    'live status, and that tool reports both. `job_id` is null where no job ' +
+    'event named the job within the watch, and ALSO where such an event was ' +
+    'seen and the id it carried was not a number this tool could read — so a ' +
+    'null `job_id` beside a non-null `state` is the second of those. NEITHER ' +
+    'MEANS THE RUN DID NOT START: the call was made, and `tasks_recent_runs` ' +
+    'will report it. `task_id` is the `id` that was asked for and ' +
+    '`watched_seconds` the CEILING that applied to the watch, not how long it ' +
+    'actually lasted — a run that ended in two seconds still reports the full ' +
+    'bound. THIS TOOL CANNOT STOP A RUNNING JOB, cannot create, change or ' +
+    'delete a task, cannot snapshot anything that is not already a task on the ' +
+    'system, and CANNOT UNDO THE RETENTION THE RUN APPLIES — a destroyed ' +
+    'snapshot stays destroyed. Running the task again takes another snapshot; ' +
+    'it does not bring one back.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'integer',
+        description:
+          "The periodic snapshot task's `id` as `snapshot_tasks_list` reports " +
+          'it, on the system being targeted.',
+      },
+    },
+    required: ['id'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // THIS TOOL TRIGGERS AN OPERATION IT DOES NOT AUTHOR, which is the case
+  // `Destructiveness` names at its own declaration in `catalog/tool.ts` and the
+  // same reading {@link cloudsyncRun} takes. The dataset, the recursion, the
+  // naming schema and the retention were all decided by whoever configured the
+  // task, and the system does exactly this on its own at the next scheduled
+  // window; what this changes is WHEN, not WHAT. The account of what the run
+  // does to the data — including that its retention pass destroys snapshots
+  // across every task on the system — is in the description above and in the
+  // plan, which is where the person approving reads it, and where that
+  // declaration says it belongs.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    return { id: parseSnapshotTaskId(rawArgs) };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const id = parseSnapshotTaskId(rawArgs);
+    // The id is checked on the response and not only asked for in the filter,
+    // for the reason {@link rowWithId} gives: a filter that did not apply comes
+    // back as the whole table, and the first row of that is a different task.
+    const rows = await firstValueFrom(
+      ctx.system.client.api.query('pool.snapshottask.query', [['id', '=', id]]),
+    );
+    const task = rowWithId(rows, id);
+    if (task === null) {
+      throw new Error(
+        `No periodic snapshot task with id ${id} on this system — ${SNAPSHOT_TASK_IDS_FROM}`,
+      );
+    }
+    // Only an explicit false. `enabled` is optional on the entity and null is
+    // "the system reported no value", which is not the same answer as off —
+    // failing on it would refuse a plan the middleware would have accepted, and
+    // the sentence in the step states the uncertainty instead.
+    if (booleanOrNull(task['enabled']) === false) {
+      throw new Error(
+        `The periodic snapshot task with id ${id} on this system is disabled, and the ` +
+          `middleware refuses to run a disabled task — switch it on with ${SNAPSHOT_TASK_SWITCH} ` +
+          'first',
+      );
+    }
+    return [
+      {
+        method: 'pool.snapshottask.run',
+        params: snapshotRunParams(id),
+        description:
+          `Run ${describePeriodicSnapshotTask(task, id)} now. ` +
+          `${recursionSentence(task)} ${retentionSentence(task)} ` +
+          `${snapshotTaskEnabledSentence(task)} ` +
+          `${RETENTION_PASS} ` +
+          'This starts a background job; the job is then followed through the ' +
+          "client's own tracking, which reads `core.get_jobs` and changes " +
+          `nothing, for at most ${SNAPSHOT_RUN_WATCH_SECONDS} seconds. The run ` +
+          'continues after that whether or not it has finished.',
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const id = parseSnapshotTaskId(rawArgs);
+    const api = ctx.system.client.api;
+    // Every one of these three is {@link cloudsyncRun}'s, for the reasons
+    // written out there: completion rather than a state list is what says the
+    // run ended, the job having been seen is what turns the guard below on, and
+    // the correlated id is the one thing that survives a watch establishing
+    // nothing else.
+    let completed = false;
+    let sawJob = false;
+    let jobId: number | null = null;
+    const watched = await lastValueFrom(
+      api.callAndGetJobId('pool.snapshottask.run', snapshotRunParams(id)).pipe(
+        tap((correlated) => {
+          sawJob = true;
+          jobId = numberOrNull(correlated);
+        }),
+        switchMap((correlated) => api.trackJob(correlated)),
+        tap({
+          complete: () => {
+            completed = true;
+          },
+        }),
+        // An error raised once a job event has named this request is not the
+        // call failing: the run is going, and rejecting here would report a
+        // failure that did not happen AND take the job id with it. Before that
+        // event there is nothing to report and no id to keep, so an error there
+        // still fails.
+        catchError((error: unknown) => (sawJob ? EMPTY : throwError(() => error))),
+        takeUntil(timer(SNAPSHOT_RUN_WATCH_MS)),
+      ),
+      { defaultValue: null },
+    );
+    const record = lastRunOf(watched);
+    // Deliberately not {@link lastRunState}, whose null case means "the task has
+    // never run" — an answer about a task, where this is an answer about one job
+    // that has just been started.
+    const state = stringField(watched, 'state');
+    // A completion with no emission is the client having found no such job,
+    // which establishes nothing about the run; both halves are required.
+    const ended = completed && state !== null;
+    return {
+      task_id: id,
+      job_id: jobId,
+      watched_seconds: SNAPSHOT_RUN_WATCH_SECONDS,
+      ended,
+      // `pool.snapshottask.run` declares `response: null`, so the job's
+      // `result` is null whether the run worked or failed and the state is the
+      // only thing there is to read. A terminal state this catalog does not
+      // recognise is not read as a success.
+      succeeded: ended ? SUCCEEDED_JOB_STATES.has(state) : null,
+      state,
+      error: jobError(record),
+      // Gated on `ended` rather than through {@link jobFinishedAt}, so the
+      // finish time follows the claim this tool has already made and cannot
+      // contradict it — {@link cloudsyncRun} spells out why the two readings
+      // are not the same one.
+      finished_at: ended ? isoOrNull(jobMillis(record?.time_finished)) : null,
     };
   },
 };
