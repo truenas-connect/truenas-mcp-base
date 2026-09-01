@@ -1751,10 +1751,16 @@ readable afterwards. **Ask when the fact the result reports is readable, and put
 the step there** — a plan that lists a read first because the sibling tool does
 is a plan describing an order that will not happen.
 
-The plan step's `params` and the call `execute` makes come from one helper, and
-a test takes the step out of the plan and asserts the `query` spy was called
-with it. Two hand-written copies of the same params is how a plan stops being
-true one edit at a time, and nothing else in the repository would catch it.
+Half of that step's params are closed by construction and half are held by a
+test, which is worth being exact about. The OPTIONS come from one hoisted
+`const` the read and the step both name; the FILTER is written twice, because
+written to a `const` it widens out of the filter tuple. So a test takes the
+read step back out of the plan and asserts the `query` spy was called with it —
+that assertion, and not the shared helper, is what keeps the filter halves in
+step. Two hand-written copies of the same params is how a plan stops being true
+one edit at a time, and **where construction cannot close a half, say which
+half the test is holding** — a note claiming one helper covers both invites a
+later reader to drop the assertion as redundant.
 
 ### An existence check reads the response, not the row count (#153)
 

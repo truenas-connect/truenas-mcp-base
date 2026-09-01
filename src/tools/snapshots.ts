@@ -711,8 +711,14 @@ function cloneParams(args: CloneArgs): CallParams<ApiSurface, 'pool.snapshot.clo
  * declares them as two separate required `string` fields on a snapshot row and
  * states no relationship between them — the same shape as an alert's `uuid` and
  * `id` (#119) — so matching only one of them would fail the plan for a snapshot
- * that is plainly there on a system where they differ.
- * `pool.snapshot.clone` takes the name either way.
+ * that is plainly there on a system where they differ. WHETHER
+ * `pool.snapshot.clone` ITSELF ACCEPTS EITHER SPELLING IS (unconfirmed): its
+ * `snapshot` argument is a bare `string` and the surface states no relationship
+ * between the two fields, which is this check's own premise. What the read
+ * establishes is that the system lists something under the name given; the
+ * string the caller supplied is what `execute` forwards, so a middleware that
+ * takes only one of the two would reject at execute time rather than at plan
+ * time.
  *
  * The FILTER has to name both fields for that to be true of a read the
  * middleware actually narrowed: filtering on `id` alone and then comparing
