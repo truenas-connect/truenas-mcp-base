@@ -1042,20 +1042,41 @@ function lookupOf(reading: HoldReading | null, error: string | null): string {
  * already-released case carries the asymmetry rather than reading as a no-op —
  * "it is not held, so this changes nothing" would be the tool claiming to know
  * about tags it cannot see.
+ *
+ * `recursive` is taken here for that same reason, one scope out.
+ * {@link readHoldState} reads the one snapshot named and the call reaches every
+ * child of it, so an already-held snapshot rendered as "this changes nothing"
+ * tells an approver a call is a no-op while it places a hold on every child
+ * that carries no tag — a state read off one snapshot restated as a guarantee
+ * about the operation, in the one text a person reads before approving. Each
+ * sentence therefore names the snapshot it is about and says outright that the
+ * children were not read; none of them can say more than that, because nothing
+ * here read them.
  */
-function holdEffectSentence(current: boolean | null, target: boolean): string {
+function holdEffectSentence(current: boolean | null, target: boolean, recursive: boolean): string {
+  // Spelled out rather than "it" on a recursive call: the scope sentence before
+  // this one has just said the call reaches more than the snapshot named, which
+  // is what makes the pronoun read as the whole operation.
+  const subject = recursive ? 'The snapshot named' : 'It';
+  const scope = recursive ? ' for the snapshot named' : '';
+  const unread = recursive
+    ? " Its children's hold state was not read, so nothing here says what this does to them."
+    : '';
   if (current === null) {
-    return "Whether TrueNAS's hold tag is on it could not be read, so this may change nothing.";
+    return (
+      `Whether TrueNAS's hold tag is on ${recursive ? 'the snapshot named' : 'it'} could not ` +
+      `be read, so this may change nothing${scope}.${unread}`
+    );
   }
   if (target) {
     return current
-      ? 'It already carries that tag, so this changes nothing and is not an error.'
-      : 'It carries no `truenas` tag, so this will place one.';
+      ? `${subject} already carries that tag, so this changes nothing${scope} and is not an error.${unread}`
+      : `${subject} carries no \`truenas\` tag, so this will place one.${unread}`;
   }
   return current
-    ? 'It carries that tag, so this will remove it, along with any other hold tag on it.'
-    : 'It carries no `truenas` tag, so this is not an error — but a hold placed ' +
-        'under any other tag would still be removed, and this catalog cannot see one.';
+    ? `${subject} carries that tag, so this will remove it, along with any other hold tag on it.${unread}`
+    : `${subject} carries no \`truenas\` tag, so this is not an error — but a hold placed ` +
+        `under any other tag would still be removed, and this catalog cannot see one.${unread}`;
 }
 
 /** The scope a recursive call reaches, for the plan step that names it. */
@@ -1101,7 +1122,12 @@ export const snapshotSetHold: MutatingTool = {
     '`requested_held`, what was asked for; `previously_held`, the state read ' +
     'immediately before the call; `resulting_held`, the state read immediately ' +
     'after it; and `changed`, those two readings compared rather than the ' +
-    "request. EACH READING IS TRUENAS'S OWN HOLD TAG AND NOT ANY ZFS HOLD, the " +
+    'request. ALL THREE ARE READ FROM THE SNAPSHOT NAMED AND ESTABLISH NOTHING ' +
+    'ABOUT ITS CHILDREN, so on a recursive call `changed` is not a statement ' +
+    'about what the call reached: a recursive hold of an already-held snapshot ' +
+    'reports `changed: false` having placed holds on children, and a recursive ' +
+    'release reports what it removed from the snapshot named and nothing about ' +
+    "the rest. EACH READING IS TRUENAS'S OWN HOLD TAG AND NOT ANY ZFS HOLD, the " +
     'same reading `snapshots_list` reports as `held`: the system answers ' +
     'whether the `truenas` tag is on the snapshot and nothing else, so ' +
     '`previously_held: false` means "no `truenas` tag" rather than "nothing ' +
@@ -1190,7 +1216,7 @@ export const snapshotSetHold: MutatingTool = {
               'catalog never reported.') +
           recursiveSentence(args.recursive) +
           ' ' +
-          holdEffectSentence(reading.held, args.held),
+          holdEffectSentence(reading.held, args.held, args.recursive),
       },
     ];
   },

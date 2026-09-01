@@ -958,6 +958,71 @@ describe('snapshot_set_hold', () => {
     expect(call).toHaveBeenCalledWith('pool.snapshot.release', [SNAPSHOT, { recursive: true }]);
   });
 
+  it('does not call a recursive hold of an already-held snapshot a no-op', async () => {
+    // The state is read off the one snapshot named while the call reaches every
+    // child of it, so "this changes nothing" would tell an approver a call is a
+    // no-op while it places holds on children that carry no tag — wrong in the
+    // reassuring direction, in the text approval is given against.
+    const { ctx } = fakeSystem({ ['pool.snapshot.query']: [heldRow()] });
+    const [, mutation] = await snapshotSetHold.plan(ctx, {
+      snapshot: SNAPSHOT,
+      held: true,
+      recursive: true,
+    });
+    expect(mutation.description).toContain(
+      'The snapshot named already carries that tag, so this changes nothing for the ' +
+        'snapshot named and is not an error.',
+    );
+    expect(mutation.description).toContain(
+      "Its children's hold state was not read, so nothing here says what this does to them.",
+    );
+    expect(mutation.description).not.toContain('so this changes nothing and is not an error');
+  });
+
+  it('scopes every other effect sentence to the snapshot named on a recursive call', async () => {
+    // One reading, four remaining sentences: each names its subject and none of
+    // them may reach past it.
+    const unread = "Its children's hold state was not read";
+    const systems = [
+      { held: true, rows: [holdRow()], says: 'so this will place one.' },
+      {
+        held: false,
+        rows: [heldRow()],
+        says: 'The snapshot named carries that tag, so this will remove it,',
+      },
+      {
+        held: false,
+        rows: [holdRow()],
+        says: 'The snapshot named carries no `truenas` tag, so this is not an error',
+      },
+      {
+        held: true,
+        rows: [holdRow({ holds: 'not a record' })],
+        says:
+          "Whether TrueNAS's hold tag is on the snapshot named could not be read, so this " +
+          'may change nothing for the snapshot named.',
+      },
+    ];
+    for (const { held, rows, says } of systems) {
+      const { ctx } = fakeSystem({ ['pool.snapshot.query']: rows });
+      const [, mutation] = await snapshotSetHold.plan(ctx, {
+        snapshot: SNAPSHOT,
+        held,
+        recursive: true,
+      });
+      expect(mutation.description).toContain(says);
+      expect(mutation.description).toContain(unread);
+    }
+  });
+
+  it('leaves the non-recursive sentences saying nothing about children', async () => {
+    // The clause is a recursive call's alone: on a call that reaches one
+    // snapshot there are no children for it to be about.
+    const { ctx } = fakeSystem({ ['pool.snapshot.query']: [heldRow()] });
+    const [, mutation] = await snapshotSetHold.plan(ctx, { snapshot: SNAPSHOT, held: true });
+    expect(mutation.description).not.toContain('children');
+  });
+
   it('names the read step with the params execute actually makes it with', async () => {
     // The plan step and both of `execute`'s reads come from one helper for the
     // options and are written twice for the filter, so this is what keeps the
@@ -1173,6 +1238,9 @@ describe('snapshot_set_hold', () => {
     );
     expect(snapshotSetHold.description).toContain(
       'IT DOES NOT MEAN A RELEASE CAN BE UNDONE FROM HERE',
+    );
+    expect(snapshotSetHold.description).toContain(
+      'ALL THREE ARE READ FROM THE SNAPSHOT NAMED AND ESTABLISH NOTHING ABOUT ITS CHILDREN',
     );
     expect(snapshotSetHold.description).toContain('snapshots_list');
   });

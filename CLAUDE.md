@@ -1949,6 +1949,26 @@ outright, because side-by-side fields are what an implied completeness looks
 like from the outside (#138), and a caller reading `changed: false` as "no
 effect" is the one reading that costs a snapshot's protection.
 
+**A sentence derived from a state read may not reach past what was read, and
+`recursive` is where that bites.** `readHoldState` queries the one snapshot
+named while the call reaches every child of it, so the plan's
+already-in-the-target-state sentence — *"it already carries that tag, so this
+changes nothing"* — was true of the snapshot and false of the operation, in the
+reassuring direction, in the one text a person reads before approving. The
+effect sentence therefore takes `recursive`: each arm names the snapshot it is
+about and says outright that the children's hold state was not read, which is
+all a read of one snapshot supports. The same scoping is owed by the result,
+where the three readings above are the named snapshot's alone — so a recursive
+hold of an already-held snapshot reports `changed: false` having placed holds on
+children, which the description states beside the release reading it sits next
+to.
+
+**A scope sentence beside an effect sentence does not scope it.**
+`recursiveSentence` already said the call reaches more than the snapshot named,
+one clause earlier, and the no-op claim still read as being about the call —
+adjacency is not qualification, which is #138's implied-join finding arriving in
+a single paragraph of prose.
+
 **`reversible` is #153's trap again, one tool over.** The operation destroys no
 data — it changes what may destroy a snapshot later — but a release is not
 undoable from here: setting the hold again places the `truenas` tag and only
