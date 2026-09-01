@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { fakeSystem } from '@/testing/fake-systems';
-import { createSnapshot, snapshotsList } from '@/tools/index';
+import { Role } from '@/interfaces';
+import { fakeSystem, failingSystem } from '@/testing/fake-systems';
+import { createSnapshot, snapshotClone, snapshotsList } from '@/tools/index';
 
 describe('snapshots_list', () => {
   /**
@@ -556,5 +557,253 @@ describe('snapshots_create', () => {
       { dataset: 'tank/media', name: 'before', recursive: false },
     ]);
     expect(result).toEqual({ created: 'tank/media@before' });
+  });
+});
+
+describe('snapshot_clone', () => {
+  const SOURCE = 'tank/media@nightly-1';
+  const DESTINATION = 'tank/media-restore';
+  const args = { snapshot: SOURCE, destination: DESTINATION };
+
+  /** The two positional params every dataset-existence read is made with. */
+  const DATASET_READ = [
+    [['id', '=', DESTINATION]],
+    { extra: { retrieve_children: false, properties: ['used'] } },
+  ];
+
+  /** The same read as the `query` spy records it, method included. */
+  const DATASET_READ_CALL = ['pool.dataset.query', ...DATASET_READ] as const;
+
+  /** A snapshot row as `pool.snapshot.query` reports one, trimmed to what is read. */
+  const sourceRow = (over: Record<string, unknown> = {}) => ({
+    id: SOURCE,
+    name: SOURCE,
+    dataset: 'tank/media',
+    ...over,
+  });
+
+  /**
+   * A system where the source snapshot is there and the destination is free —
+   * the state a plan is expected to succeed against.
+   */
+  const plannable = (over: Partial<Record<string, unknown>> = {}) =>
+    fakeSystem({
+      ['pool.snapshot.query']: [sourceRow()],
+      ['pool.dataset.query']: [],
+      ...over,
+    });
+
+  it('normalizes args: names the two it takes and drops everything else', () => {
+    // `dataset_properties` is the one that matters: the call declares it and
+    // this tool must neither accept it nor send it, so a caller supplying one
+    // must not reach `plan`, `execute` or the confirmation key with it.
+    expect(
+      snapshotClone.normalizeArgs?.({
+        ...args,
+        dataset_properties: { compression: 'off' },
+        extra: 1,
+      }),
+    ).toEqual({ snapshot: SOURCE, destination: DESTINATION });
+  });
+
+  it('requires both a snapshot and a destination', async () => {
+    const { ctx } = plannable();
+    for (const bad of [undefined, '', 123, null, {}]) {
+      await expect(
+        snapshotClone.plan(ctx, { snapshot: bad, destination: DESTINATION }),
+      ).rejects.toThrow(/"snapshot" is required/);
+      await expect(snapshotClone.plan(ctx, { snapshot: SOURCE, destination: bad })).rejects.toThrow(
+        /"destination" is required/,
+      );
+    }
+  });
+
+  it('plans the clone call and the read that follows it, in that order', async () => {
+    const { ctx } = plannable();
+    const steps = await snapshotClone.plan(ctx, args);
+    expect(steps).toEqual([
+      {
+        method: 'pool.snapshot.clone',
+        // No `dataset_properties`: absent rather than sent empty.
+        params: [{ snapshot: SOURCE, dataset_dst: DESTINATION }],
+        description:
+          `Clone snapshot "${SOURCE}" into a new dataset "${DESTINATION}". The snapshot ` +
+          'and the dataset it was taken of are not modified and nothing is deleted. The ' +
+          'new dataset shares its blocks with the snapshot, which then cannot be ' +
+          'destroyed while the clone exists.',
+      },
+      {
+        method: 'pool.dataset.query',
+        params: DATASET_READ,
+        description: `Read "${DESTINATION}" back, to report whether the clone is there. Changes nothing.`,
+      },
+    ]);
+  });
+
+  it('names the read step with the params execute actually makes it with', async () => {
+    // The two are derived from one helper, and this is what says so: a plan
+    // describing a call the tool does not make is a plan that is not true.
+    const { ctx } = plannable();
+    const [, readStep] = await snapshotClone.plan(ctx, args);
+    const { ctx: executing, query } = fakeSystem({
+      ['pool.dataset.query']: [{ id: DESTINATION }],
+    });
+    await snapshotClone.execute(executing, args);
+    expect(query).toHaveBeenCalledWith(readStep.method, ...(readStep.params as unknown[]));
+  });
+
+  it('fails the plan, naming the snapshot, where no snapshot has that name', async () => {
+    const { ctx } = plannable({ ['pool.snapshot.query']: [] });
+    await expect(snapshotClone.plan(ctx, args)).rejects.toThrow(
+      new RegExp(`No snapshot named "${SOURCE}" on this system`),
+    );
+  });
+
+  it('fails the plan, naming the destination, where a dataset already exists there', async () => {
+    const { ctx } = plannable({ ['pool.dataset.query']: [{ id: DESTINATION }] });
+    await expect(snapshotClone.plan(ctx, args)).rejects.toThrow(
+      new RegExp(`A dataset already exists at "${DESTINATION}"`),
+    );
+  });
+
+  it('reads both existence checks off the response rather than the row count', async () => {
+    // An unrecognised query parameter is dropped rather than refused, so a
+    // filter that did not apply comes back as the whole table. Counting rows
+    // would then plan a clone of a snapshot that does not exist, and refuse
+    // every destination on the system.
+    const { ctx: unfiltered } = plannable({
+      ['pool.snapshot.query']: [sourceRow({ id: 'tank/other@nightly-1', name: 'tank/other@nightly-1' })],
+    });
+    await expect(snapshotClone.plan(unfiltered, args)).rejects.toThrow(/No snapshot named/);
+
+    const { ctx: everyDataset } = plannable({
+      ['pool.dataset.query']: [{ id: 'tank' }, { id: 'tank/media' }],
+    });
+    await expect(snapshotClone.plan(everyDataset, args)).resolves.toHaveLength(2);
+  });
+
+  it('matches the source snapshot on either declared name field', async () => {
+    // The client declares `id` and `name` as two separate required strings and
+    // states no relationship between them, exactly as an alert declares `uuid`
+    // and `id`. Matching one alone would fail the plan for a snapshot that is
+    // plainly there on a system where the two differ.
+    const { ctx: byName } = plannable({
+      ['pool.snapshot.query']: [sourceRow({ id: 'something-else' })],
+    });
+    await expect(snapshotClone.plan(byName, args)).resolves.toHaveLength(2);
+
+    const { ctx: byId } = plannable({
+      ['pool.snapshot.query']: [sourceRow({ name: 'something-else' })],
+    });
+    await expect(snapshotClone.plan(byId, args)).resolves.toHaveLength(2);
+  });
+
+  it('asks the system for the source snapshot under either name field, without every ZFS property', async () => {
+    // `fakeSystem` answers every filter with the same rows, so the two cases
+    // above pass whatever this read asked for — which is why the filter itself
+    // is asserted here. On a system that honours it, an `id`-only filter
+    // answers with no row at all for a snapshot whose `name` is what the
+    // caller was told to pass, and the comparison above would have nothing
+    // left to rescue.
+    const { ctx, query } = plannable();
+    await snapshotClone.plan(ctx, args);
+    expect(query).toHaveBeenCalledWith(
+      'pool.snapshot.query',
+      [['OR', [[['id', '=', SOURCE]], [['name', '=', SOURCE]]]]],
+      { extra: { properties: ['creation'] } },
+    );
+  });
+
+  it('executes the clone, then reports the destination the read found', async () => {
+    const { ctx, call, query } = fakeSystem({
+      ['pool.snapshot.clone']: true,
+      ['pool.dataset.query']: [{ id: DESTINATION }],
+    });
+    const result = await snapshotClone.execute(ctx, args);
+    expect(call).toHaveBeenCalledWith('pool.snapshot.clone', [
+      { snapshot: SOURCE, dataset_dst: DESTINATION },
+    ]);
+    expect(query).toHaveBeenCalledWith(...DATASET_READ_CALL);
+    expect(result).toEqual({
+      snapshot: SOURCE,
+      destination: DESTINATION,
+      destination_found: true,
+      destination_read_error: null,
+    });
+  });
+
+  it('reports a read that completed and listed nothing as false, not as a failure', async () => {
+    const { ctx } = fakeSystem({
+      ['pool.snapshot.clone']: true,
+      ['pool.dataset.query']: [],
+    });
+    // The call did not reject and the dataset was not there to read back —
+    // which is the one answer a caller acts on.
+    expect(await snapshotClone.execute(ctx, args)).toEqual({
+      snapshot: SOURCE,
+      destination: DESTINATION,
+      destination_found: false,
+      destination_read_error: null,
+    });
+  });
+
+  it('reads the destination off the response here too', async () => {
+    // Same dropped-filter case as the plan's, on the other side of the call: a
+    // row count would report every clone as found on a system that answered
+    // with its whole dataset list.
+    const { ctx } = fakeSystem({
+      ['pool.snapshot.clone']: true,
+      ['pool.dataset.query']: [{ id: 'tank' }, { id: 'tank/media' }],
+    });
+    expect(await snapshotClone.execute(ctx, args)).toMatchObject({ destination_found: false });
+  });
+
+  it('reports a read that failed as null and why, rather than failing the call', async () => {
+    // The clone had already been accepted by then. Rejecting here would tell
+    // the caller a clone that exists does not.
+    const { ctx, call } = failingSystem(
+      { ['pool.snapshot.clone']: true },
+      { ['pool.dataset.query']: { reason: 'connection reset' } },
+    );
+    expect(await snapshotClone.execute(ctx, args)).toEqual({
+      snapshot: SOURCE,
+      destination: DESTINATION,
+      destination_found: null,
+      destination_read_error: 'connection reset',
+    });
+    expect(call).toHaveBeenCalledWith('pool.snapshot.clone', [
+      { snapshot: SOURCE, dataset_dst: DESTINATION },
+    ]);
+  });
+
+  it('sends no dataset_properties even when the caller supplied one', async () => {
+    const { ctx, call } = fakeSystem({
+      ['pool.snapshot.clone']: true,
+      ['pool.dataset.query']: [{ id: DESTINATION }],
+    });
+    await snapshotClone.execute(ctx, { ...args, dataset_properties: { compression: 'off' } });
+    expect(call).toHaveBeenCalledWith('pool.snapshot.clone', [
+      { snapshot: SOURCE, dataset_dst: DESTINATION },
+    ]);
+  });
+
+  it('is registered as a Full-role reversible mutation', () => {
+    // `reversible` records that the operation removes nothing. Nothing here
+    // deletes the dataset it made, which the description says outright.
+    expect(snapshotClone.requiredRole).toBe(Role.Full);
+    expect(snapshotClone.mutating).toBe(true);
+    expect(snapshotClone.destructiveness).toBe('reversible');
+  });
+
+  it('states the pinning, the untouched source and the clone it does not manage', () => {
+    // These three are the readings a caller is most likely to get wrong about
+    // an operation described as additive, and prose is the only place they can
+    // be stated — so they are pinned rather than left to a later edit.
+    expect(snapshotClone.description).toContain('DELETES NOTHING');
+    expect(snapshotClone.description).toContain('THE CLONE PINS THE SNAPSHOT IT CAME FROM');
+    expect(snapshotClone.description).toContain('(unconfirmed)');
+    expect(snapshotClone.description).toContain('NOTHING HERE TOUCHES THE CLONE AFTERWARDS');
+    expect(snapshotClone.description).toContain('storage_list_datasets');
+    expect(snapshotClone.description).toContain('`dataset_properties` IS NOT ACCEPTED');
   });
 });

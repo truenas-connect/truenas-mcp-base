@@ -139,4 +139,5 @@ export {
   scheduledTaskSetEnabled,
   cloudsyncRun,
   automatedTaskSetEnabled,
+  snapshotClone,
 } from '@/tools/index';
