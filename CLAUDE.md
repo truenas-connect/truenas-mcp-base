@@ -1228,6 +1228,86 @@ guarantee this check cannot make) would have passed every test. **A redefinition
 that lives only in prose is one edit away from being undone** — where the rule
 is enforced by a message rather than by a type, pin the message.
 
+### Interpretation guidance travels with the result, not with the catalog (#131)
+
+`tools/list` is rendered into every host's context on every session, before a
+single tool is called, and what it costs is the whole catalog rather than the
+tools used. Measured at 55 tools: **215,278 bytes, of which descriptions were
+87%** — around 52,600 tokens. That is more than the entire context window of a
+default-configured local model (ollama defaults `num_ctx` to 4096 whatever the
+model supports), so every request from one was refused outright with
+`request (32892 tokens) exceeds the available context size` — the failure that
+took the server repo's tier-3 nightly down for two runs.
+
+**Caching does not answer this, and reaching for it is the trap.** Tool
+definitions render at position 0 of the cached prefix and cache reads bill at
+about 0.1x, so the cost of those descriptions on a caching host is roughly a
+tenth of the raw number. But caching discounts input tokens; it does not remove
+them from the window. The constraint is the window, so the cost argument is the
+weaker half of this and must not be the one a change here is justified by.
+
+`ToolBase.resultGuidance` is where the interpretation half is delivered: with
+the result, once per tool per session, and never advertised.
+
+**What ships first is a COPY, and the distinction matters for a reader of this
+file.** `description` is byte-identical to what it was, still carries every word
+of the guidance, and is therefore still advertised — one hoisted `const` is
+referenced by both fields, so there is exactly one copy of the prose in the
+source and no reflow can drift them apart. `tools/list` does not shrink until
+the FOLLOW-UP stops appending that const to `description`, which lands only once
+an adapter renders `guidance`. The ordering is not discipline: while nothing
+renders the new field, removing the text from the old one would delete the
+caveats rather than move them.
+
+**The line is drawn by WHEN the text becomes actionable, not by length.**
+Interpretation guidance cannot be acted on at selection time — a caller cannot
+use "null means not read" before it holds a null. So this is not a summary of
+the description with the detail cut; it is the half that was addressed to the
+wrong moment. Once an adapter renders it, the null/empty/unreadable conventions
+this repository is most careful about arrive attached to the nulls they are
+about, which is the gain the split is for.
+
+**What stays in `description` is anything that bears on whether to call the tool
+at all**, and getting this wrong is the way the split does damage. That a report
+states no compliance verdict (#47), that a listing covers only data pools (#95),
+that a physical side effect is unestablished (#120), which ids a mutating tool
+takes and from where (#119, #121, #126) — a caller that needed the caveat in
+order to choose correctly has already chosen by the time a result exists. When
+in doubt the text stays in the description: the cost of leaving it there is
+tokens, and the cost of moving it wrongly is a caller acting on an answer it
+would not have asked for.
+
+**A cross-tool pointer may legitimately end up in BOTH, and the follow-up is
+where that is honoured.** Because the guidance is a contiguous suffix, it
+carries some sentences that are selection class — "this tool cannot answer that,
+`audit_config` is the one that reads it", "who may reach one share is
+`share_access`". Those tell a caller the tool is the wrong choice, which is
+worth knowing before the call, so the removal must leave them in `description`
+rather than deleting the whole reference. The const's own comment in each file
+names the ones it carries.
+
+**Once per session, not once per call, and that is a cost decision with a
+scoping assumption.** Guidance in a result is paid at full price when it arrives
+and cached at 0.1x thereafter, so a copy per call would accumulate — five calls
+to `fleet_compliance_report` would carry five copies of its guidance, where the
+description form had exactly one, discounted. The delivered set is held on the
+`ToolExecutor` instance, which makes "per session" true only because both
+deployment modes build one executor per session — the same assumption
+`ConfirmationService` already makes about pending tokens, and stated in both
+places. **A deployment sharing one executor across sessions would have to
+re-scope both in the same change.**
+
+**Guidance is attached only to a result carrying at least one SUCCESS.** A
+result with no data has nothing to read, and spending the one delivery on it
+would leave the caller unguided for every later call that does carry data. It
+falls out of that rule, rather than being handled separately, that a mutating
+plan which failed on every system — returned as RESULTS rather than as an
+approvable plan — never consumes it.
+
+**The load-bearing property is that `list()` never carries the field**, and it is
+pinned by a test rather than left to the mapping. A leak there would restore
+exactly the cost this was cut to remove and would do it silently: every other
+test in the repository would still pass.
 ### A credential is named by an allowlist, and that is what makes it readable (#132)
 
 `replication_topology` reports the peer on the far end of each replication task,
@@ -1990,7 +2070,10 @@ a guessed side effect is worse than saying nothing (#120).
   This is the single most common review finding in this repository. State what
   a nullable field means when it is null, keep "unreadable", "absent" and
   "empty" distinct, and keep that distinction consistent with the sibling
-  fields in the same file.
+  fields in the same file. Since #131 that account of the fields lives in
+  `resultGuidance` rather than in `description` — **the rule is unchanged and
+  the field it applies to is not**, so check which of the two a sentence
+  belongs in before writing it.
 - **Map API rows through an allowlist of named fields**, never by trimming: it
   is what keeps a field a later TrueNAS release adds out of a tool result.
 - **Partial failure is data, not an exception** — see `fanOut` and the

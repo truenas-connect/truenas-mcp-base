@@ -63,6 +63,14 @@ export interface ConfirmationServiceOptions {
  * or a different instance cannot confirm a previously minted plan; that fails
  * closed (the LLM is told to request a fresh plan and approval), which suits
  * the single-process/browser deployment modes.
+ *
+ * {@link ToolExecutor} now makes the same per-instance assumption, for the
+ * once-per-session delivery of a tool's result guidance (#131) — and its
+ * failure mode is the opposite of this one. A shared instance would fail
+ * CLOSED here (a token minted by another session is simply unknown) and OPEN
+ * there (a second session is told the guidance was already delivered when it
+ * never saw it). So a deployment that shares one instance across sessions has
+ * to re-scope both, and only one of the two announces itself when it breaks.
  */
 export class ConfirmationService {
   private readonly ttlMs: number;

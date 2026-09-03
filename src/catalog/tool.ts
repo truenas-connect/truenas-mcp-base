@@ -83,8 +83,59 @@ interface ToolBase {
    * to `[a-zA-Z0-9_-]`, so dotted names only work if the host sanitizes them.
    */
   name: string;
-  /** Natural-language description for the LLM. */
+  /**
+   * Natural-language description for the LLM, carried in every `tools/list`.
+   *
+   * This is SELECTION text: what the tool is for, and what a caller must know
+   * to choose it or not choose it. Guidance about reading a RESULT belongs in
+   * {@link ToolBase.resultGuidance} — see there for where the line falls and
+   * why it is drawn at all.
+   *
+   * A tool that has been split carries the interpretation half in BOTH for now:
+   * one hoisted const, referenced here and there, so nothing is missing from
+   * what hosts render today. It stops being appended here only once an adapter
+   * renders the other field.
+   */
   description: string;
+  /**
+   * How to READ this tool's result — the null/empty/unreadable conventions,
+   * what a field does not establish, what the tool states no verdict about.
+   * Delivered with the result rather than advertised, and only the first time
+   * the tool answers in a session.
+   *
+   * **Why this is separate from `description` at all.** `tools/list` is
+   * rendered into every host's context on every session, before anything is
+   * called, and its cost is the whole catalog rather than the tools used.
+   * Measured at 55 tools: 215,278 bytes, of which descriptions were 87%. That
+   * exceeded the entire context window of a default-configured local model,
+   * which is not a budget question — the request is refused outright and no
+   * amount of caching helps, because caching discounts input tokens without
+   * removing them from the window.
+   *
+   * **Why the split is at THIS line rather than anywhere shorter.**
+   * Interpretation guidance cannot be acted on at selection time: a caller
+   * cannot use "null means not read" before it holds a null. Moving it to the
+   * result is where it becomes actionable, so this is not a summary of the
+   * description — it is the half that was addressed to the wrong moment.
+   *
+   * **What must NOT move here.** Anything that bears on whether to call the
+   * tool at all: that it states no compliance verdict (#47), that it reports
+   * only data pools (#95), that a physical side effect is unestablished
+   * (#120), which ids it takes and from where (#119, #121, #126). A caller
+   * that needed the caveat in order to choose correctly has already chosen by
+   * the time a result exists.
+   *
+   * Once per tool per session, not once per call: see
+   * {@link ToolExecutor} for that decision and what it assumes about
+   * deployment.
+   *
+   * **A cross-tool pointer may sit in both fields.** Where the guidance is a
+   * contiguous suffix of the description it will carry sentences of the class
+   * above — "this tool cannot answer that, X is the tool that reads it". Those
+   * stay in `description` when the removal lands, because a caller needs them
+   * while choosing; each tool's const says which ones it carries.
+   */
+  resultGuidance?: string;
   /**
    * JSON Schema for the tool's own arguments. The executor-level arguments
    * (`systems`, `confirmation_token`) are reserved and injected into the
