@@ -90,6 +90,11 @@ interface ToolBase {
    * to choose it or not choose it. Guidance about reading a RESULT belongs in
    * {@link ToolBase.resultGuidance} — see there for where the line falls and
    * why it is drawn at all.
+   *
+   * A tool that has been split carries the interpretation half in BOTH for now:
+   * one hoisted const, referenced here and there, so nothing is missing from
+   * what hosts render today. It stops being appended here only once an adapter
+   * renders the other field.
    */
   description: string;
   /**
@@ -123,6 +128,12 @@ interface ToolBase {
    * Once per tool per session, not once per call: see
    * {@link ToolExecutor} for that decision and what it assumes about
    * deployment.
+   *
+   * **A cross-tool pointer may sit in both fields.** Where the guidance is a
+   * contiguous suffix of the description it will carry sentences of the class
+   * above — "this tool cannot answer that, X is the tool that reads it". Those
+   * stay in `description` when the removal lands, because a caller needs them
+   * while choosing; each tool's const says which ones it carries.
    */
   resultGuidance?: string;
   /**

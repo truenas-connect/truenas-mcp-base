@@ -1246,16 +1246,26 @@ tenth of the raw number. But caching discounts input tokens; it does not remove
 them from the window. The constraint is the window, so the cost argument is the
 weaker half of this and must not be the one a change here is justified by.
 
-`ToolBase.resultGuidance` is where the interpretation half now lives: delivered
-with the result, once per tool per session, and never advertised.
+`ToolBase.resultGuidance` is where the interpretation half is delivered: with
+the result, once per tool per session, and never advertised.
+
+**What ships first is a COPY, and the distinction matters for a reader of this
+file.** `description` is byte-identical to what it was, still carries every word
+of the guidance, and is therefore still advertised — one hoisted `const` is
+referenced by both fields, so there is exactly one copy of the prose in the
+source and no reflow can drift them apart. `tools/list` does not shrink until
+the FOLLOW-UP stops appending that const to `description`, which lands only once
+an adapter renders `guidance`. The ordering is not discipline: while nothing
+renders the new field, removing the text from the old one would delete the
+caveats rather than move them.
 
 **The line is drawn by WHEN the text becomes actionable, not by length.**
 Interpretation guidance cannot be acted on at selection time — a caller cannot
 use "null means not read" before it holds a null. So this is not a summary of
 the description with the detail cut; it is the half that was addressed to the
-wrong moment, moved to the moment it can be used. That is also why it reads
-better there: the null/empty/unreadable conventions this repository is most
-careful about now arrive attached to the nulls they are about.
+wrong moment. Once an adapter renders it, the null/empty/unreadable conventions
+this repository is most careful about arrive attached to the nulls they are
+about, which is the gain the split is for.
 
 **What stays in `description` is anything that bears on whether to call the tool
 at all**, and getting this wrong is the way the split does damage. That a report
@@ -1266,6 +1276,15 @@ order to choose correctly has already chosen by the time a result exists. When
 in doubt the text stays in the description: the cost of leaving it there is
 tokens, and the cost of moving it wrongly is a caller acting on an answer it
 would not have asked for.
+
+**A cross-tool pointer may legitimately end up in BOTH, and the follow-up is
+where that is honoured.** Because the guidance is a contiguous suffix, it
+carries some sentences that are selection class — "this tool cannot answer that,
+`audit_config` is the one that reads it", "who may reach one share is
+`share_access`". Those tell a caller the tool is the wrong choice, which is
+worth knowing before the call, so the removal must leave them in `description`
+rather than deleting the whole reference. The const's own comment in each file
+names the ones it carries.
 
 **Once per session, not once per call, and that is a cost decision with a
 scoping assumption.** Guidance in a result is paid at full price when it arrives

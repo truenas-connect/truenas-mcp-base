@@ -673,6 +673,132 @@ function ambiguous(selector: Selector, matches: AccessTarget[]): Error {
   );
 }
 
+/**
+ * The interpretation half of this tool's description (#131), hoisted so the two
+ * fields cannot drift: `description` is this text appended to the selection half,
+ * and `resultGuidance` is this text. One copy means a reflow cannot drop a line
+ * from one of them — the round-one failure on this very literal — and the
+ * follow-up that stops advertising it deletes a reference rather than 140 lines.
+ *
+ * **It ends at the literal's end, so it carries four sentences that are selection
+ * class by `resultGuidance`'s own rule** — the pointers at `audit_config`,
+ * `audit_log_query`, `share_access` and `iscsi_list`/`nvmeof_list`, plus the
+ * read-only statement. A cross-tool pointer tells a caller this tool cannot
+ * answer their question, which is worth knowing BEFORE choosing it. The follow-up
+ * must leave those in `description` rather than deleting the whole reference.
+ */
+const SHARE_ACCESS_RESULT_GUIDANCE =
+  '`failures` reports a protocol whose ' +
+  'share list could not be read, as `protocol` and `error`, and is empty ' +
+  'when both were read. WHILE IT IS NOT EMPTY THIS ANSWER MAY NOT BE THE ' +
+  'ONLY ONE: the search for a second match ran over a list that was never ' +
+  'read, so a share of the protocol named there may also answer to the ' +
+  'string given, and the error this tool would otherwise raise is one it ' +
+  'could not detect. `protocol`, `id`, `name`, `path` ' +
+  'and `enabled` identify the share and mean exactly what they mean in ' +
+  '`shares_list`, including that `name` is ALWAYS null on an NFS export and ' +
+  'that a disabled share reaches nobody whatever the rest of this says. ' +
+  'ACCESS IS THE NARROWEST OF EVERYTHING BELOW, not any one field: a share ' +
+  'is reached only by a principal that every layer reporting on it allows. ' +
+  '`read_only` true CAPS EVERY WRITE PERMISSION reported anywhere below — the ' +
+  'share or export is served read-only whatever its ACLs say — and null is a ' +
+  'switch the system reported no value for, which is not the same as false. ' +
+  '`smb` is the SMB share record\'s own say in WHICH MACHINES may reach it, ' +
+  'applied by the SMB service before either ACL below is consulted, and is ' +
+  'null on an NFS export, which is not served by that service. Within it, ' +
+  '`hosts_allow` and `hosts_deny` are the share\'s host patterns — names, ' +
+  'addresses or subnets — and where both name a machine the SMB service lets ' +
+  'it in, `hosts_allow` being the one it applies first. AN EMPTY LIST MEANS ' +
+  'NO RULE OF THAT KIND, so two empty lists mean no machine is turned away ' +
+  'here. Null is not that: it means the system reported no list this tool ' +
+  'could read — the field absent, the share\'s `options` absent, or a list ' +
+  'holding something that is not a host pattern — and it is NOT evidence ' +
+  'that the share is unrestricted. `nfs` is the export record\'s own say in ' +
+  'who may reach it, and is null on ' +
+  'an SMB share, where the protocol has none of it. Within it, `hosts` and ' +
+  '`networks` are which machines may mount the export at all. AN EMPTY LIST ' +
+  'MEANS UNRESTRICTED — an empty `hosts` and an empty `networks` together ' +
+  'mean any machine that can reach this server may mount it, which is the ' +
+  'opposite of nobody. Null is neither: it means the system reported no list ' +
+  'this tool could read — the field absent, or a list holding an entry that ' +
+  'is not a host or a network, since a restriction reported in part is a ' +
+  'different restriction — and it is NOT evidence that the export is ' +
+  'unrestricted. `mapall_user` and `mapall_group`, when ' +
+  'set, REPLACE THE IDENTITY OF EVERY REQUEST arriving over the export with ' +
+  'that account before the ACL below is consulted, so the ACL then answers ' +
+  'for that one account and not for whoever connected; `maproot_user` and ' +
+  '`maproot_group` do the same for root alone. Each is null where no such ' +
+  'mapping is set. `share_acl` is the SMB SHARE-LEVEL ACL, a separate gate in ' +
+  'front of the filesystem one that can DENY what the path grants, so a ' +
+  'principal allowed below may still be refused here. It and ' +
+  '`share_acl_error` are BOTH null on an NFS export, which has no such layer; ' +
+  'on an SMB share exactly one of them is non-null. Each of its entries names ' +
+  'a principal in whichever of three ways the system had — `name` the ' +
+  'resolved account, `id` with `kind` (`USER` or `GROUP`) the local numeric ' +
+  'id, and `sid` the Windows security identifier of a domain principal — and ' +
+  'an entry that resolved to none of them is reported empty rather than ' +
+  'dropped. `access` is `ALLOWED` or `DENIED`, and `permission` is `FULL`, ' +
+  '`CHANGE`, `READ` or `CUSTOM`. AN EMPTY `share_acl` IS A SHARE-LEVEL ACL ' +
+  'THAT ALLOWS NOBODY, not a share without one — a share that carries no ' +
+  'share-level ACL reports null with a reason in `share_acl_error`. `acl` is ' +
+  'the filesystem ACL on `path`, which ' +
+  'is what decides what each principal may do once connected: over SMB it ' +
+  'applies to whoever the share ACL above already let through, and over NFS ' +
+  'to the ids arriving from a machine the restrictions already let in, after ' +
+  'any mapping. EXACTLY ONE of `acl` and `acl_error` is ' +
+  'non-null: `acl_error` says in words why the ACL could not be read, and an ' +
+  'unread ACL is never presented as an empty one. Within `acl`, `type` is ' +
+  '`NFS4`, `POSIX1E`, or `DISABLED` for a path whose ACLs are switched off — ' +
+  'there `entries` is ALWAYS null, whatever list the system reports beside ' +
+  'it, because no ACL is in force: access is governed by the Unix mode bits, ' +
+  'which this tool does not read, so it can say nothing about who has access ' +
+  '— or null where the system named no type, which leaves the entries below ' +
+  'readable but says nothing about which vocabulary they are in. ' +
+  '`trivial` true means the ACL grants nothing beyond the owner, the owning ' +
+  'group and everyone else. `owner_user` and `owner_group` are the names of ' +
+  'the path\'s owner, with `owner_uid` and `owner_gid` the raw ids, and they ' +
+  'are who the `owner@`, `group@`, `USER_OBJ` and `GROUP_OBJ` entries refer ' +
+  'to. Each of `entries` is one entry of that ACL: an empty list is an ACL ' +
+  'that holds no entry, and null is either the `DISABLED` path above or a ' +
+  'list the system did not report in a form this tool could read — never ' +
+  'evidence that the ACL grants nothing. `tag` says what kind, and ' +
+  'the two ACL types use different words for it. On an NFS4 ACL it is `USER` ' +
+  'or `GROUP`, which name a principal, or `owner@`, `group@` or `everyone@`, ' +
+  'where the tag IS the principal. On a POSIX ACL it is `USER` or `GROUP`, ' +
+  'or `USER_OBJ`, `GROUP_OBJ` and `OTHER` — the path\'s owner, its owning ' +
+  'group, and everyone else — or `MASK`, which is NOT a principal at all but ' +
+  'a ceiling on the others, described under `permissions`. `id` is ALWAYS ' +
+  'null on a tag that is its own principal and on `MASK`: the system writes ' +
+  '-1 there, which is reported as null because no account holds it. `name` ' +
+  'is null on those tags too, since they name no separate account for the ' +
+  'system to resolve — a null on one of them is the tag\'s nature rather ' +
+  'than a principal that would not resolve. On a `USER` or `GROUP` ' +
+  'entry `name` is the resolved account or group name and `id` is its raw ' +
+  'numeric id; an id that resolved to no name is reported as `id` beside a ' +
+  'null `name` and IS NEVER DROPPED, so only a `USER` or `GROUP` entry with ' +
+  'neither is one whose principal could not be read. `access` is `ALLOW` or ' +
+  '`DENY` on an NFS4 ACL and null on a POSIX one, which has no deny entries. ' +
+  '`permissions` names what THE ENTRY ITSELF carries, in the ACL type\'s own ' +
+  'vocabulary — a single preset such as `FULL_CONTROL` or `MODIFY`, or ' +
+  'individual names such as `READ_DATA` and `WRITE_ACL` on NFS4 and `READ`, ' +
+  '`WRITE` and `EXECUTE` on POSIX. ON A POSIX ACL CARRYING A `MASK` ENTRY ' +
+  'THAT IS NOT YET THE EFFECTIVE RIGHT: a `USER`, `GROUP` or `GROUP_OBJ` ' +
+  'entry grants only what it and the `MASK` entry both name, so the two are ' +
+  'read together and an entry can appear to hold more than it does. NFS4 has ' +
+  'no mask and no such step. An empty list is an entry that names ' +
+  'permissions and holds none of them; null is one whose permissions could ' +
+  'not be read, and is not evidence that it grants nothing. ' +
+  '`children_only` true means the ' +
+  'entry GRANTS NOTHING ON THIS PATH and exists to be inherited by what is ' +
+  'created inside it, so its principal does not have the access it appears to ' +
+  'have; null is an entry whose inheritance could not be read. This tool ' +
+  'reads access and changes none of it. It does not report Unix mode bits, ' +
+  'the SMB service\'s own bind addresses, which users are members of a group ' +
+  'named here, or whether a dataset is locked by encryption — so a principal ' +
+  'this reports as having access can still be stopped by something outside ' +
+  'these fields, and this is an upper bound on access rather than a proof of ' +
+  'it.';
+
 export const shareAccess: ReadOnlyTool = {
   name: 'share_access',
   description:
@@ -684,227 +810,9 @@ export const shareAccess: ReadOnlyTool = {
     'share nobody can reach are opposite answers. A string matching MORE THAN ' +
     'one share is also an error, listing what it matched — one path can be ' +
     'shared over both protocols at once and the two grant access differently, ' +
-    'so there is no single answer to give. `failures` reports a protocol whose ' +
-    'share list could not be read, as `protocol` and `error`, and is empty ' +
-    'when both were read. WHILE IT IS NOT EMPTY THIS ANSWER MAY NOT BE THE ' +
-    'ONLY ONE: the search for a second match ran over a list that was never ' +
-    'read, so a share of the protocol named there may also answer to the ' +
-    'string given, and the error this tool would otherwise raise is one it ' +
-    'could not detect. `protocol`, `id`, `name`, `path` ' +
-    'and `enabled` identify the share and mean exactly what they mean in ' +
-    '`shares_list`, including that `name` is ALWAYS null on an NFS export and ' +
-    'that a disabled share reaches nobody whatever the rest of this says. ' +
-    'ACCESS IS THE NARROWEST OF EVERYTHING BELOW, not any one field: a share ' +
-    'is reached only by a principal that every layer reporting on it allows. ' +
-    '`read_only` true CAPS EVERY WRITE PERMISSION reported anywhere below — the ' +
-    'share or export is served read-only whatever its ACLs say — and null is a ' +
-    'switch the system reported no value for, which is not the same as false. ' +
-    '`smb` is the SMB share record\'s own say in WHICH MACHINES may reach it, ' +
-    'applied by the SMB service before either ACL below is consulted, and is ' +
-    'null on an NFS export, which is not served by that service. Within it, ' +
-    '`hosts_allow` and `hosts_deny` are the share\'s host patterns — names, ' +
-    'addresses or subnets — and where both name a machine the SMB service lets ' +
-    'it in, `hosts_allow` being the one it applies first. AN EMPTY LIST MEANS ' +
-    'NO RULE OF THAT KIND, so two empty lists mean no machine is turned away ' +
-    'here. Null is not that: it means the system reported no list this tool ' +
-    'could read — the field absent, the share\'s `options` absent, or a list ' +
-    'holding something that is not a host pattern — and it is NOT evidence ' +
-    'that the share is unrestricted. `nfs` is the export record\'s own say in ' +
-    'who may reach it, and is null on ' +
-    'an SMB share, where the protocol has none of it. Within it, `hosts` and ' +
-    '`networks` are which machines may mount the export at all. AN EMPTY LIST ' +
-    'MEANS UNRESTRICTED — an empty `hosts` and an empty `networks` together ' +
-    'mean any machine that can reach this server may mount it, which is the ' +
-    'opposite of nobody. Null is neither: it means the system reported no list ' +
-    'this tool could read — the field absent, or a list holding an entry that ' +
-    'is not a host or a network, since a restriction reported in part is a ' +
-    'different restriction — and it is NOT evidence that the export is ' +
-    'unrestricted. `mapall_user` and `mapall_group`, when ' +
-    'set, REPLACE THE IDENTITY OF EVERY REQUEST arriving over the export with ' +
-    'that account before the ACL below is consulted, so the ACL then answers ' +
-    'for that one account and not for whoever connected; `maproot_user` and ' +
-    '`maproot_group` do the same for root alone. Each is null where no such ' +
-    'mapping is set. `share_acl` is the SMB SHARE-LEVEL ACL, a separate gate in ' +
-    'front of the filesystem one that can DENY what the path grants, so a ' +
-    'principal allowed below may still be refused here. It and ' +
-    '`share_acl_error` are BOTH null on an NFS export, which has no such layer; ' +
-    'on an SMB share exactly one of them is non-null. Each of its entries names ' +
-    'a principal in whichever of three ways the system had — `name` the ' +
-    'resolved account, `id` with `kind` (`USER` or `GROUP`) the local numeric ' +
-    'id, and `sid` the Windows security identifier of a domain principal — and ' +
-    'an entry that resolved to none of them is reported empty rather than ' +
-    'dropped. `access` is `ALLOWED` or `DENIED`, and `permission` is `FULL`, ' +
-    '`CHANGE`, `READ` or `CUSTOM`. AN EMPTY `share_acl` IS A SHARE-LEVEL ACL ' +
-    'THAT ALLOWS NOBODY, not a share without one — a share that carries no ' +
-    'share-level ACL reports null with a reason in `share_acl_error`. `acl` is ' +
-    'the filesystem ACL on `path`, which ' +
-    'is what decides what each principal may do once connected: over SMB it ' +
-    'applies to whoever the share ACL above already let through, and over NFS ' +
-    'to the ids arriving from a machine the restrictions already let in, after ' +
-    'any mapping. EXACTLY ONE of `acl` and `acl_error` is ' +
-    'non-null: `acl_error` says in words why the ACL could not be read, and an ' +
-    'unread ACL is never presented as an empty one. Within `acl`, `type` is ' +
-    '`NFS4`, `POSIX1E`, or `DISABLED` for a path whose ACLs are switched off — ' +
-    'there `entries` is ALWAYS null, whatever list the system reports beside ' +
-    'it, because no ACL is in force: access is governed by the Unix mode bits, ' +
-    'which this tool does not read, so it can say nothing about who has access ' +
-    '— or null where the system named no type, which leaves the entries below ' +
-    'readable but says nothing about which vocabulary they are in. ' +
-    '`trivial` true means the ACL grants nothing beyond the owner, the owning ' +
-    'group and everyone else. `owner_user` and `owner_group` are the names of ' +
-    'the path\'s owner, with `owner_uid` and `owner_gid` the raw ids, and they ' +
-    'are who the `owner@`, `group@`, `USER_OBJ` and `GROUP_OBJ` entries refer ' +
-    'to. Each of `entries` is one entry of that ACL: an empty list is an ACL ' +
-    'that holds no entry, and null is either the `DISABLED` path above or a ' +
-    'list the system did not report in a form this tool could read — never ' +
-    'evidence that the ACL grants nothing. `tag` says what kind, and ' +
-    'the two ACL types use different words for it. On an NFS4 ACL it is `USER` ' +
-    'or `GROUP`, which name a principal, or `owner@`, `group@` or `everyone@`, ' +
-    'where the tag IS the principal. On a POSIX ACL it is `USER` or `GROUP`, ' +
-    'or `USER_OBJ`, `GROUP_OBJ` and `OTHER` — the path\'s owner, its owning ' +
-    'group, and everyone else — or `MASK`, which is NOT a principal at all but ' +
-    'a ceiling on the others, described under `permissions`. `id` is ALWAYS ' +
-    'null on a tag that is its own principal and on `MASK`: the system writes ' +
-    '-1 there, which is reported as null because no account holds it. `name` ' +
-    'is null on those tags too, since they name no separate account for the ' +
-    'system to resolve — a null on one of them is the tag\'s nature rather ' +
-    'than a principal that would not resolve. On a `USER` or `GROUP` ' +
-    'entry `name` is the resolved account or group name and `id` is its raw ' +
-    'numeric id; an id that resolved to no name is reported as `id` beside a ' +
-    'null `name` and IS NEVER DROPPED, so only a `USER` or `GROUP` entry with ' +
-    'neither is one whose principal could not be read. `access` is `ALLOW` or ' +
-    '`DENY` on an NFS4 ACL and null on a POSIX one, which has no deny entries. ' +
-    '`permissions` names what THE ENTRY ITSELF carries, in the ACL type\'s own ' +
-    'vocabulary — a single preset such as `FULL_CONTROL` or `MODIFY`, or ' +
-    'individual names such as `READ_DATA` and `WRITE_ACL` on NFS4 and `READ`, ' +
-    '`WRITE` and `EXECUTE` on POSIX. ON A POSIX ACL CARRYING A `MASK` ENTRY ' +
-    'THAT IS NOT YET THE EFFECTIVE RIGHT: a `USER`, `GROUP` or `GROUP_OBJ` ' +
-    'entry grants only what it and the `MASK` entry both name, so the two are ' +
-    'read together and an entry can appear to hold more than it does. NFS4 has ' +
-    'no mask and no such step. An empty list is an entry that names ' +
-    'permissions and holds none of them; null is one whose permissions could ' +
-    'not be read, and is not evidence that it grants nothing. ' +
-    '`children_only` true means the ' +
-    'entry GRANTS NOTHING ON THIS PATH and exists to be inherited by what is ' +
-    'created inside it, so its principal does not have the access it appears to ' +
-    'have; null is an entry whose inheritance could not be read. This tool ' +
-    'reads access and changes none of it. It does not report Unix mode bits, ' +
-    'the SMB service\'s own bind addresses, which users are members of a group ' +
-    'named here, or whether a dataset is locked by encryption — so a principal ' +
-    'this reports as having access can still be stopped by something outside ' +
-    'these fields, and this is an upper bound on access rather than a proof of ' +
-    'it.',
-  resultGuidance:
-    '`failures` reports a protocol whose ' +
-    'share list could not be read, as `protocol` and `error`, and is empty ' +
-    'when both were read. WHILE IT IS NOT EMPTY THIS ANSWER MAY NOT BE THE ' +
-    'ONLY ONE: the search for a second match ran over a list that was never ' +
-    'read, so a share of the protocol named there may also answer to the ' +
-    'string given, and the error this tool would otherwise raise is one it ' +
-    'could not detect. `protocol`, `id`, `name`, `path` ' +
-    'and `enabled` identify the share and mean exactly what they mean in ' +
-    '`shares_list`, including that `name` is ALWAYS null on an NFS export and ' +
-    'that a disabled share reaches nobody whatever the rest of this says. ' +
-    'ACCESS IS THE NARROWEST OF EVERYTHING BELOW, not any one field: a share ' +
-    'is reached only by a principal that every layer reporting on it allows. ' +
-    '`read_only` true CAPS EVERY WRITE PERMISSION reported anywhere below — the ' +
-    'share or export is served read-only whatever its ACLs say — and null is a ' +
-    'switch the system reported no value for, which is not the same as false. ' +
-    '`smb` is the SMB share record\'s own say in WHICH MACHINES may reach it, ' +
-    'applied by the SMB service before either ACL below is consulted, and is ' +
-    'null on an NFS export, which is not served by that service. Within it, ' +
-    '`hosts_allow` and `hosts_deny` are the share\'s host patterns — names, ' +
-    'addresses or subnets — and where both name a machine the SMB service lets ' +
-    'it in, `hosts_allow` being the one it applies first. AN EMPTY LIST MEANS ' +
-    'NO RULE OF THAT KIND, so two empty lists mean no machine is turned away ' +
-    'here. Null is not that: it means the system reported no list this tool ' +
-    'could read — the field absent, the share\'s `options` absent, or a list ' +
-    'holding something that is not a host pattern — and it is NOT evidence ' +
-    'that the share is unrestricted. `nfs` is the export record\'s own say in ' +
-    'who may reach it, and is null on ' +
-    'an SMB share, where the protocol has none of it. Within it, `hosts` and ' +
-    '`networks` are which machines may mount the export at all. AN EMPTY LIST ' +
-    'MEANS UNRESTRICTED — an empty `hosts` and an empty `networks` together ' +
-    'mean any machine that can reach this server may mount it, which is the ' +
-    'opposite of nobody. Null is neither: it means the system reported no list ' +
-    'this tool could read — the field absent, or a list holding an entry that ' +
-    'is not a host or a network, since a restriction reported in part is a ' +
-    'different restriction — and it is NOT evidence that the export is ' +
-    'unrestricted. `mapall_user` and `mapall_group`, when ' +
-    'set, REPLACE THE IDENTITY OF EVERY REQUEST arriving over the export with ' +
-    'that account before the ACL below is consulted, so the ACL then answers ' +
-    'for that one account and not for whoever connected; `maproot_user` and ' +
-    '`maproot_group` do the same for root alone. Each is null where no such ' +
-    'mapping is set. `share_acl` is the SMB SHARE-LEVEL ACL, a separate gate in ' +
-    'front of the filesystem one that can DENY what the path grants, so a ' +
-    'principal allowed below may still be refused here. It and ' +
-    '`share_acl_error` are BOTH null on an NFS export, which has no such layer; ' +
-    'on an SMB share exactly one of them is non-null. Each of its entries names ' +
-    'a principal in whichever of three ways the system had — `name` the ' +
-    'resolved account, `id` with `kind` (`USER` or `GROUP`) the local numeric ' +
-    'id, and `sid` the Windows security identifier of a domain principal — and ' +
-    'an entry that resolved to none of them is reported empty rather than ' +
-    'dropped. `access` is `ALLOWED` or `DENIED`, and `permission` is `FULL`, ' +
-    '`CHANGE`, `READ` or `CUSTOM`. AN EMPTY `share_acl` IS A SHARE-LEVEL ACL ' +
-    'THAT ALLOWS NOBODY, not a share without one — a share that carries no ' +
-    'share-level ACL reports null with a reason in `share_acl_error`. `acl` is ' +
-    'the filesystem ACL on `path`, which ' +
-    'is what decides what each principal may do once connected: over SMB it ' +
-    'applies to whoever the share ACL above already let through, and over NFS ' +
-    'to the ids arriving from a machine the restrictions already let in, after ' +
-    'any mapping. EXACTLY ONE of `acl` and `acl_error` is ' +
-    'non-null: `acl_error` says in words why the ACL could not be read, and an ' +
-    'unread ACL is never presented as an empty one. Within `acl`, `type` is ' +
-    '`NFS4`, `POSIX1E`, or `DISABLED` for a path whose ACLs are switched off — ' +
-    'there `entries` is ALWAYS null, whatever list the system reports beside ' +
-    'it, because no ACL is in force: access is governed by the Unix mode bits, ' +
-    'which this tool does not read, so it can say nothing about who has access ' +
-    '— or null where the system named no type, which leaves the entries below ' +
-    'readable but says nothing about which vocabulary they are in. ' +
-    '`trivial` true means the ACL grants nothing beyond the owner, the owning ' +
-    'group and everyone else. `owner_user` and `owner_group` are the names of ' +
-    'the path\'s owner, with `owner_uid` and `owner_gid` the raw ids, and they ' +
-    'are who the `owner@`, `group@`, `USER_OBJ` and `GROUP_OBJ` entries refer ' +
-    'to. Each of `entries` is one entry of that ACL: an empty list is an ACL ' +
-    'that holds no entry, and null is either the `DISABLED` path above or a ' +
-    'list the system did not report in a form this tool could read — never ' +
-    'evidence that the ACL grants nothing. `tag` says what kind, and ' +
-    'the two ACL types use different words for it. On an NFS4 ACL it is `USER` ' +
-    'or `GROUP`, which name a principal, or `owner@`, `group@` or `everyone@`, ' +
-    'where the tag IS the principal. On a POSIX ACL it is `USER` or `GROUP`, ' +
-    'or `USER_OBJ`, `GROUP_OBJ` and `OTHER` — the path\'s owner, its owning ' +
-    'group, and everyone else — or `MASK`, which is NOT a principal at all but ' +
-    'a ceiling on the others, described under `permissions`. `id` is ALWAYS ' +
-    'null on a tag that is its own principal and on `MASK`: the system writes ' +
-    '-1 there, which is reported as null because no account holds it. `name` ' +
-    'is null on those tags too, since they name no separate account for the ' +
-    'system to resolve — a null on one of them is the tag\'s nature rather ' +
-    'than a principal that would not resolve. On a `USER` or `GROUP` ' +
-    'entry `name` is the resolved account or group name and `id` is its raw ' +
-    'numeric id; an id that resolved to no name is reported as `id` beside a ' +
-    'null `name` and IS NEVER DROPPED, so only a `USER` or `GROUP` entry with ' +
-    'neither is one whose principal could not be read. `access` is `ALLOW` or ' +
-    '`DENY` on an NFS4 ACL and null on a POSIX one, which has no deny entries. ' +
-    '`permissions` names what THE ENTRY ITSELF carries, in the ACL type\'s own ' +
-    'vocabulary — a single preset such as `FULL_CONTROL` or `MODIFY`, or ' +
-    'individual names such as `READ_DATA` and `WRITE_ACL` on NFS4 and `READ`, ' +
-    '`WRITE` and `EXECUTE` on POSIX. ON A POSIX ACL CARRYING A `MASK` ENTRY ' +
-    'THAT IS NOT YET THE EFFECTIVE RIGHT: a `USER`, `GROUP` or `GROUP_OBJ` ' +
-    'entry grants only what it and the `MASK` entry both name, so the two are ' +
-    'read together and an entry can appear to hold more than it does. NFS4 has ' +
-    'no mask and no such step. An empty list is an entry that names ' +
-    'permissions and holds none of them; null is one whose permissions could ' +
-    'not be read, and is not evidence that it grants nothing. ' +
-    '`children_only` true means the ' +
-    'entry GRANTS NOTHING ON THIS PATH and exists to be inherited by what is ' +
-    'created inside it, so its principal does not have the access it appears to ' +
-    'have; null is an entry whose inheritance could not be read. This tool ' +
-    'reads access and changes none of it. It does not report Unix mode bits, ' +
-    'the SMB service\'s own bind addresses, which users are members of a group ' +
-    'named here, or whether a dataset is locked by encryption — so a principal ' +
-    'this reports as having access can still be stopped by something outside ' +
-    'these fields, and this is an upper bound on access rather than a proof of ' +
-    'it.',
+    'so there is no single answer to give. ' +
+    SHARE_ACCESS_RESULT_GUIDANCE,
+  resultGuidance: SHARE_ACCESS_RESULT_GUIDANCE,
   inputSchema: {
     type: 'object',
     properties: {

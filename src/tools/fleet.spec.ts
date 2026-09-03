@@ -1111,14 +1111,17 @@ describe('fleet_compliance_report — result guidance', () => {
    * text, so nothing could catch it. These pin the two properties that would
    * have. Fifty-three more tools take the same edit.
    */
-  it('carries guidance that is a verbatim slice of the description', () => {
-    // While the two overlap this is the whole integrity check: any reflow that
-    // reworded, rewrapped or dropped a line breaks it. The follow-up that
-    // removes the text from `description` replaces this with the assertions
-    // below, which stand on their own.
+  it('appends the same guidance text it delivers, from one source', () => {
+    // Structural rather than held here: both fields reference one hoisted
+    // const, so a reflow cannot drop a line from one copy — there is no second
+    // copy. This asserts the arrangement rather than the text, and it is what
+    // fails if someone reintroduces a literal in either field.
     expect(fleetComplianceReport.description).toContain(
       fleetComplianceReport.resultGuidance ?? '',
     );
+    expect(fleetComplianceReport.description.endsWith(
+      fleetComplianceReport.resultGuidance ?? '',
+    )).toBe(true);
   });
 
   it('states the expiry horizon and the entry cap, both interpolated', () => {

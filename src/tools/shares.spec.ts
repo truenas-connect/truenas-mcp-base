@@ -1120,8 +1120,11 @@ describe('share_access', () => {
 });
 
 describe('share_access — result guidance', () => {
-  it('carries guidance that is a verbatim slice of the description', () => {
+  it('appends the same guidance text it delivers, from one source', () => {
+    // See fleet.spec.ts: one hoisted const backs both fields, so this asserts
+    // the arrangement rather than holding the text.
     expect(shareAccess.description).toContain(shareAccess.resultGuidance ?? '');
+    expect(shareAccess.description.endsWith(shareAccess.resultGuidance ?? '')).toBe(true);
   });
 
   it('keeps the inversion that makes an empty list mean its opposite', () => {

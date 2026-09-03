@@ -593,6 +593,9 @@ describe('ToolExecutor — result guidance', () => {
     for (const name of ['a', 'b']) {
       registry.add({ name, client: {} as TrueNasApiClient } as SystemHandle);
     }
+    // Mutable, and returned below: the withholding invariant is about ONE
+    // executor's delivered set across two calls, so the failure has to be
+    // switched off between them rather than a second executor built.
     const failOn = options.failOn ?? [];
     const tool: ReadOnlyTool = {
       name: 'guided',
@@ -612,7 +615,7 @@ describe('ToolExecutor — result guidance', () => {
     catalog.register(tool);
     const build = (): ToolExecutor =>
       new ToolExecutor({ catalog, registry, confirmations: new ConfirmationService() });
-    return { build, executor: build() };
+    return { build, executor: build(), failOn };
   }
 
   /** Narrowing helper: every outcome below is a RESULTS one. */
@@ -650,11 +653,19 @@ describe('ToolExecutor — result guidance', () => {
     // The point of the SUCCESS requirement: a result with nothing to read must
     // not spend the one delivery, or every later call that does carry data is
     // unguided.
-    const failing = guidedSetup({ guidance: 'kept', failOn: ['a', 'b'] });
-    expect((await run(failing.executor)).guidance).toBeUndefined();
+    //
+    // BOTH halves run on the SAME executor deliberately. An earlier version
+    // built a second one for the success, which re-asserted only what the
+    // first test already covers and left `guidanceDelivered` unread — so
+    // moving the `add` above the SUCCESS gate broke the invariant with every
+    // test still green.
+    const { executor, failOn } = guidedSetup({ guidance: 'kept', failOn: ['a', 'b'] });
+    expect((await run(executor)).guidance).toBeUndefined();
 
-    const healthy = guidedSetup({ guidance: 'kept' });
-    expect((await run(healthy.executor)).guidance).toBe('kept');
+    failOn.length = 0;
+    expect((await run(executor)).guidance).toBe('kept');
+    // And having now been spent, it is not repeated.
+    expect((await run(executor)).guidance).toBeUndefined();
   });
 
   it('is per executor, so a new session receives it again', async () => {
@@ -674,6 +685,9 @@ describe('ToolExecutor — result guidance on the mutating paths', () => {
    * falling out of that gate rather than being handled separately.
    */
   function mutatingSetup(options: { planFails?: boolean } = {}) {
+    // `planFails` is read through this box rather than captured, so a test can
+    // switch it off and come back for the delivery on the same executor.
+    const state = { planFails: options.planFails === true };
     const registry = new SystemRegistry();
     for (const name of ['a', 'b']) {
       registry.add({ name, client: {} as TrueNasApiClient } as SystemHandle);
@@ -687,7 +701,7 @@ describe('ToolExecutor — result guidance on the mutating paths', () => {
       mutating: true,
       destructiveness: 'reversible',
       plan: async ({ system }) => {
-        if (options.planFails) {
+        if (state.planFails) {
           throw new Error(`cannot plan on ${system.name}`);
         }
         return [{ method: 'write', params: {}, description: `write on ${system.name}` }];
@@ -699,20 +713,36 @@ describe('ToolExecutor — result guidance on the mutating paths', () => {
     const confirmations = new ConfirmationService();
     return {
       confirmations,
+      state,
       executor: new ToolExecutor({ catalog, registry, confirmations }),
     };
   }
 
   it('does not spend the delivery on a plan that failed on every system', async () => {
-    // The all-ERROR gate reaching the path that returns steps as RESULTS.
-    const { executor } = mutatingSetup({ planFails: true });
+    // The all-ERROR gate reaching the path that returns steps as RESULTS. The
+    // second half is what makes "does not spend" a claim rather than a
+    // restatement of the absence: the same executor must still owe it.
+    const { executor, state, confirmations } = mutatingSetup({ planFails: true });
     const outcome = await executor.execute('guided_write', { systems: 'all' });
-    expect(outcome.type).toBe('RESULTS');
     if (outcome.type !== 'RESULTS') {
       throw new Error('expected RESULTS');
     }
     expect(outcome.results.every((r) => r.status === 'ERROR')).toBe(true);
     expect(outcome.guidance).toBeUndefined();
+
+    state.planFails = false;
+    const planned = await executor.execute('guided_write', { systems: 'all' });
+    if (planned.type !== 'PLAN') {
+      throw new Error('expected PLAN');
+    }
+    const executed = await executor.execute('guided_write', {
+      systems: 'all',
+      confirmation_token: confirmations.mint(planned.key),
+    });
+    if (executed.type !== 'RESULTS') {
+      throw new Error('expected RESULTS');
+    }
+    expect(executed.guidance).toBe('how to read what came back');
   });
 
   it('attaches it to the confirmed execution, and not to the plan before it', async () => {
