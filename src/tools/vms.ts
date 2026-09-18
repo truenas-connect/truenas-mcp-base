@@ -1130,7 +1130,8 @@ export const vmDevices: ReadOnlyTool = {
  * `scheduled_task_set_enabled`'s (#121). Each `execute` reads `vm.query` before
  * the call and again after it. BOTH READS ARE THE SAME CALL from
  * {@link readVmPower}, so the plan lists it ONCE and that step's description
- * says it runs again immediately after the mutation — #156's rule exactly.
+ * says in words that it runs again — #156's rule exactly. WHEN it runs again
+ * differs between these three and the step says which; see {@link vmReadStep}.
  *
  * NOTHING BRANCHES ON EITHER READ. The mutating call is made whatever the reads
  * said, including where they failed, because `execute` is contractually a pure
