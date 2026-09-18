@@ -34,7 +34,7 @@ src/registry/         SystemRegistry, connectSystems, the client factory
 src/execution/        the executor, fan-out, and plan/confirm
 src/content/          bounded file content (see the decision below)
 src/tools/            one file per family; all registered by createDefaultCatalog()
-src/tools/common.ts   the guards every family shares; not a family, not exported
+src/tools/common.ts   the guards and the job watch; not a family, not exported
 src/testing/          fixtures the specs import; not the library, not covered
 src/index.ts          the public barrel — an export here is a contract
 ```
@@ -236,7 +236,9 @@ a fix applied to the rest, and nothing makes the divergence visible.**
 Where the line falls, since "shared" is not the same as "generic":
 
 - **What belongs there says the same thing for every family** — a type
-  narrowing, the wording of a stated absence, the `Date` bound.
+  narrowing, the wording of a stated absence, the `Date` bound. Since #166 it is
+  also `watchJob`, which is behaviour rather than a narrowing: the test is that
+  every family does the same thing, not that the thing is small.
 - **What does not is anything whose meaning is a family's own**: a limit's
   default, a state vocabulary, a field name. `effectiveLimit` is shared and
   takes its two bounds as arguments precisely because the bounding is common
@@ -971,7 +973,8 @@ follows its own effect has two failure eras, and only the first of them is the
 call's.**
 
 **Which is why this tool calls `callAndGetJobId` and `trackJob` apart rather
-than `api.job`, which is those two piped together.** The two eras are divided by
+than `api.job`, which is those two piped together** — through `watchJob` since
+#166, which is where the pipe described here now lives. The two eras are divided by
 the moment the client correlates the job id off the job event, and `api.job`
 consumes that id inside its own `switchMap` — nothing of the job reaches the
 caller's pipe until `trackJob` emits. But `trackJob` opens by dispatching
@@ -2274,17 +2277,41 @@ this repository says whether `service.control` no-ops or rejects. Guessing the
 reassuring direction is #154's costly one; guessing the other would refuse a plan
 the middleware would have accepted.
 
-### The bounded job watch is now four copies, and promoting it is owed (#164)
+### The bounded job watch is `watchJob` in `common.ts`, and the words are not (#166)
 
-`watchServiceJob` is the fourth implementation of #122's pipe — two inline in
-`tasks.ts`, `watchVmJob` in `vms.ts`, this one — and it was written rather than
-promoted. `common.ts` was cut to stop exactly this (#86), so the reason is worth
-recording rather than leaving as an oversight: promoting it means rewriting three
-tools this ticket does not touch, and the success-state vocabulary each keeps is
-a family's own (#161) and would have to become an argument, as `effectiveLimit`'s
-bounds are. **The promotion is proposed as its own ticket.** What must NOT travel
-with it whenever it happens is the vocabulary or the watch bound — share a
-sentence, not a number (#154).
+#122's pipe had been copied four times — twice inline in `tasks.ts`, as
+`watchVmJob` in `vms.ts`, as `watchServiceJob` in `services.ts` — before it was
+promoted to `watchJob` in `common.ts`. `common.ts` was cut to stop exactly that
+(#86), and this pipe is load-bearing in a way `textOrNull` is not: **a divergence
+here reports a mutation that LANDED as having failed, or ends a watch in a way
+that loses the only number naming the run.** Everything #122 decided is unchanged
+and now has one implementation — the two failure eras, the bound that observes
+rather than stops, `ended` read from the tracking completing, `job_id` from the
+correlation.
+
+**What did not travel with it is every word and every number.** `successStates`
+and `watchMs` are arguments, the way `effectiveLimit`'s two bounds are: a state
+vocabulary is a family's own (#86, #161) and a shared constant would put the
+words in one file and the sentence describing them to a caller in another, and a
+watch bound is one tool's patience — share a sentence, not a number (#154). Each
+tool also keeps its own RESULT FIELD NAMES and maps `WatchedJob` into them;
+`tasks.ts` reports `job_state` as `state`, which is why the shared shape is read
+rather than spread there.
+
+**A job's `result` is not in the shared shape, and `extra` is why.**
+`cloudsync.sync`, `pool.snapshottask.run`, `vm.stop` and `vm.restart` all declare
+`response: null`, so a shared `result` field would be null on four of the five
+call sites while presenting itself as something to read; `service.control` declares
+`response: boolean` and reads it as `control_result` through `extra`. The callback
+is handed the job record and `ended` rather than the result outright, because what
+the result MEANS — its type, its name, and that it is read only where the job
+ended — is that tool's own. **Nothing raw leaves by that route**: the record is
+not in the returned shape, and `...job` spread into a result is the existing idiom
+in two of these tools, so a record reachable there would put a whole middleware
+payload into an audit trail the first time someone reused it.
+
+**`common.ts` is still not on the public barrel**, and promoting a function into
+it is not a step towards exporting it.
 
 ## Conventions
 

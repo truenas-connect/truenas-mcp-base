@@ -1,16 +1,5 @@
 import type { CallParams, JobParams } from '@truenas/api-client';
-import {
-  catchError,
-  EMPTY,
-  firstValueFrom,
-  lastValueFrom,
-  Observable,
-  switchMap,
-  takeUntil,
-  tap,
-  throwError,
-  timer,
-} from 'rxjs';
+import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import {
   ApiSurface,
@@ -23,11 +12,10 @@ import {
 import {
   booleanOrNull,
   errorText,
-  isoOrNull,
-  jobMillis,
   numberOrNull,
   recordOrNull,
   textOrNull,
+  watchJob,
 } from '@/tools/common';
 
 /**
@@ -1407,93 +1395,14 @@ function readAgainAfterWatch(seconds: number): string {
  * ITS OWN SET rather than one shared with `tasks.ts`, under #86's line: a state
  * VOCABULARY is a family's own, and each tool states its own in its own
  * description — where a shared constant would put the words in one file and the
- * sentence about them in another. What IS shared is the reading of the
- * middleware's date envelope ({@link jobMillis}), which says the same thing
- * everywhere.
+ * sentence about them in another. It is passed to {@link watchJob}, which holds
+ * the pipe and none of the words, the way `effectiveLimit` takes its two bounds
+ * (#166).
  *
  * A terminal state this catalog does not recognise is NOT read as a success:
  * a run that cannot be shown to have worked has not been shown to have worked.
  */
 const VM_JOB_SUCCESS_STATES = new Set(['SUCCESS', 'FINISHED']);
-
-/** What a bounded watch of one job established. */
-interface WatchedVmJob {
-  job_id: number | null;
-  ended: boolean;
-  succeeded: boolean | null;
-  job_state: string | null;
-  error: string | null;
-  finished_at: string | null;
-}
-
-/**
- * Start a job and watch it for a bounded time, then report what there is.
- *
- * THE SHAPE IS `cloudsync_run`'S (#122) AND IS COPIED RATHER THAN REDERIVED.
- * `callAndGetJobId` and `trackJob` are called apart rather than through
- * `api.job`, so the two failure eras stay separable; ending the watch does not
- * end the job, because `trackJob` only observes; `ended` is read from the
- * tracking COMPLETING rather than from a state list written down here; and
- * `job_id` comes from the correlation and never from the tracking's last
- * emission, because it is the one thing that survives a watch that established
- * nothing else. Every reason for every one of those is written out at
- * `cloudsyncRun` in `tasks.ts` and in `CLAUDE.md`'s #122 decision, and none of
- * it is re-argued here.
- *
- * `started` is the caller's own `callAndGetJobId` call, passed in rather than
- * dialled here, because the method and its params are the tool's and the
- * watching is not. It is cold: nothing is sent until this subscribes, which is
- * what lets a caller build it before the pre-call read without starting
- * anything.
- */
-async function watchVmJob(
-  ctx: ToolContext,
-  started: Observable<number>,
-  watchMs: number,
-): Promise<WatchedVmJob> {
-  const api = ctx.system.client.api;
-  let completed = false;
-  let sawJob = false;
-  let jobId: number | null = null;
-  const watched = await lastValueFrom(
-    started.pipe(
-      tap((correlated) => {
-        sawJob = true;
-        jobId = numberOrNull(correlated);
-      }),
-      switchMap((correlated) => api.trackJob(correlated)),
-      tap({
-        complete: () => {
-          completed = true;
-        },
-      }),
-      // An error raised once a job event has named this request is not the call
-      // failing: the operation is under way, and rejecting here would report a
-      // failure that did not happen AND take the job id with it. Before that
-      // event there is nothing to report and no id to keep, so an error there
-      // still fails.
-      catchError((error: unknown) => (sawJob ? EMPTY : throwError(() => error))),
-      takeUntil(timer(watchMs)),
-    ),
-    { defaultValue: null },
-  );
-  const record = recordOrNull(watched);
-  const state = textOrNull(record?.['state']);
-  // A completion carrying no emission is the client having found no such job,
-  // which establishes nothing; both halves are required.
-  const ended = completed && state !== null;
-  return {
-    job_id: jobId,
-    ended,
-    succeeded: ended ? VM_JOB_SUCCESS_STATES.has(state) : null,
-    job_state: state,
-    error: textOrNull(record?.['error']),
-    // Gated on `ended` rather than on a state list of its own, so the finish
-    // time follows the claim this tool has already made and cannot contradict
-    // it.
-    finished_at: ended ? isoOrNull(jobMillis(record?.['time_finished'])) : null,
-  };
-}
 
 /** What the plan says about the watch, in the one wording both job-backed tools use. */
 function vmWatchSentence(seconds: number): string {
@@ -2026,11 +1935,11 @@ export const vmStop: MutatingTool = {
   async execute(ctx, rawArgs) {
     const args = parseVmStopArgs(rawArgs);
     const previous = await attemptVmPower(ctx, args.id);
-    const job = await watchVmJob(
-      ctx,
-      ctx.system.client.api.callAndGetJobId('vm.stop', vmStopParams(args)),
-      VM_STOP_WATCH_MS,
-    );
+    const api = ctx.system.client.api;
+    const job = await watchJob(api, api.callAndGetJobId('vm.stop', vmStopParams(args)), {
+      watchMs: VM_STOP_WATCH_MS,
+      successStates: VM_JOB_SUCCESS_STATES,
+    });
     // Read after the watch, not after the stop: the two are the same only where
     // the job ended inside the bound, which is why `resulting_state` is
     // described as the state when the watch ended.
@@ -2270,11 +2179,11 @@ export const vmRestart: MutatingTool = {
   async execute(ctx, rawArgs) {
     const id = parseVmId(rawArgs);
     const previous = await attemptVmPower(ctx, id);
-    const job = await watchVmJob(
-      ctx,
-      ctx.system.client.api.callAndGetJobId('vm.restart', vmRestartParams(id)),
-      VM_RESTART_WATCH_MS,
-    );
+    const api = ctx.system.client.api;
+    const job = await watchJob(api, api.callAndGetJobId('vm.restart', vmRestartParams(id)), {
+      watchMs: VM_RESTART_WATCH_MS,
+      successStates: VM_JOB_SUCCESS_STATES,
+    });
     // After the watch, not after the restart — and a restart passes through
     // stopped on its way back up, which is why the description refuses to read
     // a `STOPPED` here as a machine that did not come back.

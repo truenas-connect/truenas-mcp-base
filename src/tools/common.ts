@@ -25,7 +25,24 @@
  * family. What does not is anything whose meaning is a family's own: a limit's
  * default, a state vocabulary, a field name. Those stay in the file that
  * defines them and are passed in.
+ *
+ * {@link watchJob} is the one thing here that is not a narrowing, and it is here
+ * for the same reason the narrowings are: four tool families had copied it (#166).
  */
+
+import type { TrueNasApiClient } from '@truenas/api-client';
+import {
+  catchError,
+  EMPTY,
+  lastValueFrom,
+  Observable,
+  switchMap,
+  takeUntil,
+  tap,
+  throwError,
+  timer,
+} from 'rxjs';
+import type { ApiSurface } from '@/catalog/tool';
 
 /**
  * One string field of a row, or null where the system reported no value.
@@ -243,4 +260,152 @@ export function isoOrNull(millis: number | null): string | null {
 export function effectiveLimit(raw: unknown, fallback: number, max: number): number {
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return fallback;
   return Math.min(max, Math.max(1, Math.floor(raw)));
+}
+
+/**
+ * The one client method {@link watchJob} calls: following a job it did not
+ * start.
+ *
+ * Named as a `Pick` rather than as the whole `api` so the watch's reach is
+ * readable from its signature — it observes a job and dials nothing. The call
+ * that STARTS the job is the tool's own and is passed in already built.
+ */
+type JobTracker = Pick<TrueNasApiClient<ApiSurface>['api'], 'trackJob'>;
+
+/**
+ * What a bounded watch of one job established, in the fields every job-backed
+ * tool reports.
+ *
+ * `job_state` is the state the tracking last reported, passed through as the
+ * system spelled it. A tool reporting it under another name maps it rather than
+ * having this say two things.
+ */
+export interface WatchedJob {
+  job_id: number | null;
+  ended: boolean;
+  succeeded: boolean | null;
+  job_state: string | null;
+  error: string | null;
+  finished_at: string | null;
+}
+
+/**
+ * Start nothing, watch a job someone else started for a bounded time, and
+ * report what there is.
+ *
+ * THE SHAPE IS `cloudsync_run`'S (#122). It was copied four times — twice
+ * inline in `tasks.ts`, as `watchVmJob` in `vms.ts`, as `watchServiceJob` in
+ * `services.ts` — before it was promoted here (#166), and this file exists
+ * because eleven copies of `textOrNull` had stopped being identical. This pipe
+ * is load-bearing in a way `textOrNull` is not: a divergence here reports a
+ * mutation that LANDED as having failed, or ends a watch in a way that loses
+ * the only number naming the run. Every reason for every property below is
+ * written out at `cloudsyncRun` in `tasks.ts` and in `CLAUDE.md`'s #122
+ * decision, and none of it is re-argued here:
+ *
+ * - `callAndGetJobId` and `trackJob` are called apart rather than through
+ *   `api.job`, so the two failure eras stay separable. `started` is the
+ *   caller's own `callAndGetJobId` call, passed in rather than dialled here,
+ *   because the method and its params are the tool's and the watching is not.
+ *   It is cold: nothing is sent until this subscribes.
+ * - An error raised once a job event has named the request is not the call
+ *   failing, so it ends the watch and the result says what was established.
+ *   Before that event there is nothing to report and no id to keep, so an error
+ *   there still fails.
+ * - Ending the watch does not end the job: `trackJob` only observes, and
+ *   unsubscribing sends nothing to the middleware.
+ * - `ended` is read from the tracking COMPLETING rather than from a state list
+ *   written down here, and a completion carrying no emission is the client
+ *   having found no such job — which establishes nothing, so both halves are
+ *   required.
+ * - `job_id` comes from the correlation and never from the tracking's last
+ *   emission, because it is the one thing that survives a watch that
+ *   established nothing else.
+ *
+ * WHAT MUST NOT TRAVEL WITH THE PIPE IS EACH FAMILY'S OWN VOCABULARY, which is
+ * why both numbers a caller supplies are arguments in the way
+ * {@link effectiveLimit}'s bounds are. `successStates` is a state VOCABULARY,
+ * which #86's line makes a family's own — a shared constant would put the words
+ * in one file and the sentence describing them to a caller in another — and
+ * `watchMs` is a ceiling on one tool's patience rather than an estimate of any
+ * job, which #154 states as sharing a sentence and not a number.
+ *
+ * `extra` IS HOW A METHOD THAT DECLARES A RESULT REPORTS ONE, and it exists so
+ * that a job's `result` is NOT in the shape above. `cloudsync.sync`,
+ * `pool.snapshottask.run`, `vm.stop` and `vm.restart` all declare
+ * `response: null`, so a shared `result` field would be null on four of the five
+ * call sites while presenting itself as something to read; `service.control` declares
+ * `response: boolean` and reads it as `control_result`. The callback is handed
+ * the record and `ended` rather than being given the result outright, because
+ * what the result MEANS — its type, its name, and that it is only read where
+ * the job was established to have ended — is that tool's own. Nothing raw
+ * reaches a caller by this route: the record is not in the returned shape, and
+ * tool results are recorded verbatim in the audit trail.
+ */
+export async function watchJob<Extra extends object = Record<never, never>>(
+  api: JobTracker,
+  started: Observable<number>,
+  options: {
+    watchMs: number;
+    successStates: ReadonlySet<string>;
+    extra?: (record: Record<string, unknown> | null, ended: boolean) => Extra;
+  },
+): Promise<WatchedJob & Extra> {
+  // Set from the tracking observable COMPLETING rather than from comparing the
+  // state against a list, because completion is the client's own
+  // `isJobFinished` and so moves with the middleware's terminal set rather than
+  // with a set written down here. The bound cuts the stream by unsubscribing,
+  // which is not a completion, so a job still running when the watch ends
+  // leaves this false.
+  let completed = false;
+  // Whether the client ever reported on the job. Once it has, the job exists
+  // and the run is under way, which is what the guard below turns on.
+  let sawJob = false;
+  // The job's id, held from the moment the client correlates it.
+  let jobId: number | null = null;
+  const watched = await lastValueFrom(
+    started.pipe(
+      tap((correlated) => {
+        sawJob = true;
+        // Read through the same guard every other middleware number goes
+        // through: the client declares it a number, and a declared type is a
+        // claim about what is sent rather than about the value received.
+        jobId = numberOrNull(correlated);
+      }),
+      switchMap((correlated) => api.trackJob(correlated)),
+      tap({
+        complete: () => {
+          completed = true;
+        },
+      }),
+      // An error raised once a job event has named this request is not the call
+      // failing: the operation is under way, and rejecting here would report a
+      // failure that did not happen AND take the job id with it. Before that
+      // event there is nothing to report and no id to keep, so an error there
+      // still fails.
+      catchError((error: unknown) => (sawJob ? EMPTY : throwError(() => error))),
+      takeUntil(timer(options.watchMs)),
+    ),
+    // No emission at all: the request went out and nothing the tool can see
+    // came back about the job, which is reported rather than thrown — the
+    // operation may well be running, and where an event named it `jobId` says
+    // so even though this is null.
+    { defaultValue: null },
+  );
+  const record = recordOrNull(watched);
+  const state = textOrNull(record?.['state']);
+  // A completion carrying no emission is the client having found no such job,
+  // which establishes nothing; both halves are required.
+  const ended = completed && state !== null;
+  const reported: WatchedJob = {
+    job_id: jobId,
+    ended,
+    succeeded: ended ? options.successStates.has(state) : null,
+    job_state: state,
+    error: textOrNull(record?.['error']),
+    // Gated on `ended` rather than on a state list of its own, so the finish
+    // time follows the claim already made and cannot contradict it.
+    finished_at: ended ? isoOrNull(jobMillis(record?.['time_finished'])) : null,
+  };
+  return { ...reported, ...options.extra?.(record, ended) } as WatchedJob & Extra;
 }
