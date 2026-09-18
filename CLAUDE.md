@@ -2244,6 +2244,26 @@ whose two disagree means the watch ended before the job did, or the state could
 not be read.** Stated in the description, because the invariant is what makes the
 pair worth reading.
 
+**Whether `service.query` reports the new state the moment the job ends is
+`(unconfirmed)`**, in `pool_resilver_config`'s form (#141), and the description
+says so: a daemon still tearing down when its job reported success would be read
+here as not having reached the state asked for. The ticket asks for the failure
+in these words so it is implemented, and #120's requirement is that the
+unestablished half be stated rather than settled — which is the difference
+between a caller who can check and one who is told a working call failed.
+
+**A plan may say what the CALL will do and must not say what the RESULT will
+hold.** The first draft of the already-in-the-target-state sentence promised
+that `previously_state` would carry the plan-time reading and `changed` would
+come back false — one clause after saying the plan-time reading is not
+re-checked, which is the contradiction that gives the rule away. Both fields are
+read at execute time: `previously_state` by a fresh read immediately before the
+call, so the promise is false for a service someone moves between the plan and
+its confirmation, and false again wherever that read cannot be made at all. The
+sibling tools stop at what the call does (`alerts.ts`, `snapshots.ts`) and this
+is why. **Ask whether the sentence is about the call or about a field, and where
+it is about a field, ask when that field is read.**
+
 **Already-in-the-requested-state is NOT this**, and the plan does not refuse it:
 #119's convention holds, the result says which it was through `previously_state`
 and `changed`, and criteria 1 and 2 of the ticket fall out of the read-back

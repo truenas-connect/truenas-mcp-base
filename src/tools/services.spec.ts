@@ -395,6 +395,18 @@ describe('service_control', () => {
       expect(text).toContain('(unconfirmed)');
     });
 
+    it('does not predict what the result will say about a service already in that state', async () => {
+      // `previously_state` and `changed` are read at execute time, so a plan
+      // promising `changed: false` is false for a service someone moves between
+      // the plan and its confirmation — and false again where that read cannot
+      // be made at all, which `starts the job where the read before it failed`
+      // below exercises.
+      const text = await planText([row({ state: 'RUNNING' })]);
+      expect(text).toContain('WHAT THE RESULT WILL SAY IS NOT PREDICTED FROM THE READING ABOVE');
+      expect(text).toContain('a FRESH read made immediately before the call');
+      expect(text).not.toContain('`changed` comes back false');
+    });
+
     it('says the same of a stop against a service already stopped', async () => {
       const text = await planText([row({ state: 'STOPPED' })], { service: 'cifs', verb: 'STOP' });
       expect(text).toContain('IT ALREADY READ AS `STOPPED` WHEN THIS PLAN WAS MADE');

@@ -420,7 +420,18 @@ function serviceStateSentence(reading: ServiceReading): string {
  *
  * #119's convention, stated rather than acted on: already-in-the-target-state is
  * not an error here, the plan does not refuse it, and the result says which it
- * was through `previously_state` and `changed`. What the MIDDLEWARE does with
+ * was through `previously_state` and `changed`.
+ *
+ * WHAT THIS SENTENCE MUST NOT DO IS PREDICT EITHER OF THOSE FIELDS. They are
+ * read at execute time — `previously_state` by a fresh read immediately before
+ * the call — so a plan promising `changed: false` is false for a service someone
+ * moves between the plan and its confirmation, and false again wherever that
+ * read cannot be made at all, which the specs exercise. The clause before this
+ * one already says the plan-time reading is not re-checked, and predicting the
+ * result would contradict it in the one text a person reads before approving.
+ * The sibling tools stop at what the CALL will do for the same reason.
+ *
+ * What the MIDDLEWARE does with
  * such a call is a separate question and is marked `(unconfirmed)` in
  * `pool_resilver_config`'s form (#141) — `vm_start` refuses a running VM because
  * `start_vm` is KNOWN to raise for one (#161), and nothing readable from this
@@ -434,10 +445,13 @@ function alreadyInStateSentence(args: ServiceControlArgs, reading: ServiceReadin
   return (
     ` IT ALREADY READ AS \`${reading.state}\` WHEN THIS PLAN WAS MADE, which is the state this ` +
     'verb aims at. THIS PLAN DOES NOT REFUSE THAT: a service already in the state asked for is ' +
-    'not an error here, and the result reports it as such — `previously_state` carries the ' +
-    'reading above and `changed` comes back false. Whether the middleware treats such a call as ' +
-    'a no-op or rejects it is (unconfirmed) here: it was not read off a live system and this API ' +
-    'surface does not say.'
+    'not an error here. WHAT THE RESULT WILL SAY IS NOT PREDICTED FROM THE READING ABOVE: ' +
+    '`previously_state` is a FRESH read made immediately before the call rather than this ' +
+    'plan-time one, and `changed` compares it with the state read when the watch ends — so ' +
+    'neither is settled here, and a service someone moves between this plan and its confirmation ' +
+    'is reported as it is then. Whether the middleware treats a call against a service already ' +
+    'in the requested state as a no-op or rejects it is (unconfirmed) here: it was not read off ' +
+    'a live system and this API surface does not say.'
   );
 }
 
@@ -645,6 +659,14 @@ async function watchServiceJob(
  * one, because throwing is what discards the rest of the result — a caller left
  * with only this sentence still has the number that names the run and the reason
  * the system gave.
+ *
+ * WHETHER `service.query` REPORTS THE NEW STATE THE MOMENT THE JOB ENDS IS
+ * `(unconfirmed)` here, in `pool_resilver_config`'s form (#141): it was not read
+ * off a live system and nothing on this surface says. A daemon still tearing
+ * down when its job reported success would be read here as not having reached
+ * the state asked for. The ticket asks for this failure in these words, so it is
+ * implemented; what #120 requires is that the unestablished half be STATED
+ * rather than settled, and the description says it.
  */
 function reachedStateFailure(
   args: ServiceControlArgs,
@@ -724,7 +746,11 @@ export const serviceControl: MutatingTool = {
     'a result in hand whose `resulting_state` is not `expected_state` means the ' +
     'watch ended before the job did, or the state could not be read. THAT ' +
     'ERROR DOES NOT MEAN NOTHING HAPPENED: the call was made and the operation ' +
-    'ran. `changed` IS THE TWO `state` READINGS COMPARED AND NOTHING ELSE, and ' +
+    'ran. WHETHER `service.query` REPORTS THE NEW STATE THE MOMENT THE JOB ENDS ' +
+    'IS (unconfirmed) HERE — it was not read off a live system and this API ' +
+    'surface does not say — so a daemon still tearing down when its job reported ' +
+    'success would be read as not having reached the state asked for. ' +
+    '`changed` IS THE TWO `state` READINGS COMPARED AND NOTHING ELSE, and ' +
     'is NULL WHERE EITHER READING IS, WHICH IS NOT "NOTHING CHANGED". A ' +
     '`changed: false` ACROSS A RESTART IS THE ORDINARY ANSWER FOR A SUCCESSFUL ' +
     'ONE, since a service that was running and is running again read the same ' +
@@ -739,7 +765,9 @@ export const serviceControl: MutatingTool = {
     'BRANCHES ON EITHER READ, because what runs must be what was approved — and ' +
     'a read that failed after the call is not a failed call. `control_result` ' +
     'is the boolean the middleware answers the control itself with, REPORTED ' +
-    'ONLY WHERE `ended` IS TRUE and null everywhere else. IT IS NOT WHERE THE ' +
+    'ONLY WHERE `ended` IS TRUE and null everywhere else — and null too where ' +
+    'the job ended and what it carried was not a boolean this tool could read, ' +
+    'which is not the middleware having answered false. IT IS NOT WHERE THE ' +
     'OUTCOME COMES FROM: the state above is, and a `control_result` of false ' +
     'beside a `resulting_state` that IS `expected_state` is the two disagreeing ' +
     'rather than one of them being the answer. `ended` is whether the job was ' +
