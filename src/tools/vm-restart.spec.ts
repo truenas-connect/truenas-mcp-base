@@ -172,6 +172,18 @@ describe('vm_restart', () => {
       expect(steps[1].params).toEqual([4]);
     });
 
+    it('says the second read happens when the watch ends, not immediately', async () => {
+      // A restart passes THROUGH stopped on its way back up, so "immediately
+      // after the call" here would tell an approver the state read afterwards
+      // is the one the machine settled in — which is the reading that looks
+      // like a failed restart.
+      const [read] = await planSteps(jobSystem().ctx);
+      expect(read.description).toContain(
+        'WHEN THE WATCH BELOW ENDS — UP TO 30 SECONDS AFTER THIS CALL IS MADE, AND NOT WHEN THE OPERATION FINISHES',
+      );
+      expect(read.description).not.toContain('IMMEDIATELY AFTER THE CALL');
+    });
+
     it("makes every read with the params the plan's read step named", async () => {
       const { ctx, query } = jobSystem();
       const [read] = await planSteps(ctx);

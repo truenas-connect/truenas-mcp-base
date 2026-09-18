@@ -185,6 +185,19 @@ describe('vm_stop', () => {
       expect(steps[1].params).toEqual([4, { force: false, force_after_timeout: false }]);
     });
 
+    it('says the second read happens when the watch ends, not immediately', async () => {
+      // The read step's text is shared by all three power tools and only
+      // `vm_start` reads back on the next line. An approver told "immediately
+      // after the call" would read a machine part-way through a shutdown as the
+      // state it settled in.
+      const [read] = await planSteps(jobSystem().ctx);
+      expect(read.description).toContain('Changes nothing');
+      expect(read.description).toContain(
+        'WHEN THE WATCH BELOW ENDS — UP TO 30 SECONDS AFTER THIS CALL IS MADE, AND NOT WHEN THE OPERATION FINISHES',
+      );
+      expect(read.description).not.toContain('IMMEDIATELY AFTER THE CALL');
+    });
+
     it("makes every read with the params the plan's read step named", async () => {
       const { ctx, query } = jobSystem();
       const [read] = await planSteps(ctx);

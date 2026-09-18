@@ -1349,17 +1349,45 @@ function vmStateSentence(reading: VmPowerReading): string {
  * approval; a repeated call is not a further call to disclose, it is the same
  * one happening twice, and the step says so in words. Listing it twice would
  * show an approver two entries it has no way to tell apart.
+ *
+ * WHEN THE SECOND READ HAPPENS IS THE CALLER'S TO STATE, and it is not the same
+ * answer for all three tools — which is why it is a parameter rather than one
+ * sentence written here. {@link vmStart} calls a plain method and reads back on
+ * the next line; the two job-backed tools read back when their WATCH ends,
+ * which can be the full bound after the call was dispatched and is not when the
+ * operation finished. One shared "immediately after the call" would be true of
+ * one tool and false of two, in the text a person reads before approving, and
+ * it would contradict those tools' own descriptions.
  */
-function vmReadStep(id: number): PlanStep {
+function vmReadStep(id: number, secondRead: string): PlanStep {
   return {
     method: 'vm.query',
     params: vmReadParams(id),
     description:
       `Read the power state of the virtual machine with id ${id}, to report the state it was ` +
-      'in before this call. Changes nothing. THIS SAME READ IS MADE AGAIN IMMEDIATELY AFTER ' +
-      'THE CALL, to report the state that resulted — it is listed once because it is one call ' +
-      'made twice.',
+      `in before this call. Changes nothing. THIS SAME READ IS MADE AGAIN ${secondRead} — it ` +
+      'is listed once because it is one call made twice.',
   };
+}
+
+/** When {@link vmStart}'s second read happens: on the next line after the call. */
+const READ_AGAIN_AFTER_CALL =
+  'IMMEDIATELY AFTER THE CALL, to report the state that resulted';
+
+/**
+ * When a job-backed tool's second read happens: when the watch ends, which is
+ * not when the operation ends.
+ *
+ * Stated in the plan and not only in the description, because an approver told
+ * "immediately after" reads a machine part-way through as the state it settled
+ * in — and on a `vm_restart`, which passes through stopped on its way back up,
+ * that is the reading that looks like a failure.
+ */
+function readAgainAfterWatch(seconds: number): string {
+  return (
+    `WHEN THE WATCH BELOW ENDS — UP TO ${seconds} SECONDS AFTER THIS CALL IS MADE, AND NOT ` +
+    'WHEN THE OPERATION FINISHES — to report the state reached by then'
+  );
 }
 
 /**
@@ -1685,7 +1713,7 @@ export const vmStart: MutatingTool = {
     const refusal = reading.state === null ? null : vmStartRefusal(reading.state, reading, args.id);
     if (refusal !== null) throw new Error(refusal);
     return [
-      vmReadStep(args.id),
+      vmReadStep(args.id, READ_AGAIN_AFTER_CALL),
       {
         method: 'vm.start',
         params: vmStartParams(args),
@@ -1973,7 +2001,7 @@ export const vmStop: MutatingTool = {
       );
     }
     return [
-      vmReadStep(args.id),
+      vmReadStep(args.id, readAgainAfterWatch(VM_STOP_WATCH_SECONDS)),
       {
         method: 'vm.stop',
         params: vmStopParams(args),
@@ -2217,7 +2245,7 @@ export const vmRestart: MutatingTool = {
       );
     }
     return [
-      vmReadStep(id),
+      vmReadStep(id, readAgainAfterWatch(VM_RESTART_WATCH_SECONDS)),
       {
         method: 'vm.restart',
         params: vmRestartParams(id),

@@ -2098,10 +2098,21 @@ calls `vm.start` and only `vm.start`.
 `vm.start`, `vm.stop` and `vm.restart` all answer `null`, so there is no updated
 entity to read an outcome off (#121) and the state has to be read on both sides —
 `alerts_dismiss`'s position (#119) with #156's second read. Both reads are the
-same call from one helper, so the plan lists it ONCE and that step says it runs
-again immediately after the mutation.
+same call from one helper, so the plan lists it ONCE and that step says in words
+that it runs again.
 
-Three things that are this shape's own, rather than restatements of those:
+**WHEN it runs again is not the same answer for all three, and the step has to
+say which.** `vm_start` reads back on the next line after the call; the two
+job-backed tools read back when their WATCH ends, which can be the full bound
+later and is not when the operation finished. One shared "immediately after the
+call" would have been true of one tool and false of two, in the text a person
+reads before approving — and it would have contradicted those tools' own
+descriptions, which say the resulting state is read when the watch ends. **A
+step description shared by several tools is a claim each of them makes
+separately**; parameterise the clause that differs rather than writing the one
+that is true of the tool you happened to write first.
+
+Three more things that are this shape's own, rather than restatements of those:
 
 - **Neither read may fail the tool, and they fail for different reasons.** The
   first would throw away an approval already given for a mutation that is still
