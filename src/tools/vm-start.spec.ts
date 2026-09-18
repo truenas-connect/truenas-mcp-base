@@ -178,13 +178,22 @@ describe('vm_start', () => {
       // The filter is written twice — inlined in the read because a `const`
       // widens out of the client's filter tuple, and again for this step — so
       // this assertion, and not a shared helper, is what holds the two in step.
+      //
+      // Each half is asserted against its own literal rather than the step's
+      // params being spread into the expected JS arguments. The step names the
+      // two positional params the call reaches the middleware with —
+      // `api.query(method, filters)` dispatches `[filters ?? [], options ?? {}]`
+      // — where the JS call passes the filter alone, so a spread would compare
+      // the filter against itself and pass only while the step named the
+      // shorter list.
       const { ctx, query } = vmSystem();
       const [read] = await planSteps(ctx);
       await vmStart.execute(ctx, { id: 4 });
+      expect(read.params).toEqual([[['id', '=', 4]], {}]);
       expect(query.mock.calls).toEqual([
-        ['vm.query', ...(read.params as unknown[])],
-        ['vm.query', ...(read.params as unknown[])],
-        ['vm.query', ...(read.params as unknown[])],
+        ['vm.query', [['id', '=', 4]]],
+        ['vm.query', [['id', '=', 4]]],
+        ['vm.query', [['id', '=', 4]]],
       ]);
     });
 
@@ -292,9 +301,11 @@ describe('vm_start', () => {
       expect(call.mock.calls).toEqual([['vm.start', [4, { overcommit: false }]]]);
     });
 
-    it('sends the options object even where overcommit is false', async () => {
-      // A plan whose second argument appeared only sometimes would be showing
-      // two different call shapes for one tool.
+    it('sends the overcommit the caller asked for', async () => {
+      // The overcommit-ON walk. The test above takes the other one and is what
+      // pins the options object being sent WITH `overcommit: false` in it where
+      // the caller passed nothing — a second argument that appeared only
+      // sometimes would be showing two different call shapes for one tool.
       const { ctx, call } = vmSystem();
       await vmStart.execute(ctx, { id: 4, overcommit: true });
       expect(call).toHaveBeenCalledWith('vm.start', [4, { overcommit: true }]);

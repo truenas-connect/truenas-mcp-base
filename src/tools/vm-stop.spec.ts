@@ -199,13 +199,18 @@ describe('vm_stop', () => {
     });
 
     it("makes every read with the params the plan's read step named", async () => {
+      // Two halves, each against its own literal: the step names the two
+      // positional params the call reaches the middleware with, since
+      // `api.query(method, filters)` dispatches `[filters ?? [], options ?? {}]`,
+      // and the JS call passes the filter alone.
       const { ctx, query } = jobSystem();
       const [read] = await planSteps(ctx);
       await vmStop.execute(ctx, { id: 4 });
+      expect(read.params).toEqual([[['id', '=', 4]], {}]);
       expect(query.mock.calls).toEqual([
-        ['vm.query', ...(read.params as unknown[])],
-        ['vm.query', ...(read.params as unknown[])],
-        ['vm.query', ...(read.params as unknown[])],
+        ['vm.query', [['id', '=', 4]]],
+        ['vm.query', [['id', '=', 4]]],
+        ['vm.query', [['id', '=', 4]]],
       ]);
     });
 

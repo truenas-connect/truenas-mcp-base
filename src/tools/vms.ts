@@ -1195,14 +1195,24 @@ interface VmPowerReading {
  * The positional params every power-state read reaches the middleware with, for
  * the plan step that names one.
  *
- * Written here AND inlined in {@link readVmPower}, because written to a `const`
- * the filter widens out of the client's filter tuple and the call no longer
- * type-checks — the half #153 says to name rather than leave implied. A test
- * takes the read step back out of the plan and asserts `execute` made its query
- * with it, and that assertion is what holds the two copies in step.
+ * THE EMPTY OPTIONS OBJECT IS NOT PADDING, which is `tasks.ts`'s reading of the
+ * same call: `api.query(method, filters)` dispatches `[filters ?? [], options ??
+ * {}]`, so the read carries two positional params whether or not the caller
+ * passed the second. A step naming only the filter would show an approver a call
+ * one argument shorter than the one that runs — #119's defect one level down,
+ * in the one artefact a person reads before approving.
+ *
+ * The FILTER is written here AND inlined in {@link readVmPower}, because written
+ * to a `const` it widens out of the client's filter tuple and the call no longer
+ * type-checks — the half #153 says to name rather than leave implied. What holds
+ * the two copies in step is a test asserting each half against the literal it
+ * expects: the step's params, and the JS arguments `execute`'s query was called
+ * with. Spreading the step's params into the expected argument list instead
+ * compares the filter against itself and can only pass while the step names the
+ * SHORTER list, so it certifies the defect above rather than catching it.
  */
 function vmReadParams(id: number): unknown {
-  return [[['id', '=', id]]];
+  return [[['id', '=', id]], {}];
 }
 
 /**
