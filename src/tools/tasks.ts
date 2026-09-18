@@ -1,15 +1,5 @@
 import type { JobParams } from '@truenas/api-client';
-import {
-  catchError,
-  EMPTY,
-  firstValueFrom,
-  lastValueFrom,
-  switchMap,
-  takeUntil,
-  tap,
-  throwError,
-  timer,
-} from 'rxjs';
+import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ApiSurface, MutatingTool, PlanStep, ReadOnlyTool, ToolContext } from '@/catalog/tool';
 import {
@@ -20,6 +10,7 @@ import {
   numberOrNull,
   recordOrNull,
   textOrNull,
+  watchJob,
 } from '@/tools/common';
 
 /**
@@ -2298,75 +2289,17 @@ export const cloudsyncRun: MutatingTool = {
   async execute(ctx, rawArgs) {
     const run = parseRun(rawArgs);
     const api = ctx.system.client.api;
-    // Set from the tracking observable COMPLETING rather than from comparing
-    // the state against a list, because completion is the client's own
-    // `isJobFinished` and so moves with the middleware's terminal set rather
-    // than with a set written down here. The bound below cuts the stream by
-    // unsubscribing, which is not a completion, so a job still running when the
-    // watch ends leaves this false.
-    let completed = false;
-    // Whether the client ever reported on the job. Once it has, the job exists
-    // and the run is under way, which is what the guard below turns on.
-    let sawJob = false;
-    // The job's id, held from the moment the client correlates it.
-    let jobId: number | null = null;
-    const watched = await lastValueFrom(
-      // Started and then followed in two steps rather than through `api.job`,
-      // which is exactly these two steps piped together. What the split buys is
-      // WHEN the id becomes readable here: `api.job` consumes it inside its own
-      // `switchMap`, so nothing of the job reaches this pipe until `trackJob`
-      // emits — and `trackJob` starts by dispatching `core.get_jobs`, which can
-      // fail on its own. The job is already running by then and the client
-      // already has its id, so absorbing that failure and reporting the id is
-      // the whole point of the guard below; through `api.job` it would instead
-      // reject with nothing, which is the unnameable run this tool is built to
-      // avoid. The client's own reason to prefer `api.job` is the result type,
-      // and `cloudsync.sync` declares `response: null` — there is no result to
-      // lose.
-      api.callAndGetJobId('cloudsync.sync', syncParams(run)).pipe(
-        tap((id) => {
-          // A job event has named this request, so the run is under way. The id
-          // is read through the same guard every other middleware number goes
-          // through: the client declares it a number, and a declared type is a
-          // claim about what is sent rather than about the value received.
-          sawJob = true;
-          jobId = numberOrNull(id);
-        }),
-        switchMap((id) => api.trackJob(id)),
-        tap({
-          complete: () => {
-            completed = true;
-          },
-        }),
-        // An error raised once a job event has named this request is not the
-        // call failing. The follow-up read and the event stream both go over a
-        // socket that can drop; the sync is running whatever either of those
-        // does. Rejecting here would tell the caller the mutation failed AND
-        // take the job id with it, leaving a running sync that nothing can name
-        // — which is the failure the bound above exists to prevent, reached
-        // from the other side. So the watch ends and the result reports what
-        // was established, `ended` false, with the id.
-        //
-        // Before that event there is nothing of the job to report and no id to
-        // keep, so an error there still fails, as it must.
-        catchError((error: unknown) => (sawJob ? EMPTY : throwError(() => error))),
-        takeUntil(timer(SYNC_WATCH_MS)),
-      ),
-      // No emission at all: the request went out and nothing this tool can see
-      // came back about the job, which is reported rather than thrown — the
-      // sync may well be running, and where an event named it `jobId` says so
-      // even though this is null.
-      { defaultValue: null },
-    );
-    const record = lastRunOf(watched);
-    // Read through the same guards the listings read a job record with, and
-    // deliberately NOT through `lastRunState`, whose null case means "the task
-    // has never run" — an answer about a task, where this is an answer about
-    // one job that has just been started.
-    const state = stringField(watched, 'state');
-    // A completion with no emission is the client having found no such job,
-    // which establishes nothing about the run; both halves are required.
-    const ended = completed && state !== null;
+    // The pipe is {@link watchJob}'s, which this tool's own inline copy was
+    // promoted into (#166) — the two failure eras, the bound that does not stop
+    // the job, `ended` read from the tracking completing, and the job id taken
+    // from the correlation and never from the tracking's last emission. Every
+    // reason for every one of those is in the note above and in that function.
+    // What stays here is what is this family's: the states it counts as a
+    // success, the bound it is prepared to wait, and the names it reports under.
+    const job = await watchJob(api, api.callAndGetJobId('cloudsync.sync', syncParams(run)), {
+      watchMs: SYNC_WATCH_MS,
+      successStates: SUCCEEDED_JOB_STATES,
+    });
     return {
       task_id: run.id,
       dry_run: run.dryRun,
@@ -2376,16 +2309,21 @@ export const cloudsyncRun: MutatingTool = {
       // with nothing having been read about the job, which is exactly when a
       // caller most needs something to name the run with. One fact, one
       // derivation.
-      job_id: jobId,
+      job_id: job.job_id,
       watched_seconds: SYNC_WATCH_SECONDS,
-      ended,
+      ended: job.ended,
       // The state and nothing else. `result` is null on this method whatever
-      // happened, so reading it could only ever have produced a wrong answer.
-      // The direction is `notSucceeded`'s: a terminal state this catalog does
-      // not recognise is not read as a success.
-      succeeded: ended ? SUCCEEDED_JOB_STATES.has(state) : null,
-      state,
-      error: jobError(record),
+      // happened, so reading it could only ever have produced a wrong answer —
+      // which is why this tool passes no `extra` and there is no `result` field
+      // to mislead a caller. The direction is `notSucceeded`'s: a terminal state
+      // this catalog does not recognise is not read as a success.
+      succeeded: job.succeeded,
+      // Reported as `state`, which is this family's name for it, and
+      // deliberately NOT read through `lastRunState`, whose null case means "the
+      // task has never run" — an answer about a task, where this is an answer
+      // about one job that has just been started.
+      state: job.job_state,
+      error: job.error,
       // Gated on `ended` and NOT through {@link jobFinishedAt}, which reads
       // {@link ENDED_JOB_STATES}. The two agree on the PINNED client and are
       // not the same reading: the client's `terminalStates` — what
@@ -2397,7 +2335,7 @@ export const cloudsyncRun: MutatingTool = {
       // refusing to say when. `ended` is the claim this tool has already made,
       // so the finish time follows it and cannot contradict it. The listings
       // keep reading the set: none of them carries an `ended` to disagree with.
-      finished_at: ended ? isoOrNull(jobMillis(record?.time_finished)) : null,
+      finished_at: job.finished_at,
     };
   },
 };
@@ -3061,61 +2999,37 @@ export const snapshotTaskRun: MutatingTool = {
   async execute(ctx, rawArgs) {
     const id = parseSnapshotTaskId(rawArgs);
     const api = ctx.system.client.api;
-    // Every one of these three is {@link cloudsyncRun}'s, for the reasons
-    // written out there: completion rather than a state list is what says the
-    // run ended, the job having been seen is what turns the guard below on, and
-    // the correlated id is the one thing that survives a watch establishing
-    // nothing else.
-    let completed = false;
-    let sawJob = false;
-    let jobId: number | null = null;
-    const watched = await lastValueFrom(
-      api.callAndGetJobId('pool.snapshottask.run', snapshotRunParams(id)).pipe(
-        tap((correlated) => {
-          sawJob = true;
-          jobId = numberOrNull(correlated);
-        }),
-        switchMap((correlated) => api.trackJob(correlated)),
-        tap({
-          complete: () => {
-            completed = true;
-          },
-        }),
-        // An error raised once a job event has named this request is not the
-        // call failing: the run is going, and rejecting here would report a
-        // failure that did not happen AND take the job id with it. Before that
-        // event there is nothing to report and no id to keep, so an error there
-        // still fails.
-        catchError((error: unknown) => (sawJob ? EMPTY : throwError(() => error))),
-        takeUntil(timer(SNAPSHOT_RUN_WATCH_MS)),
-      ),
-      { defaultValue: null },
+    // The pipe is {@link watchJob}'s, as {@link cloudsyncRun}'s is: completion
+    // rather than a state list is what says the run ended, the job having been
+    // seen is what divides the two failure eras, and the correlated id is the
+    // one thing that survives a watch establishing nothing else. The states and
+    // the bound stay here, because they are this family's and this tool's.
+    const job = await watchJob(
+      api,
+      api.callAndGetJobId('pool.snapshottask.run', snapshotRunParams(id)),
+      { watchMs: SNAPSHOT_RUN_WATCH_MS, successStates: SUCCEEDED_JOB_STATES },
     );
-    const record = lastRunOf(watched);
-    // Deliberately not {@link lastRunState}, whose null case means "the task has
-    // never run" — an answer about a task, where this is an answer about one job
-    // that has just been started.
-    const state = stringField(watched, 'state');
-    // A completion with no emission is the client having found no such job,
-    // which establishes nothing about the run; both halves are required.
-    const ended = completed && state !== null;
     return {
       task_id: id,
-      job_id: jobId,
+      job_id: job.job_id,
       watched_seconds: SNAPSHOT_RUN_WATCH_SECONDS,
-      ended,
+      ended: job.ended,
       // `pool.snapshottask.run` declares `response: null`, so the job's
       // `result` is null whether the run worked or failed and the state is the
-      // only thing there is to read. A terminal state this catalog does not
+      // only thing there is to read — which is why no `extra` is passed and no
+      // `result` field is reported. A terminal state this catalog does not
       // recognise is not read as a success.
-      succeeded: ended ? SUCCEEDED_JOB_STATES.has(state) : null,
-      state,
-      error: jobError(record),
+      succeeded: job.succeeded,
+      // Deliberately not {@link lastRunState}, whose null case means "the task
+      // has never run" — an answer about a task, where this is an answer about
+      // one job that has just been started.
+      state: job.job_state,
+      error: job.error,
       // Gated on `ended` rather than through {@link jobFinishedAt}, so the
       // finish time follows the claim this tool has already made and cannot
       // contradict it — {@link cloudsyncRun} spells out why the two readings
       // are not the same one.
-      finished_at: ended ? isoOrNull(jobMillis(record?.time_finished)) : null,
+      finished_at: job.finished_at,
     };
   },
 };

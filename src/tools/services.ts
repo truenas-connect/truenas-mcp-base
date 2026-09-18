@@ -1,27 +1,8 @@
 import type { JobParams } from '@truenas/api-client';
-import {
-  catchError,
-  EMPTY,
-  firstValueFrom,
-  lastValueFrom,
-  Observable,
-  switchMap,
-  takeUntil,
-  tap,
-  throwError,
-  timer,
-} from 'rxjs';
+import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ApiSurface, MutatingTool, PlanStep, ReadOnlyTool, ToolContext } from '@/catalog/tool';
-import {
-  booleanOrNull,
-  errorText,
-  isoOrNull,
-  jobMillis,
-  numberOrNull,
-  recordOrNull,
-  textOrNull,
-} from '@/tools/common';
+import { booleanOrNull, errorText, textOrNull, watchJob, WatchedJob } from '@/tools/common';
 
 /**
  * Services family: which of the system's services are meant to run, which are
@@ -542,99 +523,27 @@ function serviceWatchSentence(seconds: number): string {
  * ITS OWN SET rather than one shared with `tasks.ts` or `vms.ts`, under #86's
  * line: a state VOCABULARY is a family's own and each tool states its own in its
  * own description, where a shared constant would put the words in one file and
- * the sentence about them in another.
+ * the sentence about them in another. It is passed to {@link watchJob}, which
+ * holds the pipe and none of the words, the way `effectiveLimit` takes its two
+ * bounds (#166).
  *
  * A terminal state this catalog does not recognise is NOT read as a success: a
  * run that cannot be shown to have worked has not been shown to have worked.
  */
 const SERVICE_JOB_SUCCESS_STATES = new Set(['SUCCESS', 'FINISHED']);
 
-/** What a bounded watch of one job established. */
-interface WatchedServiceJob {
-  job_id: number | null;
-  ended: boolean;
-  succeeded: boolean | null;
-  job_state: string | null;
-  error: string | null;
-  finished_at: string | null;
-  control_result: boolean | null;
-}
-
 /**
- * Start the control job and watch it for a bounded time, then report what there
- * is.
+ * What a bounded watch of one control job established: the fields every
+ * job-backed tool reports, and the one this method has that the others do not.
  *
- * THE SHAPE IS `cloudsync_run`'S (#122) AND IS COPIED RATHER THAN REDERIVED, by
- * way of the VM power tools (#161). `callAndGetJobId` and `trackJob` are called
- * apart rather than through `api.job`, so the two failure eras stay separable;
- * ending the watch does not end the job, because `trackJob` only observes;
- * `ended` is read from the tracking COMPLETING rather than from a state list
- * written down here; and `job_id` comes from the correlation and never from the
- * tracking's last emission, because it is the one thing that survives a watch
- * that established nothing else. Every reason for every one of those is written
- * out at `cloudsyncRun` in `tasks.ts` and in `CLAUDE.md`'s #122 decision, and
- * none of it is re-argued here.
- *
- * THIS IS THE FOURTH COPY OF THAT PIPE IN THIS REPOSITORY — two inline in
- * `tasks.ts`, one as `watchVmJob` in `vms.ts`, this one — and promoting it is
- * owed rather than done here: it would mean rewriting three tools this ticket
- * does not touch, and the success-state vocabulary each keeps has to stay a
- * per-family argument rather than travel with it. Proposed as its own ticket.
- *
- * WHAT IS THIS TOOL'S OWN RATHER THAN INHERITED is `control_result`.
- * `service.control` declares `response: boolean` where `cloudsync.sync` and
- * `vm.stop` declare `response: null`, so there IS a result to read — and it is
- * read only where the job was established to have ended, since a job still
- * running has not produced one.
+ * `control_result` IS THIS TOOL'S OWN RATHER THAN INHERITED, which is why it is
+ * read through {@link watchJob}'s `extra` and is not in {@link WatchedJob}.
+ * `service.control` declares `response: boolean` where every other job this
+ * catalog starts declares `response: null`, so there IS a result to read here
+ * and nothing to read there — and it is read only where the job was established
+ * to have ended, since a job still running has not produced one.
  */
-async function watchServiceJob(
-  ctx: ToolContext,
-  started: Observable<number>,
-  watchMs: number,
-): Promise<WatchedServiceJob> {
-  const api = ctx.system.client.api;
-  let completed = false;
-  let sawJob = false;
-  let jobId: number | null = null;
-  const watched = await lastValueFrom(
-    started.pipe(
-      tap((correlated) => {
-        sawJob = true;
-        jobId = numberOrNull(correlated);
-      }),
-      switchMap((correlated) => api.trackJob(correlated)),
-      tap({
-        complete: () => {
-          completed = true;
-        },
-      }),
-      // An error raised once a job event has named this request is not the call
-      // failing: the operation is under way, and rejecting here would report a
-      // failure that did not happen AND take the job id with it. Before that
-      // event there is nothing to report and no id to keep, so an error there
-      // still fails.
-      catchError((error: unknown) => (sawJob ? EMPTY : throwError(() => error))),
-      takeUntil(timer(watchMs)),
-    ),
-    { defaultValue: null },
-  );
-  const record = recordOrNull(watched);
-  const state = textOrNull(record?.['state']);
-  // A completion carrying no emission is the client having found no such job,
-  // which establishes nothing; both halves are required.
-  const ended = completed && state !== null;
-  return {
-    job_id: jobId,
-    ended,
-    succeeded: ended ? SERVICE_JOB_SUCCESS_STATES.has(state) : null,
-    job_state: state,
-    error: textOrNull(record?.['error']),
-    // Both gated on `ended` rather than on a state list of their own, so they
-    // follow the claim this tool has already made and cannot contradict it.
-    finished_at: ended ? isoOrNull(jobMillis(record?.['time_finished'])) : null,
-    control_result: ended ? booleanOrNull(record?.['result']) : null,
-  };
-}
+type WatchedServiceJob = WatchedJob & { control_result: boolean | null };
 
 /**
  * The failure message for a control that finished with the service somewhere
@@ -853,10 +762,17 @@ export const serviceControl: MutatingTool = {
   async execute(ctx, rawArgs) {
     const args = parseServiceControlArgs(rawArgs);
     const previous = await attemptService(ctx, args.service);
-    const job = await watchServiceJob(
-      ctx,
-      ctx.system.client.api.callAndGetJobId('service.control', serviceControlParams(args)),
-      SERVICE_CONTROL_WATCH_MS,
+    const api = ctx.system.client.api;
+    const job: WatchedServiceJob = await watchJob(
+      api,
+      api.callAndGetJobId('service.control', serviceControlParams(args)),
+      {
+        watchMs: SERVICE_CONTROL_WATCH_MS,
+        successStates: SERVICE_JOB_SUCCESS_STATES,
+        extra: (record, ended) => ({
+          control_result: ended ? booleanOrNull(record?.['result']) : null,
+        }),
+      },
     );
     // Read when the watch ends, not when the operation ends: the two are the
     // same only where the job ended inside the bound, which is why
