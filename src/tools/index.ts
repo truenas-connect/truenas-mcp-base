@@ -49,9 +49,9 @@ import {
   snapshotTasksList,
   tasksRecentRuns,
 } from '@/tools/tasks';
-import { vmDevices, vmLogs, vmsList } from '@/tools/vms';
+import { vmDevices, vmLogs, vmRestart, vmsList, vmStart, vmStop } from '@/tools/vms';
 
-/** The sketch's catalog: fifty-six read-only tools plus eight mutating tools. */
+/** The sketch's catalog: fifty-six read-only tools plus eleven mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -119,6 +119,9 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(snapshotClone);
   catalog.register(snapshotTaskRun);
   catalog.register(snapshotSetHold);
+  catalog.register(vmStart);
+  catalog.register(vmStop);
+  catalog.register(vmRestart);
   return catalog;
 }
 
@@ -187,5 +190,8 @@ export {
   usersList,
   vmDevices,
   vmLogs,
+  vmRestart,
   vmsList,
+  vmStart,
+  vmStop,
 };

@@ -142,4 +142,7 @@ export {
   snapshotClone,
   snapshotTaskRun,
   snapshotSetHold,
+  vmStart,
+  vmStop,
+  vmRestart,
 } from '@/tools/index';

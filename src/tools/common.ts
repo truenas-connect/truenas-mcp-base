@@ -200,6 +200,37 @@ export interface MiddlewareDate {
 }
 
 /**
+ * An instant a job record carries, in milliseconds since the epoch, or null
+ * where the system reported no time this can be read from.
+ *
+ * A bare number is accepted beside the `{ "$date": … }` envelope because the
+ * envelope exists only to tag a number as a date in transit; both are epoch
+ * milliseconds. Anything else — a formatted string, a date in another shape —
+ * is not read rather than guessed at, because guessing wrong about a timezone
+ * produces a timestamp that is confidently off by hours.
+ *
+ * Bounded by {@link MAX_TIME_MS}, which is what keeps one absurd recorded time
+ * from taking a whole listing down with it.
+ *
+ * Shared rather than copied per family: this is a type narrowing over the
+ * middleware's own date envelope, which says the same thing wherever it is
+ * read, and {@link MAX_TIME_MS} and {@link MiddlewareDate} were already here
+ * for it. What is NOT shared is any family's reading of a job's STATE — which
+ * states count as success, which as ended — since those are vocabularies each
+ * tool states in its own description.
+ */
+export function jobMillis(value: unknown): number | null {
+  const raw = typeof value === 'object' && value !== null ? (value as MiddlewareDate).$date : value;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return null;
+  return Math.abs(raw) <= MAX_TIME_MS ? raw : null;
+}
+
+/** An instant as an ISO 8601 UTC timestamp, or null where there is no instant. */
+export function isoOrNull(millis: number | null): string | null {
+  return millis === null ? null : new Date(millis).toISOString();
+}
+
+/**
  * A caller's requested bound — a row limit, a number of days — brought into
  * what a read will actually ask the middleware for.
  *

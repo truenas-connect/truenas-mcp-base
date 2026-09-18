@@ -1,9 +1,30 @@
-import { firstValueFrom } from 'rxjs';
+import type { CallParams, JobParams } from '@truenas/api-client';
+import {
+  catchError,
+  EMPTY,
+  firstValueFrom,
+  lastValueFrom,
+  Observable,
+  switchMap,
+  takeUntil,
+  tap,
+  throwError,
+  timer,
+} from 'rxjs';
 import { Role } from '@/interfaces';
-import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+import {
+  ApiSurface,
+  MutatingTool,
+  PlanStep,
+  ReadOnlyTool,
+  SystemHandle,
+  ToolContext,
+} from '@/catalog/tool';
 import {
   booleanOrNull,
   errorText,
+  isoOrNull,
+  jobMillis,
   numberOrNull,
   recordOrNull,
   textOrNull,
@@ -1083,5 +1104,1146 @@ export const vmDevices: ReadOnlyTool = {
     // than a `.map` throwing out of the handler.
     if (!Array.isArray(rows)) throw new Error(`${DEVICES_UNREAD}${NOT_A_DEVICE_LIST}`);
     return { devices: rows.map(readDevice) };
+  },
+};
+
+/**
+ * `vm_start`, `vm_stop` and `vm_restart`: power control for one libvirt-backed
+ * virtual machine, and the first mutations this catalog offers over the `vm`
+ * stack.
+ *
+ * THE THREE ARE ONE DELIVERABLE. `destructiveness: 'reversible'` records the
+ * operation and must not be read as "the catalog can undo this" (#153), and a
+ * `vm_start` shipped alone would be the first `reversible` mutation whose
+ * reversal is an obvious, already-typed API call that no tool here offers.
+ * Together they make the field true in the strong sense.
+ *
+ * ONE STACK, NOT TWO, the same split {@link vmLogs} and {@link vmDevices} have.
+ * All three methods are `vm.*`; the incus-backed instances `vms_list` reports
+ * with `source` `virt_instance` have no counterpart reachable from here, and
+ * their `id` is a STRING where these three take a number — which is what makes
+ * a mis-aimed id refusable by argument check rather than at the middleware.
+ *
+ * ALL THREE ANSWER `null`, SO EVERY OUTCOME IS READ BY RE-READING. There is no
+ * updated entity to take a result off, which is `alerts_dismiss`'s position
+ * (#119) and `snapshot_set_hold`'s (#156) rather than
+ * `scheduled_task_set_enabled`'s (#121). Each `execute` reads `vm.query` before
+ * the call and again after it. BOTH READS ARE THE SAME CALL from
+ * {@link readVmPower}, so the plan lists it ONCE and that step's description
+ * says it runs again immediately after the mutation — #156's rule exactly.
+ *
+ * NOTHING BRANCHES ON EITHER READ. The mutating call is made whatever the reads
+ * said, including where they failed, because `execute` is contractually a pure
+ * function of (args, system): the confirmation token binds tool + args +
+ * systems rather than the plan steps, so an `execute` that re-read and dispatched
+ * elsewhere would weaken "what you approved is what runs". That is why
+ * {@link vmStart} refuses a running or suspended VM at PLAN time and never at
+ * execute time, and why it calls `vm.start` and only `vm.start` where the webui
+ * dispatches to `vm.resume`.
+ */
+
+/** Where the ids these three tools take come from, in the one wording used throughout. */
+const VM_IDS_FROM =
+  'the ids these tools take come from `vms_list`, from an entry whose `source` is `vm`';
+
+/**
+ * The one identifier all three methods take, or the error naming what is wrong
+ * with it.
+ *
+ * Strict, as `cloudsync_run`'s is: the middleware holds these machines under
+ * integer primary keys, and a coerced `"4"` or a `4.5` names no VM.
+ *
+ * The message names the OTHER stack, because that is the mistake this check
+ * actually catches. `vms_list` reports both stacks under one `id` field whose
+ * type differs between them, so a caller holding a `virt_instance` row has an
+ * identifier these tools cannot take — and refusing it by name here is cheaper,
+ * and far clearer, than letting it reach an API that would reject it for a
+ * reason about types.
+ */
+function parseVmId(args: Record<string, unknown>): number {
+  const id = args['id'];
+  if (typeof id !== 'number' || !Number.isInteger(id)) {
+    throw new Error(
+      '"id" is required and must be a whole number — the numeric `id` `vms_list` reports for an ' +
+        'entry whose `source` is `vm`. An entry whose `source` is `virt_instance` carries a ' +
+        'STRING id and is the other stack, which these tools cannot reach at all.',
+    );
+  }
+  return id;
+}
+
+/** What one read of a virtual machine's power state established. */
+interface VmPowerReading {
+  /** Whether the system listed a VM under the id given. */
+  listed: boolean;
+  /** The name the VM is configured under, for the plan a person reads. */
+  name: string | null;
+  /** The middleware's own state word, as `vms_list` reports it. */
+  state: string | null;
+  /** libvirt's own state for the same machine, as `vms_list` reports it. */
+  domain_state: string | null;
+  /**
+   * How long an ACPI shutdown is waited for before `force_after_timeout`
+   * decides, as the entity records it. Optional on the entity, so null is
+   * "the system reported no value this tool could read".
+   */
+  shutdown_timeout: number | null;
+}
+
+/**
+ * The positional params every power-state read reaches the middleware with, for
+ * the plan step that names one.
+ *
+ * Written here AND inlined in {@link readVmPower}, because written to a `const`
+ * the filter widens out of the client's filter tuple and the call no longer
+ * type-checks — the half #153 says to name rather than leave implied. A test
+ * takes the read step back out of the plan and asserts `execute` made its query
+ * with it, and that assertion is what holds the two copies in step.
+ */
+function vmReadParams(id: number): unknown {
+  return [[['id', '=', id]]];
+}
+
+/**
+ * The power state this system reports for the VM with that id.
+ *
+ * The id is checked on the RESPONSE and not only asked for in the filter (#121,
+ * #153): an unrecognised query parameter is dropped rather than refused, so a
+ * filter that did not apply comes back as the whole table and the first row of
+ * that is a different machine. The filter is still sent — it bounds what
+ * crosses the wire, and it is not what decides.
+ *
+ * `state` and `domain_state` come through {@link fromVmStack}, so they are the
+ * same two readings `vms_list` reports and not a second opinion about them.
+ */
+async function readVmPower(ctx: ToolContext, id: number): Promise<VmPowerReading> {
+  const rows = await firstValueFrom(
+    // Inlined for the reason {@link vmReadParams} gives.
+    ctx.system.client.api.query('vm.query', [['id', '=', id]]),
+  );
+  const row = rows.find((candidate) => numberOrNull(candidate.id) === id);
+  if (row === undefined) {
+    return { listed: false, name: null, state: null, domain_state: null, shutdown_timeout: null };
+  }
+  const mapped = fromVmStack(row);
+  return {
+    listed: true,
+    name: mapped.name,
+    state: mapped.state,
+    domain_state: mapped.domain_state,
+    shutdown_timeout: numberOrNull(row.shutdown_timeout),
+  };
+}
+
+/** A power-state read that completed, or the failure that stopped it. */
+interface VmPowerAttempt {
+  reading: VmPowerReading | null;
+  error: string | null;
+}
+
+/**
+ * One power-state read made by `execute`, with its failure caught and named.
+ *
+ * Caught rather than thrown, as `snapshot_set_hold`'s two reads are: these
+ * exist to describe the outcome. Letting the first fail the call would lose an
+ * approval already given for a mutation that is still safe to make, and letting
+ * the second fail it would report a mutation that has ALREADY LANDED as having
+ * failed.
+ */
+async function attemptVmPower(ctx: ToolContext, id: number): Promise<VmPowerAttempt> {
+  try {
+    return { reading: await readVmPower(ctx, id), error: null };
+  } catch (reason) {
+    return { reading: null, error: errorText(reason) };
+  }
+}
+
+/** What one of `execute`'s two reads did, where the reading alone cannot say. */
+type VmLookup = 'FOUND' | 'NOT_FOUND' | 'UNREADABLE';
+
+function vmLookupOf(attempt: VmPowerAttempt): VmLookup {
+  if (attempt.error !== null) return 'UNREADABLE';
+  return attempt.reading !== null && attempt.reading.listed ? 'FOUND' : 'NOT_FOUND';
+}
+
+/**
+ * The half of every one of these three results that is about the VM rather than
+ * about the call: the state before, the state after, and whether they differ.
+ *
+ * `changed` compares the two `state` readings ALONE and is null where either is
+ * — two readings or nothing, as `snapshot_set_hold`'s is. `domain_state` is
+ * reported beside each but is deliberately not part of the comparison: it is a
+ * second vocabulary from a different system (`vms_list` reports them separately
+ * for that reason), and a `changed` derived from both would be true for a VM
+ * whose `state` never moved. The descriptions say so, since side-by-side fields
+ * are what an implied relationship looks like from the outside (#138).
+ */
+function vmPowerOutcome(
+  id: number,
+  previous: VmPowerAttempt,
+  resulting: VmPowerAttempt,
+): Record<string, unknown> {
+  const previouslyState = previous.reading?.state ?? null;
+  const resultingState = resulting.reading?.state ?? null;
+  return {
+    vm_id: id,
+    previous_lookup: vmLookupOf(previous),
+    previous_read_error: previous.error,
+    previously_state: previouslyState,
+    previously_domain_state: previous.reading?.domain_state ?? null,
+    resulting_lookup: vmLookupOf(resulting),
+    resulting_read_error: resulting.error,
+    resulting_state: resultingState,
+    resulting_domain_state: resulting.reading?.domain_state ?? null,
+    changed:
+      previouslyState === null || resultingState === null
+        ? null
+        : previouslyState !== resultingState,
+  };
+}
+
+/**
+ * The VM as a person approving the plan can recognise it.
+ *
+ * Named as well as numbered for #126's reason: ids are the middleware's own
+ * integers and a caller that reached here with the wrong one can check the id
+ * and cannot check anything else. A name the system did not report is stated as
+ * that rather than left out.
+ */
+function describeVm(reading: VmPowerReading, id: number): string {
+  return `the virtual machine ${
+    reading.name === null ? '(the system reported no name)' : `"${reading.name}"`
+  } (id ${id})`;
+}
+
+/**
+ * The state the VM was in when the plan was made, for the plan step.
+ *
+ * It says outright that the reading is a plan-time one and is not re-checked,
+ * because every one of these tools makes its state check at plan time only — a
+ * machine that moves between the plan and the confirmation is refused, or not,
+ * by the middleware rather than by an `execute` that branches.
+ */
+function vmStateSentence(reading: VmPowerReading): string {
+  if (reading.state === null) {
+    return (
+      'The state it is in could not be read when this plan was made, so what this call changes ' +
+      'is NOT established here.'
+    );
+  }
+  const domain =
+    reading.domain_state === null
+      ? ', and the system reported no libvirt `domain_state` beside it'
+      : `, with libvirt's own \`domain_state\` \`${reading.domain_state}\``;
+  return (
+    `Its state read as \`${reading.state}\`${domain} when this plan was made. THAT READING IS ` +
+    'FROM PLAN TIME AND IS NOT RE-CHECKED when the call runs.'
+  );
+}
+
+/**
+ * The plan step for the read `execute` makes on either side of the mutation.
+ *
+ * ONE STEP FOR TWO CALLS, which is #156's rule rather than an exception to
+ * #119's. The rule is that nothing `execute` calls may be missing from the
+ * approval; a repeated call is not a further call to disclose, it is the same
+ * one happening twice, and the step says so in words. Listing it twice would
+ * show an approver two entries it has no way to tell apart.
+ */
+function vmReadStep(id: number): PlanStep {
+  return {
+    method: 'vm.query',
+    params: vmReadParams(id),
+    description:
+      `Read the power state of the virtual machine with id ${id}, to report the state it was ` +
+      'in before this call. Changes nothing. THIS SAME READ IS MADE AGAIN IMMEDIATELY AFTER ' +
+      'THE CALL, to report the state that resulted — it is listed once because it is one call ' +
+      'made twice.',
+  };
+}
+
+/**
+ * The job states this file reads as a run that worked.
+ *
+ * ITS OWN SET rather than one shared with `tasks.ts`, under #86's line: a state
+ * VOCABULARY is a family's own, and each tool states its own in its own
+ * description — where a shared constant would put the words in one file and the
+ * sentence about them in another. What IS shared is the reading of the
+ * middleware's date envelope ({@link jobMillis}), which says the same thing
+ * everywhere.
+ *
+ * A terminal state this catalog does not recognise is NOT read as a success:
+ * a run that cannot be shown to have worked has not been shown to have worked.
+ */
+const VM_JOB_SUCCESS_STATES = new Set(['SUCCESS', 'FINISHED']);
+
+/** What a bounded watch of one job established. */
+interface WatchedVmJob {
+  job_id: number | null;
+  ended: boolean;
+  succeeded: boolean | null;
+  job_state: string | null;
+  error: string | null;
+  finished_at: string | null;
+}
+
+/**
+ * Start a job and watch it for a bounded time, then report what there is.
+ *
+ * THE SHAPE IS `cloudsync_run`'S (#122) AND IS COPIED RATHER THAN REDERIVED.
+ * `callAndGetJobId` and `trackJob` are called apart rather than through
+ * `api.job`, so the two failure eras stay separable; ending the watch does not
+ * end the job, because `trackJob` only observes; `ended` is read from the
+ * tracking COMPLETING rather than from a state list written down here; and
+ * `job_id` comes from the correlation and never from the tracking's last
+ * emission, because it is the one thing that survives a watch that established
+ * nothing else. Every reason for every one of those is written out at
+ * `cloudsyncRun` in `tasks.ts` and in `CLAUDE.md`'s #122 decision, and none of
+ * it is re-argued here.
+ *
+ * `started` is the caller's own `callAndGetJobId` call, passed in rather than
+ * dialled here, because the method and its params are the tool's and the
+ * watching is not. It is cold: nothing is sent until this subscribes, which is
+ * what lets a caller build it before the pre-call read without starting
+ * anything.
+ */
+async function watchVmJob(
+  ctx: ToolContext,
+  started: Observable<number>,
+  watchMs: number,
+): Promise<WatchedVmJob> {
+  const api = ctx.system.client.api;
+  let completed = false;
+  let sawJob = false;
+  let jobId: number | null = null;
+  const watched = await lastValueFrom(
+    started.pipe(
+      tap((correlated) => {
+        sawJob = true;
+        jobId = numberOrNull(correlated);
+      }),
+      switchMap((correlated) => api.trackJob(correlated)),
+      tap({
+        complete: () => {
+          completed = true;
+        },
+      }),
+      // An error raised once a job event has named this request is not the call
+      // failing: the operation is under way, and rejecting here would report a
+      // failure that did not happen AND take the job id with it. Before that
+      // event there is nothing to report and no id to keep, so an error there
+      // still fails.
+      catchError((error: unknown) => (sawJob ? EMPTY : throwError(() => error))),
+      takeUntil(timer(watchMs)),
+    ),
+    { defaultValue: null },
+  );
+  const record = recordOrNull(watched);
+  const state = textOrNull(record?.['state']);
+  // A completion carrying no emission is the client having found no such job,
+  // which establishes nothing; both halves are required.
+  const ended = completed && state !== null;
+  return {
+    job_id: jobId,
+    ended,
+    succeeded: ended ? VM_JOB_SUCCESS_STATES.has(state) : null,
+    job_state: state,
+    error: textOrNull(record?.['error']),
+    // Gated on `ended` rather than on a state list of its own, so the finish
+    // time follows the claim this tool has already made and cannot contradict
+    // it.
+    finished_at: ended ? isoOrNull(jobMillis(record?.['time_finished'])) : null,
+  };
+}
+
+/** What the plan says about the watch, in the one wording both job-backed tools use. */
+function vmWatchSentence(seconds: number): string {
+  return (
+    'This starts a background job; the job is then followed through the ' +
+    "client's own tracking, which reads `core.get_jobs` and changes nothing, " +
+    `for at most ${seconds} seconds. The operation continues after that whether ` +
+    'or not it has finished.'
+  );
+}
+
+/**
+ * `vm_start`: powering one libvirt-backed virtual machine on.
+ *
+ * IT MUST NOT DISPATCH ON STATE, AND `SUSPENDED` IS WHY THAT BITES. The
+ * middleware's `ACTIVE_STATES` is `('RUNNING', 'SUSPENDED')` and `start_vm`
+ * raises `VM <name> is already running` for anything in it — so `vm.start`
+ * refuses a SUSPENDED VM with a message that says it is running, and the route
+ * back for one is `vm.resume`, which is not in this catalog.
+ *
+ * The webui dispatches: `VmService.doStartResume` calls `vm.resume` when the
+ * state is `Suspended` and `vm.start` otherwise. THIS TOOL MUST NOT COPY THAT.
+ * Branching to a different API method on state read at execution time is
+ * exactly what `MutatingTool.execute`'s contract forbids, since the
+ * confirmation token binds tool + args + systems rather than the plan steps. So
+ * it calls `vm.start` and only `vm.start`, refuses a suspended VM AT PLAN TIME
+ * with an accurate message, and names `vm.resume` as the thing that is absent.
+ * Passing middleware's own wording through instead would tell a caller their
+ * suspended VM is running.
+ *
+ * ALREADY-RUNNING IS AN ERROR HERE, AGAINST THE HOUSE CONVENTION. #119
+ * established that already-in-the-target-state is not an error and that saying
+ * which it was is the tool's job; the middleware refuses to hold that line for
+ * `vm.start`, which raises rather than no-opping. So the plan refuses, naming
+ * the VM and its state, as `snapshot_task_run` refuses a disabled task — and
+ * the check is plan-time only, so a VM started between plan and confirmation is
+ * refused by the middleware rather than by an `execute` that re-reads.
+ */
+
+/** What `vm_start` was asked to do. */
+interface VmStartArgs {
+  id: number;
+  overcommit: boolean;
+}
+
+/**
+ * The caller's arguments, or the error naming what is wrong with them.
+ *
+ * Strict on `overcommit` for `cloudsync_run`'s reason: coercing `"false"` to
+ * true would start a VM the system has no memory headroom for under an approval
+ * given for the opposite, which is not a narrower answer to the question asked
+ * but a different one.
+ */
+function parseVmStartArgs(args: Record<string, unknown>): VmStartArgs {
+  const id = parseVmId(args);
+  const overcommit = args['overcommit'];
+  if (overcommit != null && typeof overcommit !== 'boolean') {
+    throw new Error('"overcommit" must be a boolean');
+  }
+  return { id, overcommit: overcommit === true };
+}
+
+/**
+ * The params the call is made with.
+ *
+ * The options object is always sent rather than omitted when `overcommit` is
+ * false, for `cloudsync_run`'s reason: the plan shows the params, and a plan
+ * whose second argument appears only sometimes would be showing two different
+ * call shapes for one tool.
+ */
+function vmStartParams(args: VmStartArgs): CallParams<ApiSurface, 'vm.start'> {
+  return [args.id, { overcommit: args.overcommit }];
+}
+
+/**
+ * The VM states `vm.start` will not accept, with why each is refused.
+ *
+ * Both are `ACTIVE_STATES` to the middleware, and only one of them reads that
+ * way to a person — which is the whole reason the suspended case gets its own
+ * sentence rather than inheriting the running one.
+ */
+function vmStartRefusal(state: string, reading: VmPowerReading, id: number): string | null {
+  if (state === 'RUNNING') {
+    return (
+      `${describeVm(reading, id)} is already in state \`RUNNING\` on this system, and the ` +
+      'middleware REFUSES to start a VM that is already active rather than treating it as a ' +
+      'no-op — so this call would fail.'
+    );
+  }
+  if (state === 'SUSPENDED') {
+    return (
+      `${describeVm(reading, id)} is in state \`SUSPENDED\` on this system. The middleware ` +
+      'counts SUSPENDED as ACTIVE, so `vm.start` refuses it — AND THE MESSAGE IT REFUSES WITH ' +
+      'SAYS THE VM IS ALREADY RUNNING, WHICH IT IS NOT. What a suspended VM needs is ' +
+      '`vm.resume`, and THERE IS NO TOOL IN THIS CATALOG THAT RESUMES ONE; the TrueNAS web ' +
+      'interface is where that can be done.'
+    );
+  }
+  return null;
+}
+
+/** What the plan says this call does to the VM, given the state read at plan time. */
+function vmStartEffectSentence(reading: VmPowerReading): string {
+  if (reading.state === null) {
+    return (
+      'Because that state could not be read, whether the middleware will accept this call is ' +
+      'NOT established here — it refuses a VM that is already running or suspended.'
+    );
+  }
+  return 'It was neither running nor suspended, so the middleware had no reason to refuse it.';
+}
+
+/** What the plan says `overcommit` does to the system, rather than to the error. */
+function overcommitSentence(overcommit: boolean): string {
+  return overcommit
+    ? 'OVERCOMMIT IS ON FOR THIS CALL: the VM is started even where this system does not have ' +
+        'enough free memory to hold every VM configured on it at once, so the memory this one ' +
+        'is given is OVERSUBSCRIBED against the rest. That is a choice about the system and ' +
+        'not a way of retrying a failed start.'
+    : 'Overcommit is off, so the middleware starts this VM only where the memory for every ' +
+        'VM configured on this system is available; short of that the call fails with an ' +
+        'out-of-memory error rather than starting the VM.';
+}
+
+export const vmStart: MutatingTool = {
+  name: 'vm_start',
+  description:
+    'Powers on one virtual machine on a TrueNAS system. Two-phase: called ' +
+    'without a confirmation_token it returns a plan for user approval; called ' +
+    'with one it starts the VM. ONLY THE OLDER LIBVIRT-BACKED VMs CAN BE ' +
+    'STARTED HERE — the ones `vms_list` reports with `source` `vm`. `id` is ' +
+    "that entry's numeric `id` on the system being targeted; AN ENTRY WHOSE " +
+    '`source` IS `virt_instance` HAS A STRING id AND IS A DIFFERENT STACK THIS ' +
+    'TOOL CANNOT REACH, and passing one is an error saying so. PLANNING ' +
+    'AGAINST AN id NO VIRTUAL MACHINE HAS FAILS naming that id, so an approved ' +
+    'plan is always about a machine that existed when it was made. PLANNING ' +
+    'ALSO FAILS, NAMING THE STATE, WHERE THE VM IS ALREADY `RUNNING` OR IS ' +
+    '`SUSPENDED`. Already-running is an error here rather than a no-op because ' +
+    'THE MIDDLEWARE MAKES IT ONE — it raises instead of accepting the call. ' +
+    'SUSPENDED IS REFUSED FOR A DIFFERENT REASON AND IT IS THE ONE WORTH ' +
+    'READING: the middleware counts SUSPENDED as active, so `vm.start` rejects ' +
+    'a suspended VM WITH A MESSAGE SAYING IT IS ALREADY RUNNING, WHICH IS NOT ' +
+    'TRUE. A suspended VM needs `vm.resume`, and NOTHING IN THIS CATALOG ' +
+    'RESUMES ONE — this tool does not, and will not silently do it for you. ' +
+    'Both checks are made when the plan is made and ARE NOT REPEATED at ' +
+    'execute time, so a VM whose state changes between the plan and the ' +
+    'confirmation is refused by the middleware instead; and a VM whose state ' +
+    'could not be READ is not refused, because an unreadable state is not a ' +
+    'state that was read as running. `overcommit` DOES NOT RETRY A FAILED ' +
+    'START AND IS NOT AN ERROR-SUPPRESSING FLAG: without it the middleware ' +
+    'starts the VM only where this system has enough free memory to hold every ' +
+    'VM configured on it, and fails out-of-memory short of that; with it the VM ' +
+    'is started anyway and the memory is OVERSUBSCRIBED against the other VMs ' +
+    'on the system. Default false. THE RESULT REPORTS THE STATE BEFORE AND ' +
+    'AFTER, READ RATHER THAN ASSUMED: `vm.start` answers nothing at all, so ' +
+    'this tool reads `vm.query` immediately before the call and again ' +
+    'immediately after it. `previously_state` and `resulting_state` are those ' +
+    "two readings of the middleware's own state word, and " +
+    '`previously_domain_state` and `resulting_domain_state` are ' +
+    "libvirt's own state beside each, exactly as `vms_list` reports the pair — " +
+    'on the `vm` stack a machine that is not running commonly reads `STOPPED` ' +
+    'whether it was shut down or died, and `domain_state` is where `CRASHED` ' +
+    'or `SHUTOFF` separates those. `changed` IS THE TWO `state` READINGS ' +
+    'COMPARED AND NOTHING ELSE — the `domain_state` pair is reported beside ' +
+    'them and is NOT part of it, so a machine whose `state` did not move ' +
+    'reports `changed: false` however its `domain_state` read. `changed` is ' +
+    'NULL WHERE EITHER READING IS, WHICH IS NOT "NOTHING CHANGED". ' +
+    '`previous_lookup` and `resulting_lookup` say what each read did: `FOUND` ' +
+    'is a read that named this machine, `NOT_FOUND` a read that completed and ' +
+    'listed none under this id, `UNREADABLE` a read that failed — with ' +
+    '`previous_read_error` and `resulting_read_error` naming why and null ' +
+    'otherwise. A `FOUND` beside a null state is a fourth case those three ' +
+    'words do not separate: the machine was listed and reported no state this ' +
+    'tool could read. THE CALL IS MADE IN ALL OF THOSE CASES AND NOTHING ' +
+    'BRANCHES ON EITHER READ, because what runs must be what was approved — ' +
+    'and a read that failed after the call is not a failed call: the VM was ' +
+    'started and this tool simply could not establish the outcome. A START IS ' +
+    'NOT AN INSTANT: `vm.start` returns once the domain has been asked to ' +
+    'start, so `resulting_state` can still read `STOPPED` or report a ' +
+    'transitional word on a machine that comes up moments later — call ' +
+    '`vms_list` again to settle it, and `vm_logs` is where a machine that ' +
+    "will not boot says why. THIS TOOL CANNOT STOP OR RESTART A VM (`vm_stop` " +
+    'and `vm_restart` do), cannot resume a suspended one, and cannot create, ' +
+    'change, clone or delete one.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'integer',
+        description:
+          "The virtual machine's numeric `id` as `vms_list` reports it for an " +
+          'entry whose `source` is `vm`, on the system being targeted.',
+      },
+      overcommit: {
+        type: 'boolean',
+        default: false,
+        description:
+          'Start the VM even where this system does not have enough free ' +
+          'memory for every VM configured on it, oversubscribing the memory. ' +
+          'This is not a retry flag. Default false.',
+      },
+    },
+    required: ['id'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // Starting a VM destroys nothing and the named reversal is in this catalog:
+  // `vm_stop`. This is the case `Destructiveness` describes at its own
+  // declaration, and — unlike `cloudsync_run` or `snapshot_clone` — there is no
+  // account of the data that comes apart from the field.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const args = parseVmStartArgs(rawArgs);
+    return { id: args.id, overcommit: args.overcommit };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const args = parseVmStartArgs(rawArgs);
+    const reading = await readVmPower(ctx, args.id);
+    if (!reading.listed) {
+      throw new Error(
+        `No virtual machine with id ${args.id} on the \`vm\` stack of this system — ${VM_IDS_FROM}`,
+      );
+    }
+    // Only a state that was actually read refuses the plan. An unreadable state
+    // is not a state that was read as active, and failing on it would refuse a
+    // plan the middleware would have accepted — `snapshot_task_run`'s reading of
+    // a task's `enabled`, one family over.
+    const refusal = reading.state === null ? null : vmStartRefusal(reading.state, reading, args.id);
+    if (refusal !== null) throw new Error(refusal);
+    return [
+      vmReadStep(args.id),
+      {
+        method: 'vm.start',
+        params: vmStartParams(args),
+        description:
+          `Start ${describeVm(reading, args.id)}. ${vmStateSentence(reading)} ` +
+          `${vmStartEffectSentence(reading)} ${overcommitSentence(args.overcommit)}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const args = parseVmStartArgs(rawArgs);
+    const previous = await attemptVmPower(ctx, args.id);
+    // Unconditional, whatever the read said and whether or not it succeeded.
+    // Branching on state read at execution time is what the confirmation token
+    // cannot bind — and it is what would turn this into the webui's dispatch.
+    await firstValueFrom(ctx.system.client.api.call('vm.start', vmStartParams(args)));
+    const resulting = await attemptVmPower(ctx, args.id);
+    return {
+      ...vmPowerOutcome(args.id, previous, resulting),
+      requested_overcommit: args.overcommit,
+    };
+  },
+};
+
+/**
+ * `vm_stop`: powering one libvirt-backed virtual machine off, over a job.
+ *
+ * WHICH OF THE TWO SHUTDOWN PATHS RUNS IS THE CALLER'S CHOICE AND MUST BE
+ * STATED AS SUCH. `force: true` destroys the domain immediately — the power
+ * cord, with whatever the guest has not flushed to disk. `force: false` sends
+ * an ACPI shutdown and waits the VM's own `shutdown_timeout`, after which
+ * `force_after_timeout` decides whether the domain is destroyed anyway. A plan
+ * reading "stop this VM" would be true of all three combinations and would hide
+ * the one that loses data, which is `transferModeSentence`'s defect in a third
+ * family.
+ *
+ * `shutdown_timeout` IS NAMED IN THE PLAN SO AN APPROVER KNOWS HOW LONG
+ * "GRACEFUL" LASTS, and WITH NO UNIT ASSERTED. It is a bare number on the
+ * pinned surface, which declares no unit for it, and #96's rule is that a
+ * suffix is a claim: an approver acts on "90 seconds" differently from "90
+ * minutes", and this repository has read neither. It is optional on the entity,
+ * so the unreadable case says so rather than substituting a number.
+ */
+
+/** How long {@link vmStop} watches the job it started before reporting what it has. */
+const VM_STOP_WATCH_MS = 30_000;
+
+/** Seconds, for the result, so the bound is reported in the unit it is stated in. */
+const VM_STOP_WATCH_SECONDS = VM_STOP_WATCH_MS / 1000;
+
+/** What `vm_stop` was asked to do. */
+interface VmStopArgs {
+  id: number;
+  force: boolean;
+  forceAfterTimeout: boolean;
+}
+
+/**
+ * The caller's arguments, or the error naming what is wrong with them.
+ *
+ * Strict on both booleans for {@link parseVmStartArgs}'s reason, and here the
+ * cost of a coercion is a guest destroyed under an approval given for a
+ * graceful shutdown.
+ */
+function parseVmStopArgs(args: Record<string, unknown>): VmStopArgs {
+  const id = parseVmId(args);
+  const force = args['force'];
+  if (force != null && typeof force !== 'boolean') {
+    throw new Error('"force" must be a boolean');
+  }
+  const forceAfterTimeout = args['force_after_timeout'];
+  if (forceAfterTimeout != null && typeof forceAfterTimeout !== 'boolean') {
+    throw new Error('"force_after_timeout" must be a boolean');
+  }
+  return { id, force: force === true, forceAfterTimeout: forceAfterTimeout === true };
+}
+
+/**
+ * The params the job is started with, typed off the job directory — a disjoint
+ * key space from the call directory, so `CallParams` cannot name them.
+ *
+ * Both options are always sent, for {@link vmStartParams}'s reason.
+ */
+function vmStopParams(args: VmStopArgs): JobParams<ApiSurface, 'vm.stop'> {
+  return [args.id, { force: args.force, force_after_timeout: args.forceAfterTimeout }];
+}
+
+/**
+ * The VM's own ACPI grace period, named and not converted.
+ *
+ * No unit is asserted, per #96: the surface declares this as a bare number and
+ * nothing about a shutdown timeout fixes a unit the way SMART fixes a drive
+ * temperature in Celsius.
+ */
+function shutdownTimeoutPhrase(reading: VmPowerReading): string {
+  return reading.shutdown_timeout === null
+    ? 'how long it waits is the VM\'s own `shutdown_timeout`, WHICH THIS SYSTEM REPORTED NO ' +
+        'VALUE FOR that this tool could read — so how long "graceful" lasts here is NOT ' +
+        'established'
+    : `how long it waits is the VM's own \`shutdown_timeout\`, which this system records as ` +
+        `${reading.shutdown_timeout} — THE API DECLARES NO UNIT FOR THAT NUMBER and none is ` +
+        'asserted here, so it is not to be converted';
+}
+
+/**
+ * Which of the two shutdown paths these arguments select, and what it does.
+ *
+ * One function because the three combinations are one decision, and every
+ * clause in each is load-bearing: the forcing case has to name what is lost,
+ * and the graceful cases have to say what happens when the guest does not go.
+ */
+function stopPathSentence(args: VmStopArgs, reading: VmPowerReading): string {
+  if (args.force) {
+    return (
+      'THIS DESTROYS THE DOMAIN IMMEDIATELY — `force` is true, which is the power-cord case: ' +
+      'the guest is not asked to shut down, is given no chance to flush anything it is holding, ' +
+      'and WHATEVER IT HAD NOT WRITTEN TO DISK IS LOST. No ACPI shutdown is attempted and the ' +
+      "VM's `shutdown_timeout` does not apply. `force_after_timeout` is not reached and makes " +
+      'no difference here.'
+    );
+  }
+  const graceful = `This asks the guest to shut down over ACPI and waits for it to go: ${shutdownTimeoutPhrase(
+    reading,
+  )}.`;
+  return args.forceAfterTimeout
+    ? `${graceful} IF THE GUEST HAS NOT STOPPED BY THEN THE DOMAIN IS DESTROYED ANYWAY, because ` +
+        '`force_after_timeout` is true — so a guest that is slow to shut down, or that ignores ' +
+        'ACPI entirely, loses whatever it had not written by that point.'
+    : `${graceful} \`force_after_timeout\` is false, so the domain is NOT destroyed when that ` +
+        'time runs out. WHAT THE SYSTEM DOES WITH A GUEST THAT HAS NOT STOPPED BY THEN IS ' +
+        '(unconfirmed) HERE — it was not read off a live system and the API surface does not ' +
+        'say — so a VM still reading as running afterwards is not evidence this call failed.';
+}
+
+/**
+ * What the plan adds about the state the VM is already in, for a stop.
+ *
+ * Empty for every state but one, INCLUDING an unreadable one:
+ * {@link vmStateSentence} has already said the state could not be read, and a
+ * second sentence about it here would be that one restated.
+ */
+function vmStopEffectSentence(reading: VmPowerReading): string {
+  if (reading.state === 'STOPPED') {
+    return (
+      ' IT ALREADY READ AS `STOPPED` WHEN THIS PLAN WAS MADE, and this plan does not refuse ' +
+      'that: whether the middleware treats stopping an already-stopped VM as a no-op or ' +
+      'rejects it is (unconfirmed) here.'
+    );
+  }
+  return '';
+}
+
+export const vmStop: MutatingTool = {
+  name: 'vm_stop',
+  description:
+    'Powers off one virtual machine on a TrueNAS system and reports how far it ' +
+    'got. Two-phase: called without a confirmation_token it returns a plan for ' +
+    'user approval; called with one it starts the stop. ONLY THE OLDER ' +
+    'LIBVIRT-BACKED VMs CAN BE STOPPED HERE — the ones `vms_list` reports with ' +
+    "`source` `vm`. `id` is that entry's numeric `id` on the system being " +
+    'targeted; AN ENTRY WHOSE `source` IS `virt_instance` HAS A STRING id AND ' +
+    'IS A DIFFERENT STACK THIS TOOL CANNOT REACH. PLANNING AGAINST AN id NO ' +
+    'VIRTUAL MACHINE HAS FAILS naming that id. WHICH OF TWO SHUTDOWN PATHS ' +
+    'RUNS IS YOUR CHOICE AND THE ARGUMENTS ARE HOW IT IS MADE. `force: true` ' +
+    'DESTROYS THE DOMAIN IMMEDIATELY — the power-cord case: the guest is never ' +
+    'asked to shut down and ANYTHING IT HAD NOT WRITTEN TO DISK IS LOST. ' +
+    '`force: false` (the default) sends an ACPI shutdown and waits the VM\'s ' +
+    "own `shutdown_timeout`, and then `force_after_timeout` decides: true " +
+    'DESTROYS THE DOMAIN ANYWAY when that time runs out, false does not. Both ' +
+    'default false, so the default is the graceful path that never forces. THE ' +
+    "PLAN NAMES THE VM'S OWN `shutdown_timeout` so an approver knows how long " +
+    'that wait is, AND NO UNIT IS ASSERTED FOR IT: this API declares it as a ' +
+    'bare number, nothing in it states what the number counts, and it must not ' +
+    'be converted. It is optional on the machine, and the plan says outright ' +
+    'where the system reported none. THE RESULT IS ABOUT THE JOB THIS CALL ' +
+    'STARTED, AND "STARTED" IS NOT "STOPPED". A graceful shutdown waits on a ' +
+    'guest operating system and need not be quick, so this tool WATCHES THE ' +
+    'JOB FOR AT MOST `watched_seconds` AND THEN RETURNS WHATEVER IT HAS, ' +
+    'leaving the stop going. It never waits for the stop to finish. THE WATCH ' +
+    'ALSO ENDS IF FOLLOWING THE JOB FAILS — a dropped connection, a failed ' +
+    'read of the job list — and that is reported as what was established ' +
+    'rather than as the stop having failed, since it was already under way. A ' +
+    'failure BEFORE anything was seen of the job fails this call instead, and ' +
+    'even then MAY STILL HAVE STARTED THE STOP: read `vms_list` rather than ' +
+    'assuming nothing happened. `ended` is whether the job was ESTABLISHED to ' +
+    'have reached a state it will not move out of. TRUE MEANS THE JOB IS OVER. ' +
+    'FALSE MEANS NOTHING WAS ESTABLISHED AND IS NOT ONE ANSWER — the stop is ' +
+    'still going, or the watch was cut short by either of the failures above, ' +
+    'or the job reached a state the system does not treat as ending a run, or ' +
+    'the job reported a state this tool could not read, or no job was seen at ' +
+    'all. `job_state` and `job_id` narrow that and DO NOT PARTITION IT. IN ' +
+    'NONE OF THEM HAS ANYTHING FAILED. `succeeded` is true where the job ENDED ' +
+    'in a state this catalog reads as success, false where it ENDED in any ' +
+    'other state, and NULL WHERE NOTHING ESTABLISHED IT — which is every case ' +
+    'where `ended` is false. A null `succeeded` IS NEITHER A FAILURE NOR A ' +
+    'SUCCESS, and A STATE THAT LOOKS LIKE A SUCCESS DOES NOT MAKE ONE: it is ' +
+    'null beside a `job_state` of `SUCCESS` where the job was not established ' +
+    'to be over. NO STATE THIS CATALOG DOES NOT KNOW IS EVER READ AS A ' +
+    'SUCCESS; `SUCCESS` and `FINISHED` are the two it counts. `job_state` is ' +
+    'the state the system last reported, passed through as it spelled it. The ' +
+    "job's `result` is NOT read and could not settle any of this: `vm.stop` " +
+    'returns nothing, so a finished job carries a null result whether it ' +
+    'worked or failed. `error` is the text the job recorded and is null where ' +
+    'it recorded none. `finished_at` is when the job ended, as an ISO 8601 UTC ' +
+    'timestamp, REPORTED ONLY WHERE `ended` IS TRUE and null everywhere else ' +
+    'even if the job record carries a time. `job_id` is the job\'s numeric ' +
+    'identity, TAKEN FROM THE JOB EVENT THAT NAMED THIS REQUEST rather than ' +
+    'from anything read about the job afterwards, so it is reported even where ' +
+    'the watch established nothing else; it is null where no such event was ' +
+    'seen within the watch, and also where one was seen and the id it carried ' +
+    'was not a number this tool could read. NEITHER MEANS THE STOP DID NOT ' +
+    'START. `watched_seconds` is the CEILING that applied, not how long the ' +
+    'watch actually lasted. THE VM STATES ARE READ RATHER THAN ASSUMED: ' +
+    '`vm.stop` answers nothing, so this tool reads `vm.query` immediately ' +
+    'before the call and again after the watch ends. `previously_state` and ' +
+    "`resulting_state` are those two readings of the middleware's own state " +
+    'word, with `previously_domain_state` and `resulting_domain_state` ' +
+    "carrying libvirt's own state beside each, exactly as `vms_list` reports " +
+    'the pair — a machine that is not running commonly reads `STOPPED` ' +
+    'whether it was shut down or died, and `domain_state` is where `CRASHED` ' +
+    'or `SHUTOFF` separates those. `resulting_state` IS READ WHEN THE WATCH ' +
+    'ENDS AND NOT WHEN THE STOP DOES, so on a VM that is still shutting down ' +
+    'it is the state part-way through and not the state it settles in. ' +
+    '`changed` IS THE TWO `state` READINGS COMPARED AND NOTHING ELSE — the ' +
+    '`domain_state` pair is reported beside them and is NOT part of it — and ' +
+    'is NULL WHERE EITHER READING IS, WHICH IS NOT "NOTHING CHANGED". ' +
+    '`previous_lookup` and `resulting_lookup` say what each read did: `FOUND`, ' +
+    '`NOT_FOUND`, or `UNREADABLE` with `previous_read_error` and ' +
+    '`resulting_read_error` naming why. A `FOUND` beside a null state is a ' +
+    'fourth case those words do not separate: the machine was listed and ' +
+    'reported no state this tool could read. THE CALL IS MADE IN ALL OF THOSE ' +
+    'CASES AND NOTHING BRANCHES ON EITHER READ. THIS TOOL CANNOT STOP A ' +
+    'RUNNING JOB once it has started one, cannot start a VM (`vm_start` does) ' +
+    'or restart one (`vm_restart` does), cannot suspend or resume one, and ' +
+    'CANNOT RECOVER DATA A FORCED STOP LOST — starting the VM again boots it ' +
+    'from what reached the disk.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'integer',
+        description:
+          "The virtual machine's numeric `id` as `vms_list` reports it for an " +
+          'entry whose `source` is `vm`, on the system being targeted.',
+      },
+      force: {
+        type: 'boolean',
+        default: false,
+        description:
+          'Destroy the domain immediately instead of asking the guest to shut ' +
+          'down. The guest is given no chance to flush anything it holds and ' +
+          'unwritten data is lost. Default false.',
+      },
+      force_after_timeout: {
+        type: 'boolean',
+        default: false,
+        description:
+          'Destroy the domain if the guest has not shut down within the VM\'s ' +
+          'own `shutdown_timeout`. Ignored when `force` is true, which ' +
+          'destroys it at once. Default false.',
+      },
+    },
+    required: ['id'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // The operation is reversible in the sense `Destructiveness` names — the VM
+  // can be started again, and `vm_start` is in this catalog. What a forced stop
+  // does to data the guest had not written is NOT reversible, and this field
+  // cannot say both: it records the operation, and the account of the data is
+  // in the description and in the plan, which is where the person approving
+  // reads it. That division is #122's and is stated at the field's own
+  // declaration in `catalog/tool.ts`.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const args = parseVmStopArgs(rawArgs);
+    return { id: args.id, force: args.force, force_after_timeout: args.forceAfterTimeout };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const args = parseVmStopArgs(rawArgs);
+    const reading = await readVmPower(ctx, args.id);
+    if (!reading.listed) {
+      throw new Error(
+        `No virtual machine with id ${args.id} on the \`vm\` stack of this system — ${VM_IDS_FROM}`,
+      );
+    }
+    return [
+      vmReadStep(args.id),
+      {
+        method: 'vm.stop',
+        params: vmStopParams(args),
+        description:
+          `Stop ${describeVm(reading, args.id)}. ${vmStateSentence(reading)}` +
+          `${vmStopEffectSentence(reading)} ${stopPathSentence(args, reading)} ` +
+          vmWatchSentence(VM_STOP_WATCH_SECONDS),
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const args = parseVmStopArgs(rawArgs);
+    const previous = await attemptVmPower(ctx, args.id);
+    const job = await watchVmJob(
+      ctx,
+      ctx.system.client.api.callAndGetJobId('vm.stop', vmStopParams(args)),
+      VM_STOP_WATCH_MS,
+    );
+    // Read after the watch, not after the stop: the two are the same only where
+    // the job ended inside the bound, which is why `resulting_state` is
+    // described as the state when the watch ended.
+    const resulting = await attemptVmPower(ctx, args.id);
+    return {
+      ...vmPowerOutcome(args.id, previous, resulting),
+      requested_force: args.force,
+      requested_force_after_timeout: args.forceAfterTimeout,
+      watched_seconds: VM_STOP_WATCH_SECONDS,
+      ...job,
+    };
+  },
+};
+
+/**
+ * `vm_restart`: stopping and starting one libvirt-backed virtual machine, over
+ * a job.
+ *
+ * IT HIDES TWO DECISIONS THE CALLER DOES NOT GET TO MAKE, AND ITS API SURFACE
+ * STATES NEITHER. `vm.restart` takes `[id]` and nothing else; the middleware's
+ * `restart_vm` is `vm.stop` with `force_after_timeout=True` HARD-CODED,
+ * followed by `start_vm` with `overcommit=True` HARD-CODED. So:
+ *
+ * - A guest that does not shut down within its own `shutdown_timeout` IS
+ *   DESTROYED. A caller who would have chosen `force_after_timeout: false` on
+ *   {@link vmStop} gets the opposite here and cannot say otherwise.
+ * - The start half OVERSUBSCRIBES MEMORY, so a restart starts a VM that
+ *   {@link vmStart} would have refused out-of-memory.
+ *
+ * THE PLAN MUST NOT READ AS "STOP THEN START", because that is the account that
+ * omits the forced destruction — #154's shape, reached through a composition
+ * rather than through a retention pass.
+ *
+ * NONE OF THAT IS ON THE API SURFACE, AND THE DESCRIPTION SAYS SO. It is read
+ * from the TrueNAS implementation, which is #120's rule pointed the other way:
+ * an effect established somewhere this repository cannot check is stated AS
+ * THAT, rather than settled. Silence would be read as "a restart is a stop and
+ * a start with the defaults", which is the reading that costs a guest's
+ * unwritten data.
+ *
+ * WHAT A RESTART DOES TO AN ALREADY-STOPPED VM IS (unconfirmed). `restart_vm`
+ * raises `Failed to stop <name> vm` if its stop half fails, and whether
+ * stopping an inactive domain fails depends on `truenas_pylibvirt`'s behaviour
+ * against one, which is not readable from this repository and was not run
+ * against a live system. So NO already-in-target-state sentence is written for
+ * this tool: #119's convention is that saying which it was is the tool's job,
+ * and a sentence guessing at it would be exactly the reassurance #154 names as
+ * the costly direction to be wrong in.
+ */
+
+/**
+ * How long {@link vmRestart} watches the job it started before reporting what it
+ * has.
+ *
+ * ITS OWN NUMBER rather than {@link VM_STOP_WATCH_MS}, although the two are
+ * equal: the bound is a ceiling on a TOOL's patience and not an estimate of its
+ * job (#122), so one shared constant would assert that the two ceilings must
+ * move together, which nothing requires. Share a sentence
+ * ({@link vmWatchSentence}), not a number.
+ */
+const VM_RESTART_WATCH_MS = 30_000;
+
+/** Seconds, for the result, so the bound is reported in the unit it is stated in. */
+const VM_RESTART_WATCH_SECONDS = VM_RESTART_WATCH_MS / 1000;
+
+/**
+ * The params the job is started with, typed off the job directory.
+ *
+ * One argument, which is the whole problem this tool's description exists to
+ * state: there is nowhere in these params for either of the two decisions the
+ * middleware makes on the caller's behalf.
+ */
+function vmRestartParams(id: number): JobParams<ApiSurface, 'vm.restart'> {
+  return [id];
+}
+
+/**
+ * What a restart actually does, in the plan's own words.
+ *
+ * One string because it is one text: it says the same thing whatever the VM is,
+ * and every clause is load-bearing. The forcing clause is what stops an
+ * approver reading this as two calls with their defaults; the overcommit clause
+ * is what stops "it just comes back up" reading as a start that checked the
+ * memory; and the last sentence is what keeps both from reading as something
+ * this catalog verified.
+ */
+const RESTART_COMPOSITION =
+  'A RESTART IS NOT A `vm_stop` FOLLOWED BY A `vm_start` WITH THEIR DEFAULTS, and the two ' +
+  'differences are both decisions the middleware makes for you and this call has no argument ' +
+  'for. FIRST, THE STOP HALF FORCES AFTER THE TIMEOUT: it runs with ' +
+  '`force_after_timeout` set, so a guest that has not shut down within its own ' +
+  '`shutdown_timeout` IS DESTROYED, losing whatever it had not written to disk — `vm_stop` ' +
+  'offers that as a choice and this does not. SECOND, THE START HALF OVERCOMMITS: it runs ' +
+  'with `overcommit` set, so the VM is started even where this system does not have enough ' +
+  'free memory for every VM configured on it, and a machine `vm_start` would have refused ' +
+  'out-of-memory comes back up here. If the stop half fails the start half does not run, so a ' +
+  'failed restart can leave the VM stopped. NONE OF THAT IS ON THIS API: `vm.restart` takes ' +
+  'the id and nothing else and states none of it — the account is read from the TrueNAS ' +
+  'implementation and is NOT something this catalog can check.';
+
+export const vmRestart: MutatingTool = {
+  name: 'vm_restart',
+  description:
+    'Restarts one virtual machine on a TrueNAS system — stopping it and ' +
+    'starting it again — and reports how far it got. Two-phase: called ' +
+    'without a confirmation_token it returns a plan for user approval; called ' +
+    'with one it starts the restart. ONLY THE OLDER LIBVIRT-BACKED VMs CAN BE ' +
+    'RESTARTED HERE — the ones `vms_list` reports with `source` `vm`. `id` is ' +
+    "that entry's numeric `id` on the system being targeted; AN ENTRY WHOSE " +
+    '`source` IS `virt_instance` HAS A STRING id AND IS A DIFFERENT STACK THIS ' +
+    'TOOL CANNOT REACH. It takes no other argument. PLANNING AGAINST AN id NO ' +
+    'VIRTUAL MACHINE HAS FAILS naming that id. A RESTART IS NOT A `vm_stop` ' +
+    'FOLLOWED BY A `vm_start` WITH THEIR DEFAULTS, and the two differences are ' +
+    'decisions this call gives you no way to make. THE STOP HALF FORCES AFTER ' +
+    "THE TIMEOUT: a guest that has not shut down within the VM's own " +
+    '`shutdown_timeout` IS DESTROYED and loses whatever it had not written to ' +
+    'disk — `vm_stop` offers that as a choice through `force_after_timeout` ' +
+    'and this tool does not. THE START HALF OVERCOMMITS MEMORY: the VM is ' +
+    'started even where this system has not got enough free memory for every ' +
+    'VM configured on it, so a machine `vm_start` would have refused ' +
+    'out-of-memory comes back up here. If the stop half fails the start half ' +
+    'does not run, so a failed restart can leave the VM stopped. NEITHER OF ' +
+    'THOSE IS ON THIS API SURFACE — `vm.restart` takes the id and nothing else ' +
+    'and states none of it — SO THE ACCOUNT ABOVE IS READ FROM THE TRUENAS ' +
+    'IMPLEMENTATION AND IS NOT SOMETHING THIS CATALOG CAN CHECK. WHAT A ' +
+    'RESTART DOES TO A VM THAT IS ALREADY STOPPED IS (unconfirmed) HERE: it ' +
+    'depends on how the stop half behaves against an inactive domain, which is ' +
+    'not readable from this repository and was not run against a live system. ' +
+    'The plan does not refuse an already-stopped VM and it does not promise ' +
+    'the call will be accepted either; use `vm_start` where the machine is ' +
+    'known to be off. THE RESULT IS ABOUT THE JOB THIS CALL STARTED, AND ' +
+    '"STARTED" IS NOT "RESTARTED". A restart waits on a guest operating system ' +
+    'shutting down, so this tool WATCHES THE JOB FOR AT MOST `watched_seconds` ' +
+    'AND THEN RETURNS WHATEVER IT HAS, leaving the restart going. It never ' +
+    'waits for the restart to finish. THE WATCH ALSO ENDS IF FOLLOWING THE JOB ' +
+    'FAILS — a dropped connection, a failed read of the job list — and that is ' +
+    'reported as what was established rather than as the restart having ' +
+    'failed, since it was already under way. A failure BEFORE anything was ' +
+    'seen of the job fails this call instead, and even then MAY STILL HAVE ' +
+    'STARTED THE RESTART: read `vms_list` rather than assuming nothing ' +
+    'happened. `ended` is whether the job was ESTABLISHED to have reached a ' +
+    'state it will not move out of. TRUE MEANS THE JOB IS OVER. FALSE MEANS ' +
+    'NOTHING WAS ESTABLISHED AND IS NOT ONE ANSWER — the restart is still ' +
+    'going, or the watch was cut short by either of the failures above, or the ' +
+    'job reached a state the system does not treat as ending a run, or the job ' +
+    'reported a state this tool could not read, or no job was seen at all. ' +
+    '`job_state` and `job_id` narrow that and DO NOT PARTITION IT. IN NONE OF ' +
+    'THEM HAS ANYTHING FAILED. `succeeded` is true where the job ENDED in a ' +
+    'state this catalog reads as success, false where it ENDED in any other ' +
+    'state, and NULL WHERE NOTHING ESTABLISHED IT — which is every case where ' +
+    '`ended` is false. A null `succeeded` IS NEITHER A FAILURE NOR A SUCCESS, ' +
+    'and A STATE THAT LOOKS LIKE A SUCCESS DOES NOT MAKE ONE: it is null ' +
+    'beside a `job_state` of `SUCCESS` where the job was not established to be ' +
+    'over. NO STATE THIS CATALOG DOES NOT KNOW IS EVER READ AS A SUCCESS; ' +
+    '`SUCCESS` and `FINISHED` are the two it counts. `job_state` is the state ' +
+    "the system last reported, passed through as it spelled it. The job's " +
+    '`result` is NOT read and could not settle any of this: `vm.restart` ' +
+    'returns nothing, so a finished job carries a null result whether it ' +
+    'worked or failed. `error` is the text the job recorded and is null where ' +
+    'it recorded none. `finished_at` is when the job ended, as an ISO 8601 UTC ' +
+    'timestamp, REPORTED ONLY WHERE `ended` IS TRUE and null everywhere else ' +
+    'even if the job record carries a time. `job_id` is the job\'s numeric ' +
+    'identity, TAKEN FROM THE JOB EVENT THAT NAMED THIS REQUEST rather than ' +
+    'from anything read about the job afterwards, so it is reported even where ' +
+    'the watch established nothing else; it is null where no such event was ' +
+    'seen within the watch, and also where one was seen and the id it carried ' +
+    'was not a number this tool could read. NEITHER MEANS THE RESTART DID NOT ' +
+    'START. `watched_seconds` is the CEILING that applied, not how long the ' +
+    'watch actually lasted. THE VM STATES ARE READ RATHER THAN ASSUMED: ' +
+    '`vm.restart` answers nothing, so this tool reads `vm.query` immediately ' +
+    'before the call and again after the watch ends. `previously_state` and ' +
+    "`resulting_state` are those two readings of the middleware's own state " +
+    'word, with `previously_domain_state` and `resulting_domain_state` ' +
+    "carrying libvirt's own state beside each, exactly as `vms_list` reports " +
+    'the pair. `resulting_state` IS READ WHEN THE WATCH ENDS AND NOT WHEN THE ' +
+    'RESTART DOES, and a restart passes THROUGH being stopped on its way back ' +
+    'up — so a `resulting_state` of `STOPPED` is as likely to be a machine ' +
+    'part-way through as one that failed to come back, AND THIS TOOL DOES NOT ' +
+    'SEPARATE THE TWO. A `changed: false` ACROSS A RESTART IS THE ORDINARY ' +
+    'ANSWER FOR A SUCCESSFUL ONE, since a VM that was running and is running ' +
+    'again read the same both times: `changed` IS THE TWO `state` READINGS ' +
+    'COMPARED AND NOTHING ELSE — the `domain_state` pair is reported beside ' +
+    'them and is NOT part of it — SO IT IS NOT A STATEMENT ABOUT WHETHER THE ' +
+    'MACHINE WAS RESTARTED. It is NULL WHERE EITHER READING IS, WHICH IS NOT ' +
+    '"NOTHING CHANGED". `previous_lookup` and `resulting_lookup` say what each ' +
+    'read did: `FOUND`, `NOT_FOUND`, or `UNREADABLE` with ' +
+    '`previous_read_error` and `resulting_read_error` naming why. A `FOUND` ' +
+    'beside a null state is a fourth case those words do not separate: the ' +
+    'machine was listed and reported no state this tool could read. THE CALL ' +
+    'IS MADE IN ALL OF THOSE CASES AND NOTHING BRANCHES ON EITHER READ. THIS ' +
+    'TOOL CANNOT STOP A RUNNING JOB once it has started one, cannot start or ' +
+    'stop a VM without the other half (`vm_start` and `vm_stop` do), cannot ' +
+    'suspend or resume one, and CANNOT RECOVER DATA THE FORCED STOP LOST.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'integer',
+        description:
+          "The virtual machine's numeric `id` as `vms_list` reports it for an " +
+          'entry whose `source` is `vm`, on the system being targeted.',
+      },
+    },
+    required: ['id'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // {@link vmStop}'s reading exactly: the operation is reversible in the sense
+  // the field records — the VM is started again by the call itself, and
+  // `vm_start` is in this catalog — while what the forced half of the stop does
+  // to data the guest had not written is not. The field records the operation
+  // and the description carries the account of the data (#122).
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    return { id: parseVmId(rawArgs) };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const id = parseVmId(rawArgs);
+    const reading = await readVmPower(ctx, id);
+    if (!reading.listed) {
+      throw new Error(
+        `No virtual machine with id ${id} on the \`vm\` stack of this system — ${VM_IDS_FROM}`,
+      );
+    }
+    return [
+      vmReadStep(id),
+      {
+        method: 'vm.restart',
+        params: vmRestartParams(id),
+        description:
+          `Restart ${describeVm(reading, id)}. ${vmStateSentence(reading)} ` +
+          `${RESTART_COMPOSITION} ` +
+          vmWatchSentence(VM_RESTART_WATCH_SECONDS),
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const id = parseVmId(rawArgs);
+    const previous = await attemptVmPower(ctx, id);
+    const job = await watchVmJob(
+      ctx,
+      ctx.system.client.api.callAndGetJobId('vm.restart', vmRestartParams(id)),
+      VM_RESTART_WATCH_MS,
+    );
+    // After the watch, not after the restart — and a restart passes through
+    // stopped on its way back up, which is why the description refuses to read
+    // a `STOPPED` here as a machine that did not come back.
+    const resulting = await attemptVmPower(ctx, id);
+    return {
+      ...vmPowerOutcome(id, previous, resulting),
+      watched_seconds: VM_RESTART_WATCH_SECONDS,
+      ...job,
+    };
   },
 };

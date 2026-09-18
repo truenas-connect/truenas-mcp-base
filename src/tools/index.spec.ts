@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the sixty-four sketch tools', () => {
+  it('registers the sixty-seven sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -70,6 +70,9 @@ describe('createDefaultCatalog', () => {
       'snapshot_clone',
       'snapshot_task_run',
       'snapshot_set_hold',
+      'vm_start',
+      'vm_stop',
+      'vm_restart',
     ]);
   });
 
@@ -113,6 +116,13 @@ describe('createDefaultCatalog', () => {
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(
       'snapshot_set_hold',
     );
+  });
+
+  it('does not advertise the VM power tools to a read-only credential', () => {
+    const readOnly = createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name);
+    expect(readOnly).not.toContain('vm_start');
+    expect(readOnly).not.toContain('vm_stop');
+    expect(readOnly).not.toContain('vm_restart');
   });
 
   it('advertises fleet_health_rollup to a read-only credential', () => {

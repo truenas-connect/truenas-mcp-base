@@ -15,8 +15,8 @@ import { ApiSurface, MutatingTool, PlanStep, ReadOnlyTool, ToolContext } from '@
 import {
   booleanOrNull,
   errorText,
-  MAX_TIME_MS,
-  MiddlewareDate,
+  isoOrNull,
+  jobMillis,
   numberOrNull,
   recordOrNull,
   textOrNull,
@@ -396,9 +396,13 @@ export const snapshotTasksList: ReadOnlyTool = {
 const ENDED_JOB_STATES = new Set(['SUCCESS', 'FAILED', 'ABORTED', 'ERROR', 'FINISHED']);
 
 /**
- * {@link MAX_TIME_MS} from `common.ts` is what keeps one absurd recorded time
- * from taking the whole listing down with it, applied here to a job's
- * `time_finished`.
+ * {@link jobMillis} and {@link isoOrNull} are in `common.ts` rather than here:
+ * reading the middleware's `{ "$date": … }` envelope says the same thing for
+ * every family, and `vms.ts` reads the same job records for `vm_stop` and
+ * `vm_restart`. The bound {@link jobMillis} applies is `MAX_TIME_MS`, which was
+ * already there. What stays below is this family's own — which states end a run
+ * and which count as a success are vocabularies each tool states in its own
+ * description, so they are not shared.
  */
 
 /**
@@ -436,23 +440,6 @@ function lastRunOf(job: unknown): LastRun | null {
 }
 
 /**
- * An instant the job record carries, in milliseconds since the epoch, or null
- * where the system reported no time this tool can read.
- *
- * A bare number is accepted beside the `{ "$date": … }` envelope because the
- * envelope exists only to tag a number as a date in transit; both are epoch
- * milliseconds. Anything else — a formatted string, a date in another shape —
- * is not read rather than guessed at, because guessing wrong about a timezone
- * produces a timestamp that is confidently off by hours.
- */
-function jobMillis(value: unknown): number | null {
-  const raw =
-    typeof value === 'object' && value !== null ? (value as MiddlewareDate).$date : value;
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) return null;
-  return Math.abs(raw) <= MAX_TIME_MS ? raw : null;
-}
-
-/**
  * The state of the task's last run: the job's own state string, or
  * `NEVER_RUN`, or null.
  *
@@ -474,11 +461,6 @@ function lastRunState(job: unknown): string | null {
   if (job === null) return 'NEVER_RUN';
   const reported = lastRunOf(job)?.state;
   return typeof reported === 'string' && reported.length > 0 ? reported : null;
-}
-
-/** An instant as an ISO 8601 UTC timestamp, or null where there is no instant. */
-function isoOrNull(millis: number | null): string | null {
-  return millis === null ? null : new Date(millis).toISOString();
 }
 
 /**

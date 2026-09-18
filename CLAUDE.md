@@ -2064,6 +2064,109 @@ the ZFS mechanism — a hold makes the destroy itself fail, and
 recovers from a destroy that fails was not read off a live system, and asserting
 a guessed side effect is worse than saying nothing (#120).
 
+### A plan-time refusal is owed where the MIDDLEWARE refuses, not where we would (#161)
+
+#119 established that already-in-the-target-state is not an error and that
+saying which it was is the tool's job. `vm_start` refuses a `RUNNING` VM at plan
+time anyway, and that is not an exception being taken — it is the rule reaching a
+method that will not hold the line: `start_vm` RAISES for a VM already in
+`ACTIVE_STATES` rather than no-opping. **Ask what the method does with the no-op
+before writing the sentence #119 asks for**; where it rejects, a plan that
+promises a harmless call is the description promising more than the call
+delivers.
+
+**The refusal has to be right about WHY, and `SUSPENDED` is where that bites.**
+`ACTIVE_STATES` is `('RUNNING', 'SUSPENDED')`, so `vm.start` refuses a suspended
+VM *with a message saying it is already running*, which is false. Passing the
+middleware's own wording through would have told a caller their suspended VM was
+up. So the suspended case gets its own sentence, names `vm.resume` as what it
+actually needs, and says outright that no tool here resumes one — #135's rule
+that where a question is out of scope you say the catalog cannot answer it,
+rather than letting an error message imply an answer.
+
+**A state that could not be READ does not refuse anything**, which is
+`snapshot_task_run`'s reading of `enabled` (#154): failing on a null would refuse
+a plan the middleware would have accepted. And every one of these checks is
+plan-time only. **The webui dispatches on state here and this catalog must
+not** — `VmService.doStartResume` calls `vm.resume` when the state is `Suspended`
+and `vm.start` otherwise, and an `execute` that did the same would be branching to
+a different API method on state the confirmation token cannot bind. The tool
+calls `vm.start` and only `vm.start`.
+
+### Reading around a mutation whose method answers `null` (#161)
+
+`vm.start`, `vm.stop` and `vm.restart` all answer `null`, so there is no updated
+entity to read an outcome off (#121) and the state has to be read on both sides —
+`alerts_dismiss`'s position (#119) with #156's second read. Both reads are the
+same call from one helper, so the plan lists it ONCE and that step says it runs
+again immediately after the mutation.
+
+Three things that are this shape's own, rather than restatements of those:
+
+- **Neither read may fail the tool, and they fail for different reasons.** The
+  first would throw away an approval already given for a mutation that is still
+  safe; the second would report a mutation that HAS ALREADY LANDED as a failed
+  call. Both are caught into a `FOUND`/`NOT_FOUND`/`UNREADABLE` lookup with the
+  reason beside it, and `changed` is null wherever either reading is.
+- **On a job-backed tool the second read happens when the WATCH ends, not when
+  the operation does.** The two coincide only where the job finished inside the
+  bound, so `resulting_state` is described as the state part-way through — and
+  for `vm_restart`, which passes through stopped on its way back up, a
+  `resulting_state` of `STOPPED` is not separable from a machine that failed to
+  come back. Said outright rather than left to the reader.
+- **`changed` compares ONE of the two state vocabularies.** `vms_list` reports
+  the middleware's `state` and libvirt's `domain_state` separately because they
+  come from different systems; a `changed` derived from both would be true for a
+  VM whose `state` never moved. So it is the `state` pair alone, `domain_state`
+  is reported beside it, and the description says which — side-by-side fields
+  are what an implied relationship looks like from the outside (#138). For a
+  restart, `changed: false` is the ORDINARY answer for a call that worked, which
+  is the reading a caller is most likely to get wrong.
+
+### A tool whose method hides decisions states them where the params cannot (#161)
+
+`vm.restart` takes `[id]` and nothing else, and the middleware's `restart_vm` is
+`vm.stop` with `force_after_timeout=True` hard-coded followed by `start_vm` with
+`overcommit=True` hard-coded. So a caller who would have chosen
+`force_after_timeout: false` on `vm_stop` gets the opposite here and cannot say
+otherwise, and a restart starts a VM that `vm_start` would have refused
+out-of-memory. **A plan reading "stop then start" omits a forced destruction** —
+#154's shape reached through a composition rather than through a retention pass.
+Both halves are in the description AND in the plan, as one text, so no later edit
+can keep one and drop the other.
+
+**None of that is on the API surface, and the description says so** (#120): it is
+read from the TrueNAS implementation, which is not something this repository can
+check. Silence would have been read as "a restart is a stop and a start with
+their defaults".
+
+**What a restart does to an already-stopped VM is `(unconfirmed)` and NO
+already-in-target-state sentence is written for it.** It depends on the stop half
+against an inactive domain, which is not readable from here and was not run
+against a live system. #154's finding is that a reassuring guess is the costly
+direction to be wrong in, so the plan neither refuses such a VM nor promises the
+call will be accepted, and `vm_start` is named as what to use where the machine is
+known to be off.
+
+**`shutdown_timeout` is named in `vm_stop`'s plan with no unit asserted** (#96):
+it is a bare number on the pinned surface and nothing about a shutdown timeout
+fixes a unit the way SMART fixes a drive temperature in Celsius. An approver acts
+on "90 seconds" differently from "90 minutes", and this repository has read
+neither.
+
+### `jobMillis` and `isoOrNull` are in `common.ts`; a job's STATE vocabulary is not (#161)
+
+`vm_stop` and `vm_restart` read the same job records `tasks.ts` does, which put
+#86's line to a second family. Reading the middleware's `{ "$date": … }` envelope
+says the same thing everywhere and its bound (`MAX_TIME_MS`) and its type
+(`MiddlewareDate`) were already in `common.ts` for it, so the two guards moved
+there rather than growing a second copy. **What did NOT move is which job states
+count as success or as ended** — that is a state vocabulary, which #86 names as a
+family's own, and each tool states its own in its own description. A shared
+constant would put the words in one file and the sentence about them in another.
+Each job-backed tool also keeps its OWN watch bound, equal though they are:
+share a sentence, not a number (#154).
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
