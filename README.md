@@ -40,10 +40,20 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `destructiveness: 'reversible'`: `snapshots_create`, `alerts_dismiss`,
   `alerts_restore`, `scheduled_task_set_enabled`, `cloudsync_run`,
   `automated_task_set_enabled`, `snapshot_clone`, `snapshot_task_run`,
-  `snapshot_set_hold` —
-  `cloudsync_run` and `snapshot_task_run` the two that start a background job,
+  `snapshot_set_hold`, `vm_start`, `vm_stop`, `vm_restart` —
+  `cloudsync_run`, `snapshot_task_run`, `vm_stop` and `vm_restart` the four that
+  start a background job,
   which each watches for a bounded time and then reports on rather than waiting
-  out. `snapshot_clone` is the additive route
+  out. The three VM power tools are the catalog's only mutations over the older
+  libvirt-backed `vm` stack, and between them they are what makes
+  `destructiveness: 'reversible'` true in the strong sense for the first time
+  here: the reversal of a start is a stop, and both are tools rather than calls
+  a reader has to go elsewhere for. What each still owes its description is what
+  the field cannot say — a forced `vm_stop` destroys the domain with whatever
+  the guest had not written, and `vm_restart` hides two decisions its own API
+  params do not mention, forcing after the shutdown timeout and overcommitting
+  memory on the way back up, neither of them the caller's to make.
+  `snapshot_clone` is the additive route
   back to a snapshot's data: it deletes nothing and modifies no dataset that
   exists, which is what lets the catalog decline the rollback that answers the
   same question destructively — though the clone it adds does pin its source
@@ -58,9 +68,10 @@ confirmation UX, audit sinks) enters through injected interfaces.
   and its plan both state. `destructiveness`
   is about a tool's own operation and not about the data that operation acts
   on: `cloudsync_run` starts a task whose own `transfer_mode` may delete data
-  for good, and `snapshot_task_run` starts a run that ends in a system-wide
+  for good, `snapshot_task_run` starts a run that ends in a system-wide
   retention pass that destroys snapshots belonging to every periodic snapshot
-  task and not only the one being run — which each tool's description and plan
+  task and not only the one being run, and `vm_stop` and `vm_restart` can
+  destroy a running domain outright — which each tool's description and plan
   state and this field does not.
   `scheduled_task_set_enabled` and `automated_task_set_enabled` switch a task
   on or off between them and neither covers the other's kinds: the first takes
