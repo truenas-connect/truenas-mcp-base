@@ -40,9 +40,9 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `destructiveness: 'reversible'`: `snapshots_create`, `alerts_dismiss`,
   `alerts_restore`, `scheduled_task_set_enabled`, `cloudsync_run`,
   `automated_task_set_enabled`, `snapshot_clone`, `snapshot_task_run`,
-  `snapshot_set_hold`, `vm_start`, `vm_stop`, `vm_restart` —
-  `cloudsync_run`, `snapshot_task_run`, `vm_stop` and `vm_restart` the four that
-  start a background job,
+  `snapshot_set_hold`, `vm_start`, `vm_stop`, `vm_restart`, `service_control` —
+  `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart` and
+  `service_control` the five that start a background job,
   which each watches for a bounded time and then reports on rather than waiting
   out. The three VM power tools are the catalog's only mutations over the older
   libvirt-backed `vm` stack, and between them they are what makes
@@ -65,13 +65,25 @@ confirmation UX, audit sinks) enters through injected interfaces.
   operator would recover from. The two directions are not symmetric — placing a
   hold adds the `truenas` tag alone, removing one removes every hold tag on the
   snapshot, including any this catalog never reported — which its description
-  and its plan both state. `destructiveness`
+  and its plan both state.
+  `service_control` starts, stops or restarts one of the system's services, and
+  is the mutating half of what `services_status` reads. It is ONE tool over
+  three verbs where the VM power tools are three, because the middleware offers
+  one method — `service.control(verb, service)` — rather than three; `RELOAD`
+  is its fourth verb and is deliberately not offered, since a reload leaves the
+  service running and is neither a start, a stop nor a restart. A service
+  already in the state the verb aims at is planned and called like any other,
+  and reported as having been there already. Neither it nor anything else in
+  this catalog changes whether a service starts at boot, which is the other
+  half of what `services_status` reports and stays read-only. `destructiveness`
   is about a tool's own operation and not about the data that operation acts
   on: `cloudsync_run` starts a task whose own `transfer_mode` may delete data
   for good, `snapshot_task_run` starts a run that ends in a system-wide
   retention pass that destroys snapshots belonging to every periodic snapshot
-  task and not only the one being run, and `vm_stop` and `vm_restart` can
-  destroy a running domain outright — which each tool's description and plan
+  task and not only the one being run, `vm_stop` and `vm_restart` can
+  destroy a running domain outright, and a `service_control` stop or restart
+  disconnects every client the service was serving, which can leave a file half
+  written on the far side — which each tool's description and plan
   state and this field does not.
   `scheduled_task_set_enabled` and `automated_task_set_enabled` switch a task
   on or off between them and neither covers the other's kinds: the first takes

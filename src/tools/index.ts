@@ -20,7 +20,7 @@ import {
   systemHealthReport,
 } from '@/tools/reporting';
 import { securityConfig } from '@/tools/security';
-import { servicesStatus } from '@/tools/services';
+import { serviceControl, servicesStatus } from '@/tools/services';
 import { shareAccess, sharesList } from '@/tools/shares';
 import {
   createSnapshot,
@@ -122,6 +122,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(vmStart);
   catalog.register(vmStop);
   catalog.register(vmRestart);
+  catalog.register(serviceControl);
   return catalog;
 }
 
@@ -171,6 +172,7 @@ export {
   scheduledTaskSetEnabled,
   scrubHistory,
   securityConfig,
+  serviceControl,
   servicesStatus,
   shareAccess,
   sharesList,

@@ -2178,6 +2178,114 @@ constant would put the words in one file and the sentence about them in another.
 Each job-backed tool also keeps its OWN watch bound, equal though they are:
 share a sentence, not a number (#154).
 
+### Three verbs are one tool where they are one METHOD (#164)
+
+`service_control` takes a `verb` of `START`, `STOP` or `RESTART` where `vm_start`,
+`vm_stop` and `vm_restart` are three tools (#161), and the ticket that filed it
+was routed on the reading that the two are the same shape. They are not, and what
+separates them is the API rather than the subject. The VM tools are three
+because they are three METHODS with three parameter lists and three things to
+tell an approver: `vm.start` is a plain call taking `overcommit`, `vm.stop` a job
+taking two shutdown-path booleans, `vm.restart` a job taking nothing and hiding
+two decisions. `service.control(verb, service)` is one method and one parameter
+list, so three tools would be three copies of one `plan`/`execute` pair differing
+in a string — which is #121's test coming out the other way: **ask whether the
+kinds differ in what the caller is TOLD, or only in which value is dialled.**
+
+**`service.start`, `service.stop` and `service.restart` DO NOT EXIST on this
+surface**, whatever an older middleware offered and whatever `services.ts`'s own
+file comment used to say. There is one method, `service.control`, and it is in
+the JOB directory. Check the directory before writing a plan against a method
+name that reads plausibly.
+
+**The fourth verb is refused by the schema and named in the description.**
+`RELOAD` is on the method and is not a start, a stop or a restart: the daemon
+keeps running, and what a reload does differs per service in ways nothing on
+this surface states. That is #121's rule — the reachable surface is not the
+scope — with #102's corollary, since an omission a caller might notice is named
+rather than left silent.
+
+**A job whose method declares a real response gets that response READ.**
+`cloudsync.sync` and `vm.stop` declare `response: null`, so those tools never
+read a job's `result` (#122). `service.control` declares `response: boolean`, so
+`control_result` reports it — gated on `ended`, since a job still running has
+produced none. It is NOT where the outcome comes from: the acceptance criteria
+ask for the state the service ended in, which is a separate reading, and a
+`control_result: false` beside a `resulting_state` that IS the expected one is
+the two disagreeing rather than one of them being the answer.
+
+### Failing a completed mutation, and the three outcomes that look like it (#164)
+
+`service_control` is the first tool here that THROWS after its mutation has
+landed: where the job ended and the service was read in a state other than the
+one the verb aims at, the call fails naming that state. #164 asks for it in those
+words, and it is worth being exact about why it does not contradict #161's rule
+that neither read may fail the tool. That rule is about a read that FAILED —
+reporting a mutation that has already landed as a failed call. This is a read
+that SUCCEEDED and established that the operation did not do what was asked.
+
+**What it costs is the rest of the result**, so the message carries the job id,
+the job's own state and error, and the control boolean, and says outright that
+the call was made. A caller left with one sentence still has the number that
+names the run.
+
+**Three outcomes look identical from outside and none of them is this**, which
+is why the condition is four clauses rather than a state comparison:
+
+- the watch ran out before the job did — the service is still on its way, and
+  nothing was established about where it ended up;
+- the read after the watch failed, or listed no such service — this tool being
+  unable to say, not the system saying no;
+- the service reported a state this tool could not read — there is then no word
+  to put in the message.
+
+So `expected_state` is reported beside `resulting_state`, and **a result in hand
+whose two disagree means the watch ended before the job did, or the state could
+not be read.** Stated in the description, because the invariant is what makes the
+pair worth reading.
+
+**Whether `service.query` reports the new state the moment the job ends is
+`(unconfirmed)`**, in `pool_resilver_config`'s form (#141), and the description
+says so: a daemon still tearing down when its job reported success would be read
+here as not having reached the state asked for. The ticket asks for the failure
+in these words so it is implemented, and #120's requirement is that the
+unestablished half be stated rather than settled — which is the difference
+between a caller who can check and one who is told a working call failed.
+
+**A plan may say what the CALL will do and must not say what the RESULT will
+hold.** The first draft of the already-in-the-target-state sentence promised
+that `previously_state` would carry the plan-time reading and `changed` would
+come back false — one clause after saying the plan-time reading is not
+re-checked, which is the contradiction that gives the rule away. Both fields are
+read at execute time: `previously_state` by a fresh read immediately before the
+call, so the promise is false for a service someone moves between the plan and
+its confirmation, and false again wherever that read cannot be made at all. The
+sibling tools stop at what the call does (`alerts.ts`, `snapshots.ts`) and this
+is why. **Ask whether the sentence is about the call or about a field, and where
+it is about a field, ask when that field is read.**
+
+**Already-in-the-requested-state is NOT this**, and the plan does not refuse it:
+#119's convention holds, the result says which it was through `previously_state`
+and `changed`, and criteria 1 and 2 of the ticket fall out of the read-back
+rather than being special-cased. What the MIDDLEWARE does with such a call is
+`(unconfirmed)` in `pool_resilver_config`'s form (#141) — `vm_start` refuses a
+running VM because `start_vm` is KNOWN to raise (#161), and nothing readable from
+this repository says whether `service.control` no-ops or rejects. Guessing the
+reassuring direction is #154's costly one; guessing the other would refuse a plan
+the middleware would have accepted.
+
+### The bounded job watch is now four copies, and promoting it is owed (#164)
+
+`watchServiceJob` is the fourth implementation of #122's pipe — two inline in
+`tasks.ts`, `watchVmJob` in `vms.ts`, this one — and it was written rather than
+promoted. `common.ts` was cut to stop exactly this (#86), so the reason is worth
+recording rather than leaving as an oversight: promoting it means rewriting three
+tools this ticket does not touch, and the success-state vocabulary each keeps is
+a family's own (#161) and would have to become an argument, as `effectiveLimit`'s
+bounds are. **The promotion is proposed as its own ticket.** What must NOT travel
+with it whenever it happens is the vocabulary or the watch bound — share a
+sentence, not a number (#154).
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
