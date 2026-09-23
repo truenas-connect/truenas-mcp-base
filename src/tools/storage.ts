@@ -738,12 +738,16 @@ async function permissionsOf(
 const DATASET_PERMISSIONS_RESULT_GUIDANCE =
   '`dataset` is the dataset that was asked about. `children` is every dataset ' +
   'beneath it — at ANY depth, not just its immediate children — and is NULL ' +
-  'rather than empty when `include_children` was not asked for, so an empty ' +
-  'list means the dataset has no descendants. `children_limit` is the cap that ' +
-  'was applied and `children_truncated` says whether it was reached; all three ' +
-  'are null when children were not asked for. A TRUNCATED LIST IS NOT EVIDENCE ' +
-  'ABOUT THE DATASETS MISSING FROM IT — the descendants are ordered by id and ' +
-  'the ones past the cap were never read. ' +
+  'rather than empty when `include_children` was not asked for. ' +
+  '`children_limit` is the cap that was applied and `children_truncated` says ' +
+  'whether it was reached; all three are null when children were not asked ' +
+  'for. A TRUNCATED LIST IS NOT EVIDENCE ABOUT THE DATASETS MISSING FROM IT — ' +
+  'the descendants are ordered by id and the ones past the cap were never ' +
+  'read. A DESCENDANT WHOSE OWN ID COULD NOT BE READ IS LEFT OUT AND COUNTED ' +
+  'NOWHERE: nothing establishes that such a row is beneath this dataset, it ' +
+  'does not reach `children`, and it does NOT set `children_truncated`. So an ' +
+  'empty list rules out only that this tool matched a descendant — it is not ' +
+  'proof that the dataset has none. ' +
   '`id` is the dataset id, and it is the same `id` `storage_list_datasets` ' +
   'reports. `type` is what the dataset is, as the system spelled it. ' +
   '`mountpoint` is the path the permissions below were read FROM, as the ' +
@@ -759,10 +763,12 @@ const DATASET_PERMISSIONS_RESULT_GUIDANCE =
   'ITS OWN AND IS NEVER DERIVED FROM THE UID: they routinely differ, and a ' +
   'TrueNAS local user created for an app can be uid 3100 with gid 3003. ' +
   '`user` and `group` are the names the system resolved those numbers to. A ' +
-  'NULL NAME BESIDE A NUMBER IS NOT A MISSING OWNER — the number is the owner ' +
-  'and it is always reported; the name is null both where no account or group ' +
-  'on the system answers to that number and where the system reported no name ' +
-  'this tool could read, and those two are NOT separated here. ' +
+  'NULL NAME BESIDE A NUMBER IS NOT A MISSING OWNER — the number is the owner, ' +
+  'and the name is null both where no account or group on the system answers ' +
+  'to that number and where the system reported no name this tool could read, ' +
+  'which are NOT separated here. A null NUMBER is the separate case that the ' +
+  'read did not establish an owner at all, and it says nothing about who owns ' +
+  'the path. ' +
   '`mode_octal` is the permission bits as FOUR octal digits, so `0700` and ' +
   '`0750` are distinguishable at a glance. The leading digit is not padding: ' +
   'it carries setuid, setgid and the sticky bit, so a setgid directory reads ' +
@@ -913,18 +919,39 @@ export const datasetPermissions: ReadOnlyTool = {
       throw new Error('"include_children" must be a boolean');
     }
     const wantChildren = requested === true;
+    // THE TWO READS DIFFER IN `retrieve_children`, AND THAT IS THE WHOLE
+    // DIFFERENCE BETWEEN THEM.
+    //
+    // `retrieve_children` is what makes the middleware WALK the dataset tree,
+    // and the flat list of every dataset is the product of that walk — which is
+    // why `storage_list_datasets`, `datasets_quota_report` and
+    // `reporting_space_trends` all pass true and are the three reads in this
+    // repository that need every dataset. The one call that passes false is
+    // `snapshots.ts`'s existence read, which names its dataset in the filter and
+    // so wants no walk at all.
+    //
+    // Both shapes are needed here and for those same two reasons: asking about
+    // one dataset is the second, and the descendants below are the first. A
+    // single read with the walk off would rely on an unfiltered query answering
+    // with more than the pool roots, which is the claim those three call sites
+    // are evidence against.
+    //
+    // Filter and options are inlined so the call's own parameter types apply:
+    // written to a `const` first the filter widens to string[][] and no longer
+    // satisfies the filter tuple, as the two tools above note.
+    //
+    // `properties` is empty because this tool reads no ZFS property. `id`,
+    // `type` and `mountpoint` are declared as fields of the entry itself rather
+    // than as the `PoolDatasetEntryProperty` objects this list selects among, so
+    // nothing the mapping reads is narrowed away by it.
     const rows = await firstValueFrom(
-      // The filter is inlined so the call's own parameter types apply: written
-      // to a `const` first it widens to string[][] and no longer satisfies the
-      // filter tuple, as the two tools above note. `retrieve_children` is false
-      // because the response already lists every dataset as a top-level entry;
-      // what the flag adds is a redundant nesting of each row's descendants
-      // underneath it, which is not what the children below are read from.
-      system.client.api.query(
-        'pool.dataset.query',
-        wantChildren ? [] : [['id', '=', dataset]],
-        { extra: { retrieve_children: false } },
-      ),
+      wantChildren
+        ? system.client.api.query('pool.dataset.query', [], {
+            extra: { retrieve_children: true, properties: [] },
+          })
+        : system.client.api.query('pool.dataset.query', [['id', '=', dataset]], {
+            extra: { retrieve_children: false, properties: [] },
+          }),
     );
     // The filter is bandwidth and this is the control: an unrecognised query
     // parameter is dropped rather than refused, so a filter that did not apply
@@ -936,12 +963,19 @@ export const datasetPermissions: ReadOnlyTool = {
       throw new Error(`Dataset "${dataset}" does not exist`);
     }
     // Descendants are matched on the id prefix, which is what a ZFS dataset id
-    // IS — a parent's name followed by "/". Matched here rather than asked for,
-    // for the reason above: the check on the response is the control either way,
-    // so there is nothing a filter could add. A row whose id could not be read
-    // is not matched: it names no dataset, so nothing establishes that it is
-    // beneath this one, and including it would put a row in `children` that the
-    // caller cannot tell apart from a sibling of the same shape.
+    // IS — a parent's name followed by "/". Matched here rather than asked for:
+    // the check on the response is the control either way (#121, #153), so
+    // there is nothing a filter could add.
+    //
+    // TOP-LEVEL ROWS ONLY, as in the two tools above: every dataset is already
+    // one, and each additionally nests its descendants under `children`, so
+    // walking those would report every descendant twice or more.
+    //
+    // A row whose id could not be read is not matched: it names no dataset, so
+    // nothing establishes that it is beneath this one, and including it would
+    // put a row in `children` the caller cannot tell from a sibling of the same
+    // shape. It then leaves no trace in the result — the guidance says so
+    // rather than letting an empty list read as "no descendants" (#98).
     const descendants = wantChildren
       ? rows
           .filter((row) => datasetId(row).startsWith(`${dataset}/`))
@@ -960,8 +994,9 @@ export const datasetPermissions: ReadOnlyTool = {
       children_limit: wantChildren ? CHILDREN_LIMIT : null,
       // A true here is read off a listing that was itself read in full — the
       // dataset query either answered or took the whole tool down — so a false
-      // is the confirmed claim that nothing was dropped rather than a read that
-      // went wrong reporting completeness.
+      // is never a read that went wrong reporting completeness. What it does
+      // NOT cover is a descendant whose id could not be read, which is dropped
+      // before this count is taken; the guidance names that separately.
       children_truncated: wantChildren ? descendants.length > reported.length : null,
     };
   },

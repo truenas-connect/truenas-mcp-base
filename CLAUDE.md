@@ -2408,6 +2408,40 @@ checked before anything was designed around them — so unlike
 `filesystem.file_tail_follow` (#72) and the measured half of NTP (#133), this
 namespace's permission half needed nothing upstream.
 
+### `retrieve_children` is the WALK, and a listing of every dataset needs it (#168)
+
+`dataset_permissions` makes two `pool.dataset.query` reads and they differ in
+one option. Naming one dataset in the filter passes `retrieve_children: false`,
+which is `snapshots.ts`'s existence read; enumerating the descendants passes
+`true`, which is what `storage_list_datasets`, `datasets_quota_report` and
+`reporting_space_trends` — the three reads here that need every dataset — all
+pass.
+
+**That is not two spellings of one thing.** The flag is what makes the
+middleware WALK the tree, and the flat list of every dataset is the PRODUCT of
+that walk; the per-row `children` nesting is a side effect of it, which is why
+those three tools read top-level rows only and never flatten again. A single
+unfiltered read with the walk off would have relied on such a query answering
+with more than the pool roots — a claim every one of those call sites is
+evidence against, and one no test here can settle, because the specs stub the
+query and hand back whatever rows they were given. **A test that feeds itself
+the answer cannot check the question**, so the assertion worth having is on the
+call SHAPE, and the shape has to be the one the repository already pays for.
+
+Had it been wrong, the direction was the costly one: an unfiltered read
+answering with pool roots alone makes `include_children: true` throw *"Dataset
+does not exist"* for a dataset that plainly does, and answer `children: []`,
+`children_truncated: false` — the shape this tool's own guidance defines as
+having no descendants — for a pool root that has many. **Where a repository's
+own comments record what an option does, a new call site that contradicts them
+is the thing to justify**, not the three that agree.
+
+`properties` is `[]` on both reads. Nothing this tool reports is a ZFS
+property: `id`, `type` and `mountpoint` are fields of the entry itself rather
+than the `PoolDatasetEntryProperty` objects that list selects among, so
+narrowing it costs nothing the mapping needs — the same reading of the declared
+type that #91 asks for, applied to an `extra` rather than to a field.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

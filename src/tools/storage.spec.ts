@@ -653,8 +653,10 @@ describe('dataset_permissions', () => {
   it("reads both paths from the dataset's own mountpoint", async () => {
     const { ctx, call, query } = permissionSystem();
     await datasetPermissions.handler(ctx, { dataset: 'tank/apps' });
+    // Named in the filter, so no tree walk is wanted — `snapshots.ts`'s shape
+    // for the same question. The children read below is the other one.
     expect(query).toHaveBeenCalledWith('pool.dataset.query', [['id', '=', 'tank/apps']], {
-      extra: { retrieve_children: false },
+      extra: { retrieve_children: false, properties: [] },
     });
     expect(call).toHaveBeenCalledWith('filesystem.stat', ['/mnt/tank/apps']);
     expect(call).toHaveBeenCalledWith('filesystem.getacl', ['/mnt/tank/apps']);
@@ -907,7 +909,7 @@ describe('dataset_permissions', () => {
     expect(result['children_limit']).toBeNull();
     expect(result['children_truncated']).toBeNull();
     expect(query).toHaveBeenCalledWith('pool.dataset.query', [['id', '=', 'tank/apps']], {
-      extra: { retrieve_children: false },
+      extra: { retrieve_children: false, properties: [] },
     });
     // Two reads, over the one dataset asked about.
     expect(call).toHaveBeenCalledTimes(2);
@@ -936,9 +938,11 @@ describe('dataset_permissions', () => {
     ]);
     expect(result['children_truncated']).toBe(false);
     expect(result['children_limit']).toBe(50);
-    // Every dataset, since the descendants are matched on the response.
+    // Every dataset, since the descendants are matched on the response — and
+    // `retrieve_children` is what makes the middleware walk the tree that
+    // produces that flat listing, as the two tools above pass it for.
     expect(query).toHaveBeenCalledWith('pool.dataset.query', [], {
-      extra: { retrieve_children: false },
+      extra: { retrieve_children: true, properties: [] },
     });
   });
 
@@ -958,6 +962,10 @@ describe('dataset_permissions', () => {
     expect((result['children'] as Record<string, unknown>[]).map((child) => child['id'])).toEqual([
       'tank/apps/postgres',
     ]);
+    // It is counted nowhere: dropped before the cap is compared, so it does not
+    // set `children_truncated` either. The guidance says so rather than letting
+    // a short list read as the whole of what is beneath the dataset.
+    expect(result['children_truncated']).toBe(false);
   });
 
   it('reports an empty list where a dataset asked about children has none', async () => {
