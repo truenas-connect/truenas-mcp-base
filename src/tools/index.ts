@@ -28,7 +28,13 @@ import {
   snapshotSetHold,
   snapshotsList,
 } from '@/tools/snapshots';
-import { listDatasets, poolStatus, quotaReport, systemDatasetConfig } from '@/tools/storage';
+import {
+  datasetPermissions,
+  listDatasets,
+  poolStatus,
+  quotaReport,
+  systemDatasetConfig,
+} from '@/tools/storage';
 import {
   auditConfig,
   auditLogQuery,
@@ -51,7 +57,7 @@ import {
 } from '@/tools/tasks';
 import { vmDevices, vmLogs, vmRestart, vmsList, vmStart, vmStop } from '@/tools/vms';
 
-/** The sketch's catalog: fifty-six read-only tools plus eleven mutating tools. */
+/** The sketch's catalog: fifty-seven read-only tools plus thirteen mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -70,6 +76,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(bootPoolStatus);
   catalog.register(listDatasets);
   catalog.register(quotaReport);
+  catalog.register(datasetPermissions);
   catalog.register(systemDatasetConfig);
   catalog.register(disksList);
   catalog.register(disksTemperature);
@@ -144,6 +151,7 @@ export {
   cloudsyncRun,
   cloudsyncTasksList,
   createSnapshot,
+  datasetPermissions,
   directoryServicesStatus,
   disksList,
   disksTemperature,

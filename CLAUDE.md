@@ -2313,6 +2313,101 @@ payload into an audit trail the first time someone reused it.
 **`common.ts` is still not on the public barrel**, and promoting a function into
 it is not a step towards exporting it.
 
+### Where two fields answer one question, the one with a stated meaning wins (#168)
+
+`dataset_permissions` asks whether a dataset carries an ACL beyond its mode
+bits, and the pinned surface answers **twice**: `filesystem.stat` declares
+`acl: boolean`, and `filesystem.getacl` declares `trivial: boolean`. This is not
+#140's two-sources case, where the row and the verb are the same fact read the
+cheap way and the authoritative way. **Only one of the two has a meaning the
+surface states.** A trivial ACL is defined — it is one the mode bits already
+express in full — so `acl_beyond_mode` is that field negated. `stat`'s `acl` is
+declared and documented nowhere, and reporting it under a name this repository
+invented for it is #102's guessed meaning, which is worse than an omission
+because a caller cannot tell a reading from a guess. It is left out and the
+omission is named.
+
+What that costs is real and was taken deliberately: where the ACL read fails and
+the ownership read did not, a boolean was in hand and the answer is still null.
+That is the direction rule (#93) agreeing with the omission rather than
+excusing it — **every unreadable field in a permissions answer runs towards
+null, because a caller acts on a permission by WRITING.** A mode reported
+`0777` that was never read invites leaving it alone; an `acl_beyond_mode`
+reported false that was never read invites a `chmod` the system will refuse.
+
+**The ACL read's own `uid`, `gid`, `user` and `group` are dropped for the other
+reason** — the ownership section already derives them, and one fact gets one
+derivation (#122).
+
+### A transformation is not a unit, and it is stated where a unit would be (#168)
+
+`mode_octal` reports `(mode & 0o7777)` as four octal digits. Neither half of
+that is cosmetic, and #96 is the rule being applied rather than bent: a suffix
+is carried where the unit was established, and `_octal` is established by the
+rendering this file performs rather than claimed of the payload.
+
+- **Four digits, because the leading one is not padding.** It carries setuid,
+  setgid and the sticky bit, so a setgid app directory reads `2770` where an
+  ordinary one reads `0770`. Three digits would report two different
+  directories identically.
+- **The high bits are masked and NOT reported.** A POSIX `stat` carries the file
+  type in the same number, which would make a directory read `40750`. Masking is
+  safe whichever the middleware sent — a number already holding only permission
+  bits is unchanged by it — and what the dataset is, is `type`, read from the
+  dataset's own row.
+- **A number that is not a whole non-negative 32-bit value is null rather than
+  masked.** JavaScript's bitwise operators truncate to 32 bits, so masking such
+  a number answers with plausible digits taken from the wrong end of it — a
+  wrong mode is worse than no mode for the same reason a wrong unit suffix is
+  worse than none.
+
+### A companion field can qualify a whole section (#168)
+
+`is_mountpoint` sits in `ownership` beside the uid, gid and mode, and it is
+#134's shape applied to the reading rather than to one null. A dataset that is
+not mounted still has a DIRECTORY at its mountpoint path, and `filesystem.stat`
+of that path answers about the directory: every field comes back populated and
+looks exactly like an answer about the dataset. The two causes are ones a caller
+acts on differently — one is the dataset's own root and the other is not the
+dataset at all — and nothing else in the result separates them.
+
+**A section's `unavailable` cannot carry this**, which is why a companion was
+owed rather than a stated absence: the read SUCCEEDED. `boot.ts`'s seam says why
+a read failed; this says what a read that worked is about.
+
+### An opt-in flag is where the cost is decided; the cap is still owed (#168)
+
+`include_children` defaults false under #155, because each dataset reported
+costs two further calls and a pool can hold hundreds. That flag alone is not the
+whole answer: #155's own fields are one extra read over a query that was already
+bounded, while an explicit yes here fans out per descendant with nothing
+bounding it. So `CHILDREN_LIMIT` caps it, `children_limit` and
+`children_truncated` come back with the result in `snapshots_list`'s form, and
+the description says a truncated list is not evidence about what is missing
+from it. **Ask whether the opt-in bounds the cost or only defers it** — where it
+only defers it, a cap is owed as well.
+
+It is a CONSTANT rather than an argument because the ticket asks for an opt-in
+and not for a bound, and a caller wanting more can name a descendant directly.
+The argument-was-not-passed cause of a null `children` gets no companion field,
+which is #155's reasoning unchanged: the caller set the flag itself.
+
+### Two ways a dataset names no path, and neither is a failure (#168)
+
+A VOLUME has no mountpoint at all; a filesystem can name `none` (mounted
+nowhere) or `legacy` (mounted by the operating system rather than by ZFS).
+Neither is a path, so neither is asked about — a `filesystem.stat` of `none`
+would fail in the middleware and report as a read that went wrong, when what
+happened is that there was nothing to read. Both sections say which of the two
+it was, the value is still reported as `mountpoint` exactly as the system
+spelled it, and `type` is what tells a volume apart from an unmounted
+filesystem.
+
+**`filesystem.stat` and `filesystem.getacl` are both on the pinned surface**,
+checked before anything was designed around them — so unlike
+`filesystem.file_tail_follow` (#72) and the measured half of NTP (#133), this
+namespace's permission half needed nothing upstream.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
