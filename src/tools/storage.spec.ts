@@ -690,8 +690,9 @@ describe('dataset_permissions', () => {
   });
 
   it('reports a uid no account answers to as its number, with a null name', async () => {
-    // The number is the owner and is always reported; the name is what the
-    // system could not resolve.
+    // Where the read landed, the number is the owner and the name is what the
+    // system could not resolve — a name it could not resolve does not drop the
+    // number with it. A null NUMBER is the separate case, covered above.
     const { ownership } = await sectionsOf({
       stats: { ['/mnt/tank/apps']: stat({ uid: 568, user: null, gid: 568, group: null }) },
     });

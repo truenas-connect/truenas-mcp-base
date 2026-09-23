@@ -2375,6 +2375,14 @@ dataset at all — and nothing else in the result separates them.
 owed rather than a stated absence: the read SUCCEEDED. `boot.ts`'s seam says why
 a read failed; this says what a read that worked is about.
 
+**And it qualifies the OTHER section too, which the field's position does not
+say.** The ACL is read from the same path, so a `POSIX1E` beside
+`is_mountpoint: false` describes that directory exactly as the mode does. A
+companion sits in one section and a caller reads one field, so **where a
+companion's reading reaches past its own section, the other section's guidance
+has to point at it** — adjacency is not qualification (#156), and here even
+adjacency is missing.
+
 ### An opt-in flag is where the cost is decided; the cap is still owed (#168)
 
 `include_children` defaults false under #155, because each dataset reported
@@ -2431,8 +2439,8 @@ call SHAPE, and the shape has to be the one the repository already pays for.
 Had it been wrong, the direction was the costly one: an unfiltered read
 answering with pool roots alone makes `include_children: true` throw *"Dataset
 does not exist"* for a dataset that plainly does, and answer `children: []`,
-`children_truncated: false` — the shape this tool's own guidance defines as
-having no descendants — for a pool root that has many. **Where a repository's
+`children_truncated: false` for a pool root that has many — a listing reporting
+itself complete and empty. **Where a repository's
 own comments record what an option does, a new call site that contradicts them
 is the thing to justify**, not the three that agree.
 

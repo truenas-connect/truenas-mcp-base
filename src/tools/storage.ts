@@ -774,13 +774,16 @@ const DATASET_PERMISSIONS_RESULT_GUIDANCE =
   'it carries setuid, setgid and the sticky bit, so a setgid directory reads ' +
   '`2770`. THE FILE-TYPE BITS A POSIX `stat` CARRIES IN THE SAME NUMBER ARE ' +
   'NOT REPORTED — what the dataset is, is `type`. ' +
-  '`is_mountpoint` QUALIFIES EVERYTHING ELSE IN THAT SECTION. False means the ' +
-  'path was read but is not a mount point, so the ownership and mode above are ' +
-  "THE DIRECTORY SITTING AT THAT PATH rather than the dataset's own root — " +
-  'which is what an unmounted dataset looks like from here, and is otherwise ' +
-  'indistinguishable from a mounted one. Null is not a false: it is the system ' +
-  'having reported no value this tool could read, and it is not evidence ' +
-  'either way. ' +
+  '`is_mountpoint` QUALIFIES BOTH SECTIONS, not just the one it sits in. False ' +
+  'means the path was read but is not a mount point, so everything reported ' +
+  'from it is THE DIRECTORY SITTING AT THAT PATH rather than the root of the ' +
+  'dataset — which is what an unmounted dataset looks like from here, and is ' +
+  'otherwise indistinguishable from a mounted one. THAT REACHES THE ACL ' +
+  'ANSWER TOO: the ACL is read from the same path, so `acl_type` and ' +
+  '`acl_beyond_mode` beside a false here describe that directory and not the ' +
+  'dataset. Null is not a false: it is the system having reported no value ' +
+  'this tool could read, and it is not evidence either way — including about ' +
+  'the ACL. ' +
   '`acl_type` is the system\'s OWN WORD for the kind of ACL, passed through ' +
   'exactly as spelled and mapped onto nothing. At the time of writing the ' +
   'surface names `NFS4`, `POSIX1E` and `DISABLED`; a word not among those is ' +
@@ -989,7 +992,9 @@ export const datasetPermissions: ReadOnlyTool = {
     return {
       dataset: self,
       // Null rather than an empty list where the caller did not ask, so an
-      // empty list keeps its own meaning: the dataset has no descendants.
+      // empty list keeps a meaning of its own: this tool matched no descendant.
+      // That is weaker than "the dataset has none" — a row whose id could not
+      // be read was dropped above — and the guidance says which.
       children: wantChildren ? children : null,
       children_limit: wantChildren ? CHILDREN_LIMIT : null,
       // A true here is read off a listing that was itself read in full — the
