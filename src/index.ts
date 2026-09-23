@@ -93,6 +93,7 @@ export {
   bootPoolStatus,
   listDatasets,
   quotaReport,
+  datasetPermissions,
   systemDatasetConfig,
   disksList,
   disksTemperature,
