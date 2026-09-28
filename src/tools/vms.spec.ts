@@ -1274,6 +1274,36 @@ describe('vm_clone', () => {
         expect(text).toContain('NOT THE SAME ANSWER AS A MACHINE WITH NO DISKS');
       });
 
+      it('will not claim there is no DISK device beside a device it could not read', async () => {
+        // The branch a first fix missed: a RAW device keeps the both-empty
+        // branch from running, and the "listed no `DISK` device" claim then sat
+        // unguarded beside an `ISCSI_DISK` that may well be a zvol-backed disk.
+        const text = await planText({
+          devices: {
+            rows: [
+              device('RAW', { path: '/mnt/tank/disk.img', size: 99 }),
+              device('ISCSI_DISK', { iscsi_target: 'tgt' }),
+            ],
+          },
+        });
+        expect(text).toContain('WHETHER THIS MACHINE HAS ONE IS NOT ESTABLISHED HERE');
+        expect(text).not.toContain('The system listed no `DISK` device');
+        expect(text).not.toContain('no zvol of its own is expected to be copied');
+      });
+
+      it('still says so plainly where every device it did not read was ruled out', async () => {
+        const text = await planText({
+          devices: {
+            rows: [
+              device('RAW', { path: '/mnt/tank/disk.img', size: 99 }),
+              device('NIC', { mac: 'aa:bb' }),
+            ],
+          },
+        });
+        expect(text).toContain('no zvol of its own is expected to be copied');
+        expect(text).not.toContain('NOT ESTABLISHED HERE');
+      });
+
       it('makes a figure beside an unreadable device a floor rather than a total', async () => {
         const text = await planText({
           devices: { rows: [zvol('tank/builder-0', 20), device('ISCSI_DISK', { iscsi_target: 't' })] },

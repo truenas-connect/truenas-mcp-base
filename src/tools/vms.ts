@@ -2611,6 +2611,32 @@ function unreadDevicesSentence(count: number): string {
 }
 
 /**
+ * What the plan says where it read no `DISK` device.
+ *
+ * TAKEN BY BOTH BRANCHES THAT CAN SAY IT, which is why it is a function rather
+ * than a string written where it is first needed. "The system listed no `DISK`
+ * device" is a positive claim, and it is only true where every device WAS read:
+ * a first fix guarded the branch where nothing at all was read and left this
+ * same claim unguarded in the branch that runs when the machine has a `RAW`
+ * device beside an unreadable one, which is the case the guard exists for.
+ * {@link unreadDevicesSentence} arriving two sentences later does not repair it
+ * — adjacency is not qualification (#156), and the two sentences contradict.
+ */
+function noDiskSentence(unreadable: number): string {
+  if (unreadable === 0) {
+    return (
+      'The system listed no `DISK` device for this virtual machine when this plan was made, so ' +
+      'no zvol of its own is expected to be copied.'
+    );
+  }
+  return (
+    'THE SYSTEM LISTED NO DEVICE THIS TOOL COULD READ AS A `DISK`, AND WHETHER THIS MACHINE HAS ' +
+    'ONE IS NOT ESTABLISHED HERE — some of what it listed could be neither read as a disk nor ' +
+    'ruled out as one, which is stated below.'
+  );
+}
+
+/**
  * What the plan says the copy will occupy, from the disks read at plan time.
  *
  * Four answers rather than two, and the ones a caller acts on differently are
@@ -2648,8 +2674,7 @@ function vmCloneSpaceSentence(disks: VmCloneDisks): string {
   }
   const diskPart =
     disks.disks.length === 0
-      ? 'The system listed no `DISK` device for this virtual machine when this plan was made, ' +
-        'so no zvol of its own is expected to be copied.'
+      ? noDiskSentence(disks.unreadable)
       : 'THE SPACE THE COPY IS EXPECTED TO OCCUPY IS THE SIZE OF THE DISKS IT COPIES. The ' +
         `system listed ${plural(disks.disks.length, '`DISK` device')} for it: ` +
         `${disks.disks.map(diskPhrase).join(', ')}. ${diskTotalPhrase(disks.disks)} THE API ` +
