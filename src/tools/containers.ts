@@ -189,10 +189,14 @@ const CONTAINER_LIST_RESULT_GUIDANCE =
   'on v25.10 `cpu`, `memory` and `image_description` are reported and ' +
   '`description` is NEVER SET; on v26 and later `description` is reported and ' +
   '`cpu`, `memory` and `image_description` are NEVER SET. A null in any of the ' +
-  'four is therefore two different answers — the container has no such value, ' +
-  'or this version does not report that field at all — AND THIS TOOL DOES NOT ' +
-  'SEPARATE THEM; `api_version` is what tells them apart, and where it is null ' +
-  'neither reading is established. `containers` is every container on the ' +
+  'four therefore has THREE CAUSES AND THIS TOOL SEPARATES NONE OF THEM: this ' +
+  'version does not report that field at all; or it does and the container has ' +
+  'no such value; or it does, the container had one, and it arrived in a form ' +
+  'this tool would not read — the client copies these four across WITHOUT ' +
+  'narrowing them, so a `cpu` that was not text or a `memory` that was not a ' +
+  'finite number reads as null exactly like an absent one. `api_version` rules ' +
+  'the FIRST cause in or out and says nothing about the other two; where it is ' +
+  'null, none of the three is established. `containers` is every container on the ' +
   'system, unbounded: the operation takes no filter and no limit, so there is ' +
   'nothing to cap and nothing is dropped. An EMPTY list is a system running no ' +
   'containers; a listing that could not be read fails this tool instead and is ' +
@@ -843,11 +847,28 @@ function stopOptions(args: ContainerStopArgs): StopOptions {
   return args.timeout === null ? { force: args.force } : { force: args.force, timeout: args.timeout };
 }
 
+/**
+ * How the OLDER version takes `force`, which is not the same method for the two
+ * tools that ask for one.
+ *
+ * On 25.10 a stop is `virt.instance.stop` and a restart is
+ * `virt.instance.restart` — one middleware job that brings the container down
+ * and starts it again, taking the same options object under the name
+ * `stop_args`. A shared sentence naming the stop's method would put a method
+ * the call does not dial into the restart's approval text, which is #161's rule
+ * about a step description shared by several tools: parameterise the clause
+ * that differs rather than writing the one true of the tool written first.
+ */
+const STOP_FORCE_ON_2510 = "`virt.instance.stop`'s own force";
+const RESTART_FORCE_ON_2510 =
+  "`virt.instance.restart`'s own `stop_args.force` — that one job brings the container down " +
+  'before starting it again, and this is how';
+
 /** What `force` and `timeout` select, in the words both stop and restart use. */
-function forceSentence(force: boolean, timeout: number | null): string {
+function forceSentence(force: boolean, timeout: number | null, olderForce: string): string {
   const chosen = force
-    ? 'FORCE IS TRUE FOR THIS CALL. On TrueNAS 25.10 that is `virt.instance.stop`\'s own ' +
-      'force, which takes the container down without waiting for it. On 26 and later this one ' +
+    ? `FORCE IS TRUE FOR THIS CALL. On TrueNAS 25.10 that is ${olderForce}, ` +
+      'which takes the container down without waiting for it. On 26 and later this one ' +
       'argument sets BOTH `container.stop`\'s `force` and its `force_after_timeout`, so the ' +
       'container is brought down whether or not it goes on its own. EITHER WAY, ANYTHING THE ' +
       'CONTAINER HAD NOT WRITTEN TO DISK CAN BE LOST.'
@@ -955,7 +976,7 @@ export const containerStop: MutatingTool = {
           `Stop ${describeContainer(reading, args.id)}. ${containerStateSentence(reading)} ` +
           `${versionSentence(ctx)} This reaches \`virt.instance.stop\` on TrueNAS 25.10 and ` +
           '`container.stop` on 26 and later, a background job on both. ' +
-          `${forceSentence(args.force, args.timeout)} ` +
+          `${forceSentence(args.force, args.timeout, STOP_FORCE_ON_2510)} ` +
           watchSentence(CONTAINER_STOP_WATCH_SECONDS),
       },
     ];
@@ -1064,8 +1085,11 @@ export const containerRestart: MutatingTool = {
     CONTAINER_VERB_PREAMBLE +
     ' ' +
     RESTART_COMPOSITION +
-    ' `force` IS REQUIRED AND HAS NO DEFAULT, and it applies to the stopping ' +
-    'half. `force: true` brings the container down without waiting for it and ' +
+    ' `force` IS REQUIRED AND HAS NO DEFAULT, and it governs how the container ' +
+    'is BROUGHT DOWN — `virt.instance.restart`\'s own `stop_args` on TrueNAS ' +
+    '25.10, where the restart is one job, and the stopping half\'s ' +
+    '`container.stop` options on 26 and later, where it is two calls. `force: ' +
+    'true` brings the container down without waiting for it and ' +
     'ANYTHING IT HAD NOT WRITTEN TO DISK CAN BE LOST; `force: false` asks it to ' +
     'stop and lets it go on its own. On TrueNAS 26 and later this one argument ' +
     'sets BOTH the stop\'s `force` and its `force_after_timeout`. `timeout` is ' +
@@ -1130,7 +1154,7 @@ export const containerRestart: MutatingTool = {
         description:
           `Restart ${describeContainer(reading, args.id)}. ${containerStateSentence(reading)} ` +
           `${versionSentence(ctx)} ${RESTART_COMPOSITION} ` +
-          `${forceSentence(args.force, args.timeout)} ` +
+          `${forceSentence(args.force, args.timeout, RESTART_FORCE_ON_2510)} ` +
           watchSentence(CONTAINER_RESTART_WATCH_SECONDS),
       },
     ];

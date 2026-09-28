@@ -2568,9 +2568,14 @@ would be a second opinion about calls the directory already types precisely.
 `ops` normalizes two middleware payloads into one `Container` and **neither
 version fills all of it**: v25.10's mapping sets `cpu`, `memory` and `image` and
 never `description`; v26+'s sets `description` and never the other three. So a
-null in any of the four means either "this container has no such value" or "this
-version does not report that field at all", and the tool cannot tell them apart
-from the row. `force` is the same shape one level up — on v25.10 it is
+null in any of the four has THREE causes — this version does not report the
+field; it does and the container has no such value; it does, the container had
+one, and it arrived in a form the guards here would not read, since the mapping
+copies these across without narrowing them — and the tool separates none of them
+from the row. **`api_version` rules the first cause in or out and settles
+neither of the other two, and the guidance says so**: a version field that reads
+as separating all three would be the #119 defect, a three-valued account of a
+four-valued outcome, one field along. `force` is the same shape one level up — on v25.10 it is
 `virt.instance.stop`'s own force, and on v26+ the mapping writes it into BOTH
 `container.stop`'s `force` and its `force_after_timeout`, while `timeout` is not
 sent at all because that API has no such parameter.
@@ -2590,6 +2595,15 @@ keeps the plan true under #119. Which method runs is decided at connect time;
 naming one of the two would show an approver a call that may not be the one
 made. The step's description names both, and the version sentence says which
 applies.
+
+**A sentence shared by two of these tools is parameterised where the method
+differs**, which is #161's rule reaching a second family. `forceSentence` is
+written once for `container_stop` and `container_restart`, and the older
+version's method is not the same for both: a 25.10 stop is `virt.instance.stop`
+and a 25.10 restart is `virt.instance.restart`, taking the same options object
+under the name `stop_args`. Naming the stop's method in both would have put a
+method the call does not dial into the restart's approval text — the plan
+contradicting itself in the one artefact a person reads before approving.
 
 ### A bounded watch over `ops` is not `watchJob`, and it has a fourth answer (#173)
 

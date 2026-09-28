@@ -262,9 +262,18 @@ describe('container_list', () => {
   });
 
   describe('description', () => {
-    it('says which nulls are the version rather than the container', () => {
+    it('names all three causes of a null in the version-split fields', () => {
+      // The version rules ONE of them in or out. A guidance claiming it
+      // separates the set would be a two-valued account of a three-valued
+      // outcome — and the third cause is the guards in this very file.
       expect(containerList.description).toContain('CANNOT BE READ WITHOUT IT');
-      expect(containerList.description).toContain('AND THIS TOOL DOES NOT SEPARATE THEM');
+      expect(containerList.description).toContain(
+        'THREE CAUSES AND THIS TOOL SEPARATES NONE OF THEM',
+      );
+      expect(containerList.description).toContain(
+        'it arrived in a form this tool would not read',
+      );
+      expect(containerList.description).toContain('rules the FIRST cause in or out');
     });
 
     it('says UNKNOWN is not a container at rest', () => {
@@ -779,6 +788,31 @@ describe('container_restart', () => {
     };
     expect(Object.keys(schema.properties)).toEqual(['id', 'force', 'timeout']);
     expect(schema.required).toEqual(['id', 'force']);
+  });
+
+  it('names the method IT dials on 25.10 for force, not the stop tool\'s', async () => {
+    // A 25.10 restart is one job — `virt.instance.restart`, taking the same
+    // options under `stop_args`. The shared sentence is parameterised so this
+    // plan does not name a method the call never dials.
+    const { ctx } = opsSystem('v25.10.0', listing('v25.10.0'));
+    const [, mutation] = await containerRestart.plan(ctx, { id: 'web', force: true });
+    expect(mutation.description).toContain("`virt.instance.restart`'s own `stop_args.force`");
+    expect(mutation.description).not.toContain("`virt.instance.stop`'s own force");
+  });
+
+  it('is the stop tool that names the stop method for force', async () => {
+    const { ctx } = opsSystem('v25.10.0', listing('v25.10.0'));
+    const [, mutation] = await containerStop.plan(ctx, { id: 'web', force: true });
+    expect(mutation.description).toContain("`virt.instance.stop`'s own force");
+  });
+
+  it('says force governs how the container is brought down on either version', () => {
+    expect(containerRestart.description).toContain(
+      "`virt.instance.restart`'s own `stop_args` on TrueNAS 25.10",
+    );
+    expect(containerRestart.description).toContain(
+      "the stopping half's `container.stop` options on 26 and later",
+    );
   });
 
   it('normalizes the same way a stop does, keeping an omitted timeout absent', () => {
