@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the seventy sketch tools', () => {
+  it('registers the seventy-one sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -74,6 +74,7 @@ describe('createDefaultCatalog', () => {
       'vm_start',
       'vm_stop',
       'vm_restart',
+      'vm_clone',
       'service_control',
     ]);
   });
@@ -125,6 +126,14 @@ describe('createDefaultCatalog', () => {
     expect(readOnly).not.toContain('vm_start');
     expect(readOnly).not.toContain('vm_stop');
     expect(readOnly).not.toContain('vm_restart');
+  });
+
+  it('does not advertise vm_clone to a read-only credential', () => {
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain('vm_clone');
+  });
+
+  it('advertises vm_clone to a full-access credential', () => {
+    expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain('vm_clone');
   });
 
   it('does not advertise service_control to a read-only credential', () => {

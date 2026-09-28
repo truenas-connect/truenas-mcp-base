@@ -146,5 +146,6 @@ export {
   vmStart,
   vmStop,
   vmRestart,
+  vmClone,
   serviceControl,
 } from '@/tools/index';

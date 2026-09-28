@@ -13,6 +13,7 @@ import {
   booleanOrNull,
   errorText,
   numberOrNull,
+  plural,
   recordOrNull,
   textOrNull,
   watchJob,
@@ -2192,6 +2193,721 @@ export const vmRestart: MutatingTool = {
       ...vmPowerOutcome(id, previous, resulting),
       watched_seconds: VM_RESTART_WATCH_SECONDS,
       ...job,
+    };
+  },
+};
+
+/**
+ * `vm_clone`: copying one libvirt-backed virtual machine, its devices and the
+ * zvols behind its disks.
+ *
+ * ONE STACK, NOT TWO, the same split the three power tools have and for the same
+ * reason: `vm.clone` is `vm.*`, the incus-backed instances `vms_list` reports
+ * with `source` `virt_instance` have no counterpart reachable from here, and
+ * their `id` is a STRING where this takes a number — so {@link parseVmId}
+ * refuses a mis-aimed id by argument check rather than at the middleware.
+ *
+ * `vm.clone` IS A PLAIN CALL. It is in the call directory and absent from the
+ * job directory, so none of {@link watchJob}'s machinery applies and there is no
+ * bound to spend: the call returns when the middleware has finished cloning.
+ *
+ * IT ANSWERS A BARE `boolean`, WHICH IS WEAKER THAN ANYTHING THIS FILE HAS HAD
+ * TO READ BEFORE. `scheduled_task_set_enabled` gets the updated entity back
+ * (#121); `alerts_dismiss` gets nothing and reports a fact about the entity it
+ * NAMED (#119); here the thing to report did not exist when the call was made
+ * and `true` does not say what was created. So the clone is identified by
+ * LISTING EVERY VM BEFORE THE CALL AND AGAIN AFTER IT and taking the id the
+ * second listing names and the first did not.
+ *
+ * THAT IS WHY THE READ IS A LISTING RATHER THAN A LOOKUP, and it is what makes
+ * the naming rule load-bearing. With `name` omitted the middleware derives the
+ * clone's name itself and nothing on this API surface states the rule it derives
+ * it by — so there is no name to look the new machine up under, and a read that
+ * guessed one would report a clone it did not find as a clone that was not made.
+ * An identification by id difference needs no such guess and is the same
+ * derivation whether or not the caller chose a name.
+ *
+ * BOTH READS ARE THE SAME CALL from {@link readVmListing}, so the plan lists it
+ * ONCE and that step's description says in words that it runs again — #156's
+ * rule, exactly as {@link vmReadStep} applies it for the power tools.
+ *
+ * NOTHING BRANCHES ON EITHER READ, for the reason the power tools do not: the
+ * confirmation token binds tool + args + systems, so `execute` is contractually
+ * a pure function of (args, system) and a call skipped because a listing failed
+ * would be branching on state the token cannot bind.
+ *
+ * WHAT A CLONE ACTUALLY COPIES IS NOT ON THIS API, and {@link CLONE_COMPOSITION}
+ * says so in the plan and in the description — #120's rule as {@link vmRestart}
+ * applies it. Silence would be read as "it copies the configuration", which is
+ * the reading that fills a pool.
+ */
+
+/** What `vm_clone` was asked to do. */
+interface VmCloneArgs {
+  id: number;
+  /** The name the caller chose, or null where they left it to the middleware. */
+  name: string | null;
+}
+
+/**
+ * The caller's arguments, or the error naming what is wrong with them.
+ *
+ * Strict on `name` for {@link parseVmStartArgs}'s reason. An empty string is
+ * refused rather than read as "no name": `textOrNull` reads `''` as no value
+ * everywhere else in this file, so passing it through would send the middleware
+ * a name that is not one under an approval that showed the caller their own
+ * empty string.
+ */
+function parseVmCloneArgs(args: Record<string, unknown>): VmCloneArgs {
+  const id = parseVmId(args);
+  const name = args['name'];
+  if (name != null && (typeof name !== 'string' || name.length === 0)) {
+    throw new Error(
+      '"name" must be a non-empty string — the name to give the clone. Omit it entirely to let ' +
+        'the middleware derive one from the source VM\'s name.',
+    );
+  }
+  return { id, name: name == null ? null : name };
+}
+
+/**
+ * The params the call is made with.
+ *
+ * The name is always sent, as `null` where the caller chose none, for
+ * {@link vmStartParams}'s reason: the plan shows the params, and a second
+ * positional argument that appears only sometimes would show two call shapes for
+ * one tool. The client declares the parameter `string | null | undefined`, so
+ * the explicit null is a shape the surface states rather than one assumed of it.
+ */
+function vmCloneParams(args: VmCloneArgs): CallParams<ApiSurface, 'vm.clone'> {
+  return [args.id, args.name];
+}
+
+/** Every libvirt-backed VM the system listed, by id, with the name it reported. */
+type VmListing = Map<number, string | null>;
+
+/**
+ * The positional params every listing read reaches the middleware with, for the
+ * plan step that names one.
+ *
+ * `api.query(method, filters, options)` dispatches `[filters ?? [], options ??
+ * {}]`, so a step naming fewer than two would show an approver a call shorter
+ * than the one that runs — {@link vmReadParams}'s point, with the OPTIONS object
+ * carrying something this time.
+ *
+ * `select` IS BANDWIDTH AND THE TWO-FIELD READING IS THE CONTROL (#115). A
+ * `vm.query` row carries every device attached to the machine and this read
+ * wants two fields of it, over every VM on the system, twice per call — but a
+ * projected row comes back PADDED where the middleware is a version ahead of the
+ * client, so the fields are still named one by one below rather than the row
+ * being trusted to hold only what was asked for.
+ */
+function vmListingParams(): unknown {
+  return [[], { select: ['id', 'name'] }];
+}
+
+/**
+ * Every VM this system lists on the `vm` stack, by id.
+ *
+ * A row whose id could not be read is not in the map, which is the honest answer
+ * for a set difference taken over ids: such a row cannot be told apart from any
+ * other row missing an id, so it can neither be the clone nor rule one out. The
+ * description says the identification is over the ids the system reported.
+ *
+ * `name` is read with the same guard {@link fromVmStack} reads it with rather
+ * than through that function, which needs fields this projection does not ask
+ * for. One guard, one reading — not a second opinion about what a VM is called.
+ */
+async function readVmListing(ctx: ToolContext): Promise<VmListing> {
+  const rows = await firstValueFrom(
+    // Inlined for #115's reason: written to a `const` the options literal widens
+    // and the rows degrade from a projection to a partial of the whole entity.
+    ctx.system.client.api.query('vm.query', [], { select: ['id', 'name'] }),
+  );
+  const listing: VmListing = new Map();
+  for (const row of rows) {
+    const id = numberOrNull(row.id);
+    if (id !== null) listing.set(id, textOrNull(row.name));
+  }
+  return listing;
+}
+
+/** A listing read that completed, or the failure that stopped it. */
+interface VmListingAttempt {
+  listing: VmListing | null;
+  error: string | null;
+}
+
+/**
+ * One listing read made by `execute`, with its failure caught and named.
+ *
+ * Caught rather than thrown, as {@link attemptVmPower} is and for the same two
+ * reasons: the first failing would lose an approval already given for a mutation
+ * that is still safe, and the second failing would report a clone that HAS
+ * ALREADY BEEN MADE as a failed call.
+ */
+async function attemptVmListing(ctx: ToolContext): Promise<VmListingAttempt> {
+  try {
+    return { listing: await readVmListing(ctx), error: null };
+  } catch (reason) {
+    return { listing: null, error: errorText(reason) };
+  }
+}
+
+/**
+ * The ids the second listing named and the first did not.
+ *
+ * Null where either listing could not be read, because a difference taken
+ * against a listing that does not exist is not a shorter answer — it is no
+ * answer, and an empty list there would say no machine appeared.
+ */
+function appearedVmIds(previous: VmListing | null, resulting: VmListing | null): number[] | null {
+  if (previous === null || resulting === null) return null;
+  return [...resulting.keys()].filter((id) => !previous.has(id));
+}
+
+/** Whether the first listing named the machine this call was aimed at. */
+function sourceLookupOf(attempt: VmListingAttempt, id: number): VmLookup {
+  if (attempt.listing === null) return 'UNREADABLE';
+  return attempt.listing.has(id) ? 'FOUND' : 'NOT_FOUND';
+}
+
+/** One disk device the source VM has, as the plan names it. */
+interface VmCloneDisk {
+  /** The zvol or the path it is backed by, as the system spelled it. */
+  label: string;
+  /** The size the device declares, passed through with NO UNIT ASSERTED. */
+  size: number | null;
+  /**
+   * Whether the row named a zvol at all.
+   *
+   * A `DISK` DEVICE NEED NOT BE ZVOL-BACKED — `zvol_name` and `zvol_volsize` are
+   * both optional on the declared attributes and `vm_devices`' own description
+   * says they name the zvol "where one does", which leaves a disk attached to a
+   * host block device declaring neither. Calling every `DISK` zvol-backed would
+   * be a description promising more than the read delivers, so the plan says
+   * which of them actually named one.
+   */
+  zvolNamed: boolean;
+}
+
+/** The disks a clone of this VM would have to account for, or why none was read. */
+interface VmCloneDisks {
+  /** `DISK` devices — the ones whose zvols a clone is said to copy. */
+  disks: VmCloneDisk[];
+  /** File-backed `RAW` devices, whose treatment by a clone is unestablished. */
+  files: VmCloneDisk[];
+  /**
+   * Rows this read could NOT rule out as disks: a `dtype` it has no mapping
+   * for, a configuration that was not a record, or a row the system attributed
+   * to no machine at all.
+   *
+   * COUNTED RATHER THAN DROPPED, which is #93's direction rule. Dropping them
+   * moves the account towards "this VM has no disk", and that is the one claim
+   * this sentence must not make without having established it: TrueNAS already
+   * defines a disk kind this file does not map (`ISCSI_DISK`, which #100 names
+   * as a case to expect), so a silently shorter list is a clone described as
+   * free that fills a pool.
+   */
+  unreadable: number;
+  /** What stopped the device read, or null where it completed. */
+  error: string | null;
+}
+
+/** How a disk the system named neither a zvol nor a path for is written. */
+const UNNAMED_DISK = '(the system named no zvol or path for it)';
+
+/**
+ * The device kinds the pinned surface declares that carry no zvol of their own.
+ *
+ * Named rather than reached by a `default` arm, because the two answers are
+ * different: a kind on this list was RULED OUT as something the copy pays for —
+ * checkable against the declared attributes, none of which has a zvol field —
+ * while a kind not on it was not read at all and is counted as such.
+ */
+const NON_DISK_DEVICE_KINDS = new Set(['CDROM', 'DISPLAY', 'NIC', 'PCI', 'USB']);
+
+/** What one device row established about the space a clone of this VM would take. */
+type CloneDiskReading =
+  | { kind: 'DISK' | 'RAW'; disk: VmCloneDisk }
+  | { kind: 'UNREADABLE' }
+  | null;
+
+/**
+ * One device row, as far as the space a clone would take is concerned.
+ *
+ * Null for a row that is NOT this machine's and for a kind the surface declares
+ * with no zvol in it — both are ruled out rather than unread. The id is checked
+ * on the RESPONSE and not only asked for in the filter (#121, #153), since an
+ * unrecognised query parameter is dropped rather than refused and a filter that
+ * did not apply comes back as every device on the system, which would name
+ * another machine's disks in this plan.
+ *
+ * `UNREADABLE` for the three ways a row can fail to answer: a `vm` this tool
+ * could not read as a number, so the row names no machine and COULD BE THIS ONE
+ * (`vm_devices` says as much about the same field); an `attributes` that was not
+ * a record; and a `dtype` outside every kind named here. None of those is a
+ * device that copies nothing, and they are counted for that reason.
+ */
+function readCloneDisk(entry: unknown, id: number): CloneDiskReading {
+  const row = (recordOrNull(entry) ?? {}) as Partial<VmDeviceEntry>;
+  const owner = numberOrNull(row.vm);
+  if (owner !== null && owner !== id) return null;
+  if (owner === null) return { kind: 'UNREADABLE' };
+  const held = recordOrNull(row.attributes) ?? {};
+  const dtype = textOrNull(held['dtype']);
+  if (dtype !== null && NON_DISK_DEVICE_KINDS.has(dtype)) return null;
+  switch (dtype) {
+    case 'DISK': {
+      const disk = held as AttributesOf<'DISK'>;
+      const zvolName = textOrNull(disk.zvol_name);
+      return {
+        kind: 'DISK',
+        disk: {
+          label: zvolName ?? textOrNull(disk.path) ?? UNNAMED_DISK,
+          size: numberOrNull(disk.zvol_volsize),
+          zvolNamed: zvolName !== null,
+        },
+      };
+    }
+    case 'RAW': {
+      const raw = held as AttributesOf<'RAW'>;
+      return {
+        kind: 'RAW',
+        disk: {
+          label: textOrNull(raw.path) ?? UNNAMED_DISK,
+          size: numberOrNull(raw.size),
+          zvolNamed: false,
+        },
+      };
+    }
+    default:
+      return { kind: 'UNREADABLE' };
+  }
+}
+
+/**
+ * The disks the source VM has, read at plan time so the plan can name what the
+ * copy will occupy.
+ *
+ * ITS FAILURE DOES NOT FAIL THE PLAN. This is a supporting read for a sentence,
+ * not the existence check the plan turns on: refusing to plan because the device
+ * list would not read would refuse a clone the middleware would have accepted,
+ * which is `snapshot_task_run`'s reading of an unreadable `enabled` (#154) one
+ * family over. What the failure costs is stated instead — see
+ * {@link vmCloneSpaceSentence}.
+ *
+ * A read that answered with something other than a list is the same answer as a
+ * read that failed, and is named in the same words `vm_devices` names it in: the
+ * call directory declares this method as answering a union that also admits a
+ * bare row and a count.
+ */
+async function readVmCloneDisks(ctx: ToolContext, id: number): Promise<VmCloneDisks> {
+  let answered: unknown;
+  try {
+    answered = await firstValueFrom(
+      // Inlined for the reason {@link vmReadParams} gives.
+      ctx.system.client.api.query('vm.device.query', [['vm', '=', id]]),
+    );
+  } catch (reason) {
+    return { disks: [], files: [], unreadable: 0, error: errorText(reason) };
+  }
+  if (!Array.isArray(answered)) {
+    return { disks: [], files: [], unreadable: 0, error: NOT_A_DEVICE_LIST };
+  }
+  const disks: VmCloneDisk[] = [];
+  const files: VmCloneDisk[] = [];
+  let unreadable = 0;
+  for (const entry of answered) {
+    const read = readCloneDisk(entry, id);
+    if (read === null) continue;
+    if (read.kind === 'UNREADABLE') unreadable += 1;
+    else (read.kind === 'DISK' ? disks : files).push(read.disk);
+  }
+  return { disks, files, unreadable, error: null };
+}
+
+/**
+ * One `DISK` device in the plan, with the size it declares and no unit.
+ *
+ * A disk that named no zvol says so IN THE SAME PHRASE rather than in a sentence
+ * beside the list: adjacency is not qualification (#156), and a reader meeting
+ * the list first would take every entry in it for a zvol.
+ */
+function diskPhrase(disk: VmCloneDisk): string {
+  const size =
+    disk.size === null
+      ? 'this system reported no `zvol_volsize` this tool could read'
+      : `\`zvol_volsize\` ${disk.size}`;
+  return `${disk.label} (${size}${disk.zvolNamed ? '' : ', AND IT NAMED NO ZVOL'})`;
+}
+
+/** One `RAW` device in the plan, the same way. */
+function rawDiskPhrase(disk: VmCloneDisk): string {
+  return disk.size === null
+    ? `${disk.label} (this system reported no \`size\` this tool could read)`
+    : `${disk.label} (\`size\` ${disk.size})`;
+}
+
+/**
+ * What the `DISK` devices come to, or why they do not come to anything.
+ *
+ * All-or-nothing, under #93's direction rule: a total over the disks that DID
+ * report a size would understate what the copy can come to occupy, and a smaller
+ * figure in the one text a person reads before approving a copy is the
+ * reassuring direction to be wrong in (#154).
+ */
+function diskTotalPhrase(disks: VmCloneDisk[]): string {
+  const sizes = disks.map((disk) => disk.size);
+  if (sizes.some((size) => size === null)) {
+    return (
+      'THEY DO NOT ADD UP TO A TOTAL HERE, because this system reported no size this tool could ' +
+      'read for at least one of them and a total over the rest would understate what the copy ' +
+      'can come to occupy.'
+    );
+  }
+  // Narrowed by the check above rather than by a fallback inside the sum, which
+  // is {@link totalVcpus}'s shape: a `?? 0` there would be a branch nothing can
+  // reach, and one a later edit could reach by weakening the check.
+  return `Together they come to ${(sizes as number[]).reduce((sum, size) => sum + size, 0)}.`;
+}
+
+/**
+ * What the plan says about the `DISK` devices whose backing it could not
+ * establish.
+ *
+ * Empty where every one of them named a zvol. Where any did not, the figure
+ * above is about devices that may carry no zvol at all, and saying so is what
+ * keeps the list from reading as a list of zvols (#96's rule about a name
+ * claiming more than the read delivers, reaching a plan's prose).
+ */
+function unnamedZvolSentence(disks: VmCloneDisk[]): string {
+  if (disks.every((disk) => disk.zvolNamed)) return '';
+  return (
+    ' AT LEAST ONE OF THOSE NAMED NO ZVOL, and a `DISK` device NEED NOT BE ZVOL-BACKED — it can ' +
+    'be a host block device attached to the machine, which this API declares the same way. ' +
+    'WHETHER A CLONE COPIES ANYTHING FOR ONE IS (unconfirmed) HERE.'
+  );
+}
+
+/**
+ * What the plan says about devices it could neither read as a disk nor rule out
+ * as one.
+ *
+ * Empty where there were none. Where there were any, EVERY FIGURE ABOVE IS A
+ * FLOOR: a device that could not be read is not a device that copies nothing,
+ * and folding it into the count silently would make the reassuring answer the
+ * one a person approves against (#93, #154).
+ */
+function unreadDevicesSentence(count: number): string {
+  if (count === 0) return '';
+  return (
+    ` ${plural(count, 'device')} on this machine could be NEITHER READ AS A DISK NOR RULED OUT ` +
+    'AS ONE — a kind this tool has no mapping for, a configuration that was not a record, or a ' +
+    'row the system attributed to no machine — SO ANY FIGURE ABOVE IS A FLOOR AND NOT A TOTAL. ' +
+    'TrueNAS already defines a disk kind this tool does not map (`ISCSI_DISK`), and a device ' +
+    'that could not be read is NOT a device the copy pays nothing for.'
+  );
+}
+
+/**
+ * What the plan says where it read no `DISK` device.
+ *
+ * TAKEN BY BOTH BRANCHES THAT CAN SAY IT, which is why it is a function rather
+ * than a string written where it is first needed. "The system listed no `DISK`
+ * device" is a positive claim, and it is only true where every device WAS read:
+ * a first fix guarded the branch where nothing at all was read and left this
+ * same claim unguarded in the branch that runs when the machine has a `RAW`
+ * device beside an unreadable one, which is the case the guard exists for.
+ * {@link unreadDevicesSentence} arriving two sentences later does not repair it
+ * — adjacency is not qualification (#156), and the two sentences contradict.
+ */
+function noDiskSentence(unreadable: number): string {
+  if (unreadable === 0) {
+    return (
+      'The system listed no `DISK` device for this virtual machine when this plan was made, so ' +
+      'no zvol of its own is expected to be copied.'
+    );
+  }
+  return (
+    'THE SYSTEM LISTED NO DEVICE THIS TOOL COULD READ AS A `DISK`, AND WHETHER THIS MACHINE HAS ' +
+    'ONE IS NOT ESTABLISHED HERE — some of what it listed could be neither read as a disk nor ' +
+    'ruled out as one, which is stated below.'
+  );
+}
+
+/**
+ * What the plan says the copy will occupy, from the disks read at plan time.
+ *
+ * Four answers rather than two, and the ones a caller acts on differently are
+ * the middle pair: the devices could not be listed at all, they were listed and
+ * NONE of them could be read as a disk or ruled out as one, they were listed and
+ * none of them is a disk, or some are and they are named. An unread device list
+ * reported as "no disks" would be a clone described as free that fills a pool.
+ */
+function vmCloneSpaceSentence(disks: VmCloneDisks): string {
+  if (disks.error !== null) {
+    return (
+      'WHAT THE COPY WILL OCCUPY IS NOT ESTABLISHED HERE: the devices of this virtual machine ' +
+      `could not be listed when this plan was made (${disks.error}), so the disks that would be ` +
+      'copied were never read and NO SIZE FOR THEM IS STATED — which is not the same answer as ' +
+      'a machine with no disks.'
+    );
+  }
+  if (disks.disks.length === 0 && disks.files.length === 0) {
+    if (disks.unreadable === 0) {
+      return (
+        'THE SYSTEM LISTED NO DISK DEVICE FOR THIS VIRTUAL MACHINE when this plan was made — ' +
+        'neither a `DISK` nor a file-backed `RAW`, and every other device it listed is a kind ' +
+        'this API declares with no zvol in it — so there is no disk here for the call to copy ' +
+        'and no pool space is expected to go on one. THAT READING IS FROM PLAN TIME AND IS NOT ' +
+        'RE-CHECKED when the call runs.'
+      );
+    }
+    return (
+      'WHAT THE COPY WILL OCCUPY IS NOT ESTABLISHED HERE: the system listed no device this tool ' +
+      `could read as a disk, and ${plural(disks.unreadable, 'device')} it did list could ` +
+      'NEITHER BE READ AS ONE NOR RULED OUT AS ONE — a kind this tool has no mapping for, a ' +
+      'configuration that was not a record, or a row the system attributed to no machine. THAT ' +
+      'IS NOT THE SAME ANSWER AS A MACHINE WITH NO DISKS.'
+    );
+  }
+  const diskPart =
+    disks.disks.length === 0
+      ? noDiskSentence(disks.unreadable)
+      : 'THE SPACE THE COPY IS EXPECTED TO OCCUPY IS THE SIZE OF THE DISKS IT COPIES. The ' +
+        `system listed ${plural(disks.disks.length, '`DISK` device')} for it: ` +
+        `${disks.disks.map(diskPhrase).join(', ')}. ${diskTotalPhrase(disks.disks)} THE API ` +
+        'DECLARES NO UNIT FOR THOSE NUMBERS and none is asserted here, so they are reported as ' +
+        'the system spelled them and are not to be converted. They are the sizes the DISKS ARE ' +
+        'DECLARED AT, and WHETHER THE COPY TAKES THAT SPACE AT ONCE OR TAKES IT AS IT DIVERGES ' +
+        'FROM THE SOURCE IS (unconfirmed) HERE: nothing on this API says which and it was not ' +
+        `read off a live system.${unnamedZvolSentence(disks.disks)}`;
+  const filePart =
+    disks.files.length === 0
+      ? ''
+      : ` IT ALSO HAS ${plural(disks.files.length, 'file-backed `RAW` disk device')} — ` +
+        `${disks.files.map(rawDiskPhrase).join(', ')} — AND WHAT A CLONE DOES WITH ONE IS ` +
+        '(unconfirmed) HERE: nothing on this API says whether the image file is copied, shared ' +
+        'with the source, or left out of the clone, so its size is NOT counted above and a ' +
+        'clone that ends up sharing that file with the source is NOT ruled out.';
+  return `${diskPart}${filePart}${unreadDevicesSentence(disks.unreadable)}`;
+}
+
+/**
+ * What a clone copies, in the plan's own words.
+ *
+ * One string because it is one text and every clause is load-bearing: the
+ * devices clause is what stops this reading as a copy of a configuration, the
+ * zvol clause is what tells an approver the pool pays for it, and the last
+ * sentence is what keeps both from reading as something this catalog checked.
+ * Shared by the plan and the description so that no later edit can keep one and
+ * drop the other, as `vm_restart`'s account of its own composition is.
+ */
+const CLONE_COMPOSITION =
+  'A CLONE IS NOT ONLY A COPY OF THE CONFIGURATION. It copies the virtual machine record, ' +
+  'every device attached to it, AND THE ZVOLS BEHIND ITS DISK DEVICES — so the new machine ' +
+  'gets disks of its own holding what the source VM had, and the pool pays for them. NONE OF ' +
+  'THAT IS ON THIS API: `vm.clone` takes the id and an optional name, answers a bare boolean, ' +
+  'and states none of it — the account is read from the TrueNAS implementation and is NOT ' +
+  'something this catalog can check.';
+
+/** What the plan says about the name the clone will end up with. */
+function vmCloneNameSentence(args: VmCloneArgs): string {
+  if (args.name !== null) {
+    return (
+      `The clone is created under the name you gave, "${args.name}". THIS PLAN DOES NOT CHECK ` +
+      'whether a virtual machine of that name already exists, and what the middleware does with ' +
+      'one that does is (unconfirmed) here.'
+    );
+  }
+  return (
+    'NO NAME WAS GIVEN, SO THE MIDDLEWARE DERIVES ONE from the source VM\'s own name. WHAT IT ' +
+    'DERIVES IS (unconfirmed) HERE: nothing on this API surface states the rule, and it was not ' +
+    'read off a live system — so the name this clone ends up with is NOT predictable from this ' +
+    'plan. It is read back afterwards and reported as `clone_name`; pass `name` to choose it.'
+  );
+}
+
+/**
+ * What the plan adds about the state the source machine is in.
+ *
+ * Empty for every state but one, INCLUDING an unreadable one, for
+ * {@link vmStopEffectSentence}'s reason: {@link vmStateSentence} has already
+ * said the state could not be read.
+ */
+function vmCloneRunningSentence(reading: VmPowerReading): string {
+  if (reading.state !== 'RUNNING') return '';
+  return (
+    ' IT READ AS `RUNNING` WHEN THIS PLAN WAS MADE. Whether the middleware accepts a clone of a ' +
+    'running machine, and what the copied disks hold if it does — a running guest has writes it ' +
+    'has not flushed — is (unconfirmed) here: nothing on this API says, and it was not read off ' +
+    'a live system. This plan neither refuses such a machine nor promises the call is accepted.'
+  );
+}
+
+export const vmClone: MutatingTool = {
+  name: 'vm_clone',
+  description:
+    'Copies one virtual machine on a TrueNAS system — its configuration, its ' +
+    'devices, and the zvols behind its disks — into a new virtual machine. ' +
+    'Two-phase: called without a confirmation_token it returns a plan for user ' +
+    'approval; called with one it makes the copy. ONLY THE OLDER ' +
+    'LIBVIRT-BACKED VMs CAN BE CLONED HERE — the ones `vms_list` reports with ' +
+    "`source` `vm`. `id` is that entry's numeric `id` on the system being " +
+    'targeted, AND IT NAMES THE MACHINE THAT IS COPIED, which this tool does ' +
+    'not change; AN ENTRY WHOSE `source` IS `virt_instance` HAS A STRING id AND ' +
+    'IS A DIFFERENT STACK THIS TOOL CANNOT REACH, and passing one is an error ' +
+    'saying so. PLANNING AGAINST AN id NO VIRTUAL MACHINE HAS FAILS naming that ' +
+    'id, so an approved plan is always about a machine that existed when it was ' +
+    'made. THIS COPIES MORE THAN A CONFIGURATION: the clone gets the devices ' +
+    'attached to the source and ZVOLS OF ITS OWN BEHIND ITS DISKS, so IT ' +
+    'CONSUMES POOL SPACE, and the plan names the disks it read and what they ' +
+    'come to — or says outright that it could not read them, which is not the ' +
+    'same answer as a machine with no disks. WHERE A DEVICE COULD BE NEITHER ' +
+    'READ AS A DISK NOR RULED OUT AS ONE THE PLAN SAYS ITS FIGURE IS A FLOOR ' +
+    'RATHER THAN A TOTAL, and a `DISK` device that named no zvol is named as ' +
+    'that rather than counted as one. NEITHER THAT ACCOUNT NOR THE ' +
+    'NAMING RULE BELOW IS ON THIS API SURFACE — `vm.clone` takes the id and an ' +
+    'optional name and answers a bare boolean — SO BOTH ARE READ FROM THE ' +
+    'TRUENAS IMPLEMENTATION AND ARE NOT SOMETHING THIS CATALOG CAN CHECK. ' +
+    '`name` is the name to give the clone. OMITTED, THE MIDDLEWARE DERIVES ONE ' +
+    "FROM THE SOURCE VM'S NAME, AND WHAT IT DERIVES IS (unconfirmed) HERE: the " +
+    'rule is not stated by this API and was not read off a live system, so the ' +
+    'name is not predictable before the call — `clone_name` is what it actually ' +
+    'ended up with. THE RESULT IDENTIFIES THE CLONE BY RE-READING AND NOT BY ' +
+    'TRUSTING THE ANSWER: `vm.clone` returns a bare `true` or `false` that does ' +
+    'not name what it made, so this tool lists every virtual machine on the ' +
+    '`vm` stack immediately before the call and again immediately after it, and ' +
+    'THE CLONE IS THE id THE SECOND LISTING NAMED AND THE FIRST DID NOT. ' +
+    '`clone_id` is that id and `clone_name` the name the second listing ' +
+    'reported for it, null where the system reported none this tool could read. ' +
+    '`clone_id` IS NULL WHENEVER EXACTLY ONE NEW MACHINE WAS NOT SEEN, and ' +
+    '`new_vm_ids` is what separates the cases: it is every id the second ' +
+    'listing named and the first did not, so an EMPTY list is two readings that ' +
+    'showed no new machine — which is NOT proof the clone was not made, since ' +
+    'a machine the system had not listed by the time of the second read looks ' +
+    'the same — and a list of MORE THAN ONE is a system on which something else ' +
+    'appeared as well, where this tool will not guess which is yours. ' +
+    '`new_vm_ids` IS NULL WHERE EITHER LISTING COULD NOT BE READ, which is a ' +
+    'third case and not an empty one, with `previous_read_error` and ' +
+    '`resulting_read_error` naming why and null otherwise. The identification ' +
+    'is over THE IDS THE SYSTEM REPORTED and a row carrying none is in neither ' +
+    'listing. `call_result` is the boolean the call itself answered, null where ' +
+    'it answered something else, AND IT IS NOT WHERE ANY OF THE ABOVE COMES ' +
+    'FROM — a `true` beside a null `clone_id` is the call reporting success and ' +
+    'this tool being unable to say what it made. `source_vm_id` is the machine ' +
+    'that was copied and `source_vm_name` the name the FIRST listing gave it, ' +
+    'with `source_lookup` saying what that listing did: `FOUND`, `NOT_FOUND` ' +
+    'for a listing that completed and did not name it, `UNREADABLE` for one ' +
+    'that failed. `requested_name` is the name you asked for, null where you ' +
+    'asked for none. THE CALL IS MADE WHATEVER EITHER LISTING SAID AND NOTHING ' +
+    'BRANCHES ON EITHER, because what runs must be what was approved — and a ' +
+    'listing that failed after the call is not a failed call: the clone was ' +
+    'made and this tool simply could not establish what. NOTHING IN THIS ' +
+    'CATALOG DELETES THE CLONE, OR ITS ZVOLS, OR THE SOURCE MACHINE. ' +
+    "`destructiveness` is `reversible` because the operation destroys nothing " +
+    'ITSELF — it adds a machine — and that MUST NOT be read as "this catalog ' +
+    'can undo it": undoing a clone means deleting a VM and the zvols behind its ' +
+    'disks, and there is no tool here that does either. The TrueNAS web ' +
+    'interface is where a clone is removed. THIS TOOL DOES NOT START THE CLONE ' +
+    '(`vm_start` does), does not create, change or delete a virtual machine, ' +
+    'and does not clone an incus-backed instance.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'integer',
+        description:
+          "The virtual machine to copy, by its numeric `id` as `vms_list` " +
+          'reports it for an entry whose `source` is `vm`, on the system being ' +
+          'targeted. This machine is read and copied; it is not changed.',
+      },
+      name: {
+        type: 'string',
+        minLength: 1,
+        description:
+          'The name to give the clone. Omitted, the middleware derives one ' +
+          "from the source VM's name by a rule this API does not state — " +
+          '`clone_name` in the result is the name it actually got.',
+      },
+    },
+    required: ['id'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // A clone adds a virtual machine and removes nothing, so this is the easy case
+  // for the field and the hard one for the reading of it — #153's trap, which
+  // `snapshot_clone` hit first. `reversible` records THE OPERATION; undoing this
+  // one means deleting the VM and the zvols behind its disks, and NO TOOL HERE
+  // DOES EITHER. The description says that outright, next to the field's own
+  // meaning, because a caller reads a reversal it could ask for into the word.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const args = parseVmCloneArgs(rawArgs);
+    return { id: args.id, name: args.name };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const args = parseVmCloneArgs(rawArgs);
+    const reading = await readVmPower(ctx, args.id);
+    if (!reading.listed) {
+      throw new Error(
+        `No virtual machine with id ${args.id} on the \`vm\` stack of this system — ${VM_IDS_FROM}`,
+      );
+    }
+    // Read after the machine is known to exist, and allowed to fail: what it
+    // establishes is a sentence in the plan rather than whether there is a plan.
+    const disks = await readVmCloneDisks(ctx, args.id);
+    return [
+      {
+        method: 'vm.query',
+        params: vmListingParams(),
+        description:
+          'List every virtual machine on the `vm` stack of this system, to record which ' +
+          'machines existed before this call. Changes nothing. THIS SAME READ IS MADE AGAIN ' +
+          'IMMEDIATELY AFTER THE CALL — it is listed once because it is one call made twice — ' +
+          'and THE CLONE IS IDENTIFIED AS THE MACHINE THE SECOND LISTING NAMES AND THE FIRST ' +
+          'DID NOT, because `vm.clone` answers a bare boolean that does not say what it made.',
+      },
+      {
+        method: 'vm.clone',
+        params: vmCloneParams(args),
+        description:
+          `Clone ${describeVm(reading, args.id)}, which is READ AND COPIED AND NOT CHANGED. ` +
+          `${vmStateSentence(reading)}${vmCloneRunningSentence(reading)} ${CLONE_COMPOSITION} ` +
+          `${vmCloneSpaceSentence(disks)} ${vmCloneNameSentence(args)} NOTHING IN THIS CATALOG ` +
+          'DELETES THE MACHINE THIS MAKES, OR THE ZVOLS BEHIND ITS DISKS.',
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const args = parseVmCloneArgs(rawArgs);
+    const previous = await attemptVmListing(ctx);
+    // Unconditional, whatever the listing said and whether or not it succeeded:
+    // branching on state read at execution time is what the confirmation token
+    // cannot bind.
+    const answered: unknown = await firstValueFrom(
+      ctx.system.client.api.call('vm.clone', vmCloneParams(args)),
+    );
+    const resulting = await attemptVmListing(ctx);
+    const appeared = appearedVmIds(previous.listing, resulting.listing);
+    // Exactly one, or none named: two machines that were not there before are
+    // two answers and this tool has no way to tell which of them it made.
+    const cloneId = appeared !== null && appeared.length === 1 ? appeared[0] : null;
+    return {
+      source_vm_id: args.id,
+      source_vm_name: previous.listing?.get(args.id) ?? null,
+      source_lookup: sourceLookupOf(previous, args.id),
+      requested_name: args.name,
+      // The declared `boolean` is a claim about what the middleware sends rather
+      // than the value received (#91), and this is the one field read off the
+      // answer — every other field here is read back from the system.
+      call_result: booleanOrNull(answered),
+      previous_read_error: previous.error,
+      resulting_read_error: resulting.error,
+      new_vm_ids: appeared,
+      clone_id: cloneId,
+      clone_name: cloneId === null ? null : (resulting.listing?.get(cloneId) ?? null),
     };
   },
 };

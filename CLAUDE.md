@@ -2450,6 +2450,99 @@ than the `PoolDatasetEntryProperty` objects that list selects among, so
 narrowing it costs nothing the mapping needs — the same reading of the declared
 type that #91 asks for, applied to an `extra` rather than to a field.
 
+### What a mutation CREATED is identified by a listing on both sides (#170)
+
+`vm_clone` is the first tool here that makes something new, and `vm.clone`
+answers a bare `boolean`. Every earlier reading of an outcome had something to
+aim at: `scheduled_task_set_enabled` gets the updated entity back (#121),
+`alerts_dismiss` gets nothing and reports a fact about the alert it NAMED
+(#119), and `snapshot_clone` re-reads `pool.dataset.query` for the destination
+the CALLER supplied (#153). None of those works here — the thing to report did
+not exist when the call was made, and `true` does not say what was made.
+
+**So the plan's read is a LISTING, and the clone is the id the second listing
+names and the first did not.** Both listings are the same call from one helper,
+so the plan lists it once and that step says in words that it runs again (#156).
+What is worth writing down is not the technique but what forced it: **with
+`name` omitted the middleware derives the clone's name by a rule this API
+surface does not state**, so there is no name to look the new machine up under,
+and a re-read that guessed one would report a clone it failed to find as a clone
+that was not made. A difference over ids needs no such guess and is the same
+derivation whether or not the caller chose a name — which is why it is taken
+even in the case where a name WAS given and a lookup would have worked.
+
+**Ask what a mutating tool's result has to NAME before choosing how to read it
+back**, and where the identifier is the middleware's to invent, read the
+difference rather than the entity.
+
+Three things follow, and the first is the one a later tool is most likely to get
+wrong:
+
+- **The difference is null where either listing failed, never empty.** An empty
+  list says no machine appeared, and a difference taken against a listing that
+  does not exist has established nothing. Both are reported — `new_vm_ids`
+  beside `clone_id` — because this is #134's case: the causes behind a null
+  `clone_id` are ones a caller acts on differently. Empty is "two readings
+  showed nothing new", which **is not proof the clone was not made**; more than
+  one is a system where something else appeared as well, and this tool will not
+  guess which is yours.
+- **The boolean is still read and is still not the answer.** `vm.clone` declares
+  `response: boolean`, so it is reported as `call_result` under #164's rule that
+  a method declaring a real response gets it read — and the description says
+  outright that a `true` beside a null `clone_id` is the call reporting success
+  and this tool being unable to say what it made.
+- **`select` is what makes a listing on both sides affordable, and it is not the
+  boundary.** A `vm.query` row carries every device attached to the machine and
+  this read wants two fields of it, over every VM, twice per call. The two
+  fields are still named one by one, because a projected row comes back PADDED
+  where the middleware is a version ahead of the client (#115).
+
+**The space a copy will occupy is a plan-time supporting read, and its failure
+does not fail the plan** — `snapshot_task_run`'s reading of an unreadable
+`enabled` (#154). What the failure costs is stated instead, and there are four
+answers rather than two: the devices could not be listed, they were listed and
+none could be read as a disk OR ruled out as one, they were listed and none is a
+disk, or some are and they are named. **An unread device list reported as "no
+disks" is a clone described as free that fills a pool.** The total over the
+disks is all-or-nothing under #93 for the same direction — a total over the ones
+that DID report a size understates what the copy can come to occupy, and the
+smaller figure is the reassuring one to be wrong with in the one text a person
+reads before approving (#154).
+
+**A row that could not be read is COUNTED, and the figure beside it is a floor.**
+`readCloneDisk` has three ways to fail to answer — a `dtype` outside every kind
+named here, an `attributes` that was not a record, and a `vm` this tool could
+not read as a number, which names no machine and could be this one. Dropping any
+of them moves the account towards "this VM has no disk", which is the claim the
+sentence must not make: TrueNAS already declares a disk kind this file does not
+map (`ISCSI_DISK`, which #100 names as a case to expect), so a silently shorter
+list is exactly the free-looking clone above. **The kinds that ARE ruled out are
+named in a set rather than reached by a `default` arm** (`CDROM`, `DISPLAY`,
+`NIC`, `PCI`, `USB`) — none declares a zvol field, which is checkable against the
+client, and the two answers are different: ruled out, versus not read at all.
+
+**A `DISK` device need not be zvol-backed, and calling every one of them that
+is #96's mistake in a plan's prose.** `zvol_name` and `zvol_volsize` are both
+optional on the declared attributes and `vm_devices` already says they name the
+zvol "where one does" — a disk attached to a host block device declares neither.
+So the plan names which of them reported a zvol, **in the same phrase as the
+size rather than in a sentence beside the list**: adjacency is not qualification
+(#156), and a reader meeting the list first would take every entry in it for a
+zvol.
+
+`zvol_volsize` and a `RAW` disk's `size` carry **no unit** in the plan, which is
+`vm_devices`' own reading of those two fields (#96) rather than a second opinion
+about them. What a clone does with a file-backed `RAW` disk is `(unconfirmed)`:
+nothing on this surface says whether the image is copied, shared or left out, so
+its size is named and NOT counted in the figure, and a clone that ends up
+sharing that file with the source is not ruled out.
+
+**`reversible` is #153's trap a third time.** The operation adds a machine and
+removes nothing, which is the easy case for the field and the hard one for the
+reading of it — undoing this clone means deleting a VM and the zvols behind its
+disks, and no tool here does either. Said outright in the description, next to
+the field's own meaning.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
