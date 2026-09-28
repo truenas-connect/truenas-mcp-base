@@ -2543,6 +2543,104 @@ reading of it — undoing this clone means deleting a VM and the zvols behind it
 disks, and no tool here does either. Said outright in the description, next to
 the field's own meaning.
 
+### `client.ops` is the seam where a method changes SHAPE, not just name (#173)
+
+`src/tools/containers.ts` is the first family written against
+`system.client.ops.*` rather than `api.call`/`api.job`, and the case for it is
+narrower than "it is version-agnostic". `ApiDirectoryByVersion` already resolves
+which methods EXIST, and `ApiSurface` being the oldest directory (#91) already
+makes that conservative. What neither has anything for is a method that stops
+being a job: `containerStart` emits `Job` updates on v25.10 and a single `null`
+on v26+, and `containerRestart` has no method at all on v26+ and is composed
+client-side from a stop and a start. The client states the trap on
+`containerDelete` in its own words — reaching for `api.call('container.delete',
+…)` "does not compile on v26+ and would not track the job if it did".
+
+**Ask whether the method MOVES or whether the operation CHANGES SHAPE.** A method
+that only exists on newer versions is what the directory is for; one that
+changes between a call and a job, or that is synthesised out of two others, is
+what `ops` is for. This ticket adds a seam and migrates nothing: there is no
+mapping for any of the existing `api.call`/`api.job` sites, and inventing one
+would be a second opinion about calls the directory already types precisely.
+
+### What the seam does not absorb is REPORTED, not hidden (#173)
+
+`ops` normalizes two middleware payloads into one `Container` and **neither
+version fills all of it**: v25.10's mapping sets `cpu`, `memory` and `image` and
+never `description`; v26+'s sets `description` and never the other three. So a
+null in any of the four means either "this container has no such value" or "this
+version does not report that field at all", and the tool cannot tell them apart
+from the row. `force` is the same shape one level up — on v25.10 it is
+`virt.instance.stop`'s own force, and on v26+ the mapping writes it into BOTH
+`container.stop`'s `force` and its `force_after_timeout`, while `timeout` is not
+sent at all because that API has no such parameter.
+
+So `container_list` reports `api_version`, every power tool's result carries it,
+and every plan names it. **Reporting the version is not dispatching on it** —
+nothing in the file branches on the version, which is the whole point of the
+seam — and the alternative was four fields and one argument that a caller cannot
+read. #120's rule is that what could not be established is stated rather than
+settled; here it CAN be established, from one field, so stating "this is
+version-dependent and we do not say which" would have been the worse half of
+that rule.
+
+**A plan step then names the OPERATION and not a middleware method**, which is
+this family's one deviation from `PlanStep.method`'s usual content and is what
+keeps the plan true under #119. Which method runs is decided at connect time;
+naming one of the two would show an approver a call that may not be the one
+made. The step's description names both, and the version sentence says which
+applies.
+
+### A bounded watch over `ops` is not `watchJob`, and it has a fourth answer (#173)
+
+`watchJob` (#166) takes the two stages apart — a `callAndGetJobId` observable and
+`api.trackJob` — precisely so that a failure while FOLLOWING a job is reported as
+what was established rather than as the call failing, and so the job id survives
+it (#122). **`ops` pipes those two stages together inside `api.job` and hands
+back one `Observable<Job | null>`, so that seam is not reachable.** The family's
+own watch separates something coarser: an error after at least one emission ends
+the watch, and an error before any emission fails the call. A failure in the
+window between the middleware accepting the operation and the first emission
+therefore reports a running operation as a failed call. **That is a real cost of
+the route and the descriptions say so** — it is not a reason to dial the methods
+directly, which would not compile across the versions this family exists to
+cover.
+
+What the ops watch answers that `watchJob` never has to is **whether there was a
+job at all**, so `dispatch` is four-valued: `JOB`, `SYNCHRONOUS` (only `null`
+emitted — the version performed it inline, so a null `job_id` is the expected
+answer rather than a correlation that failed), `UNREADABLE` (something arrived
+that was neither, kept separate for #101's reason) and `UNESTABLISHED` (nothing
+arrived inside the bound). It is NOT promoted to `common.ts`: #86's line is that
+what belongs there says the same thing for every family, and there is one family
+over this seam — the copies that earned `watchJob` its place were four.
+
+### A spec over `ops` drives the real mapping, over a fake `api` (#173)
+
+Every other tool spec fakes `client.api`. A spec over `ops` has two seams to
+choose between, and `src/testing/ops-systems.ts` takes the lower one: it
+constructs the real `TrueNasApiClientV2510`/`V26`/`V27`, replaces `api` with
+spies, and lets the client's own mapping run. **Faking `client.ops` instead
+would assert the tool against this repository's belief about what each version
+emits**, and three of those beliefs are not obvious — v26+ `containerStart`
+emits `null` and never a job, v26+ `containerRestart` emits the stop job's
+updates and THEN a `null`, and it buffers those updates through `toArray()` so
+NOTHING is emitted until the stop job has finished. The third is the one a
+hand-written fake would certainly have got wrong: the same stalled stop job
+reaches `container_stop` as progress and reaches `container_restart` as nothing
+at all.
+
+Two mechanical facts that make it work, both checked rather than assumed:
+
+- **The constructor opens no socket** — the connection's lifecycle is a cold
+  observable gated on an `enabled` flag, passed false — but it DOES subscribe a
+  20-second ping `interval`, which holds the vitest worker's event loop open.
+  The fixture calls `close()` before handing the client back, which releases the
+  timer and leaves `ops` working, since the mappings read `this.api` at call
+  time.
+- **It is a separate file from `fake-systems.ts`**, which every tool spec
+  imports. Nothing about this seam belongs in a blast radius that wide.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

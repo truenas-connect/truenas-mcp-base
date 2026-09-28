@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the seventy-one sketch tools', () => {
+  it('registers the seventy-five sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -31,6 +31,7 @@ describe('createDefaultCatalog', () => {
       'vms_list',
       'vm_logs',
       'vm_devices',
+      'container_list',
       'alerts_list',
       'snapshots_list',
       'replication_status',
@@ -76,7 +77,22 @@ describe('createDefaultCatalog', () => {
       'vm_restart',
       'vm_clone',
       'service_control',
+      'container_start',
+      'container_stop',
+      'container_restart',
     ]);
+  });
+
+  it('does not advertise the container power tools to a read-only credential', () => {
+    const readOnly = createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name);
+    expect(readOnly).not.toContain('container_start');
+    expect(readOnly).not.toContain('container_stop');
+    expect(readOnly).not.toContain('container_restart');
+  });
+
+  it('advertises container_list to a read-only credential, and only it', () => {
+    const readOnly = createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name);
+    expect(readOnly.filter((name) => name.startsWith('container_'))).toEqual(['container_list']);
   });
 
   it('does not advertise the mutating alert pair to a read-only credential', () => {

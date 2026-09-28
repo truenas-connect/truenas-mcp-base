@@ -103,6 +103,7 @@ export {
   vmsList,
   vmLogs,
   vmDevices,
+  containerList,
   alertsList,
   alertSettings,
   snapshotsList,
@@ -148,4 +149,7 @@ export {
   vmRestart,
   vmClone,
   serviceControl,
+  containerStart,
+  containerStop,
+  containerRestart,
 } from '@/tools/index';
