@@ -24,7 +24,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `system_dataset_config`,
   `disks_list`, `disks_temperature`, `apps_list`,
   `app_engine_status`, `apps_update_summary`,
-  `vms_list`, `vm_logs`, `vm_devices`, `alerts_list`, `snapshots_list`,
+  `vms_list`, `vm_logs`, `vm_devices`, `container_list`,
+  `alerts_list`, `snapshots_list`,
   `replication_status`, `replication_topology`,
   `snapshot_tasks_list`, `cloudsync_tasks_list`, `automated_tasks_list`,
   `tasks_recent_runs`,
@@ -42,11 +43,15 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `alerts_restore`, `scheduled_task_set_enabled`, `cloudsync_run`,
   `automated_task_set_enabled`, `snapshot_clone`, `snapshot_task_run`,
   `snapshot_set_hold`, `vm_start`, `vm_stop`, `vm_restart`, `vm_clone`,
-  `service_control` —
-  `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart` and
-  `service_control` the five that start a background job,
+  `service_control`, `container_start`, `container_stop`, `container_restart` —
+  `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
+  `service_control`, `container_stop` and `container_restart` the seven that
+  start a background job,
   which each watches for a bounded time and then reports on rather than waiting
-  out. The three VM power tools and `vm_clone` are the catalog's only mutations
+  out — and `container_start` the one whose answer depends on the version it is
+  talking to, a job on TrueNAS 25.10 and a synchronous call on 26 and later,
+  which its result says rather than flattening.
+  The three VM power tools and `vm_clone` are the catalog's only mutations
   over the older libvirt-backed `vm` stack, and the power tools between them are
   what makes
   `destructiveness: 'reversible'` true in the strong sense for the first time
@@ -106,6 +111,18 @@ confirmation UX, audit sinks) enters through injected interfaces.
   on or off between them and neither covers the other's kinds: the first takes
   the six that run on a schedule, and the second the init/shutdown scripts,
   which run at a point in the system's lifecycle instead.
+  `container_list` and the three container power tools are the first family
+  written against the client's `ops` layer rather than `api.call`, because every
+  one of these operations changes SHAPE between TrueNAS versions and not just
+  name — a query that moves method, a start that stops being a job, a restart
+  that has no method at all on the newer versions and is composed from a stop
+  and a start. What `ops` does not absorb is reported rather than hidden: the
+  negotiated version is in every result and every plan, because two versions
+  populate different fields of one container row and `force` reaches a different
+  parameter on each. `container_delete` is deliberately absent — its `recursive`
+  option destroys the container's dataset, its snapshots and clones of them
+  wherever they live, which is the irreversible composition the catalog rejects
+  at registration.
 - **System registry** — 1..N named systems, each owning its own
   `@truenas/api-client` instance and credentials; `systems` selector
   (name / list / `all`, defaulting when one system is registered).

@@ -5,6 +5,12 @@ import { appEngineStatus, appsList, appsUpdateSummary } from '@/tools/apps';
 import { fcList, iscsiList, nvmeofList } from '@/tools/block';
 import { bootPoolStatus } from '@/tools/boot';
 import { certificatesList } from '@/tools/certificates';
+import {
+  containerList,
+  containerRestart,
+  containerStart,
+  containerStop,
+} from '@/tools/containers';
 import { cloudCredentialsList } from '@/tools/credentials';
 import { disksList, disksTemperature } from '@/tools/disks';
 import { fleetComplianceReport, fleetHealthRollup, haStatus } from '@/tools/fleet';
@@ -57,7 +63,7 @@ import {
 } from '@/tools/tasks';
 import { vmClone, vmDevices, vmLogs, vmRestart, vmsList, vmStart, vmStop } from '@/tools/vms';
 
-/** The sketch's catalog: fifty-seven read-only tools plus fourteen mutating tools. */
+/** The sketch's catalog: fifty-eight read-only tools plus seventeen mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -86,6 +92,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(vmsList);
   catalog.register(vmLogs);
   catalog.register(vmDevices);
+  catalog.register(containerList);
   catalog.register(alertsList);
   catalog.register(snapshotsList);
   catalog.register(replicationStatus);
@@ -131,6 +138,9 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(vmRestart);
   catalog.register(vmClone);
   catalog.register(serviceControl);
+  catalog.register(containerStart);
+  catalog.register(containerStop);
+  catalog.register(containerRestart);
   return catalog;
 }
 
@@ -151,6 +161,10 @@ export {
   cloudCredentialsList,
   cloudsyncRun,
   cloudsyncTasksList,
+  containerList,
+  containerRestart,
+  containerStart,
+  containerStop,
   createSnapshot,
   datasetPermissions,
   directoryServicesStatus,
