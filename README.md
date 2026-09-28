@@ -59,7 +59,10 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `vm_clone` copies a VM, its devices and the zvols behind its disks into a new
   machine, so it destroys nothing and still consumes pool space — its plan names
   the disks it read and what they come to, or says outright that it could not
-  read them, which is not the same answer as a machine with no disks. It is
+  read them, which is not the same answer as a machine with no disks. A device
+  it can neither read as a disk nor rule out as one makes that figure a floor
+  rather than a total, and a `DISK` device that named no zvol is named as that
+  rather than counted as one. It is
   `reversible` in the same narrow sense `snapshot_clone` is: nothing here
   deletes the machine it makes, or its zvols, and the description says so beside
   the field. Its method answers a bare boolean that does not name what it

@@ -1109,13 +1109,36 @@ describe('vm_clone', () => {
     });
 
     describe('the space the copy will occupy', () => {
-      it('names each zvol-backed disk and what they come to', async () => {
+      it('names each disk and what they come to', async () => {
         const text = await planText({
           devices: { rows: [zvol('tank/builder-0', 20), zvol('tank/builder-1', 30)] },
         });
         expect(text).toContain('tank/builder-0 (`zvol_volsize` 20)');
         expect(text).toContain('tank/builder-1 (`zvol_volsize` 30)');
         expect(text).toContain('Together they come to 50.');
+      });
+
+      it('does not call a DISK zvol-backed where the system named no zvol for it', async () => {
+        // A `DISK` can be a host block device attached to the machine, which
+        // this API declares the same way — `zvol_name` and `zvol_volsize` are
+        // both optional. Calling every one of them zvol-backed is a description
+        // promising more than the read delivers.
+        const text = await planText({
+          devices: {
+            rows: [device('DISK', { path: '/dev/disk/by-id/wwn-0x5000c500', zvol_name: null })],
+          },
+        });
+        expect(text).toContain('/dev/disk/by-id/wwn-0x5000c500');
+        expect(text).toContain('AND IT NAMED NO ZVOL');
+        expect(text).toContain('a `DISK` device NEED NOT BE ZVOL-BACKED');
+        expect(text).toContain('WHETHER A CLONE COPIES ANYTHING FOR ONE IS (unconfirmed) HERE');
+        expect(text).not.toContain('zvol-backed `DISK` device for it');
+      });
+
+      it('adds no such caveat where every disk named its zvol', async () => {
+        const text = await planText({ devices: { rows: [zvol('tank/builder-0', 20)] } });
+        expect(text).not.toContain('AND IT NAMED NO ZVOL');
+        expect(text).not.toContain('NEED NOT BE ZVOL-BACKED');
       });
 
       it('asserts no unit for those numbers', async () => {
@@ -1158,14 +1181,34 @@ describe('vm_clone', () => {
 
       it('says no zvol is expected where every disk it has is file-backed', async () => {
         // The RAW caveat alone would leave a reader inferring a zvol they were
-        // never told about; "no zvol is expected to be copied" is the half that
-        // says what the pool is NOT being asked for.
+        // never told about; "no zvol of its own is expected to be copied" is the
+        // half that says what the pool is NOT being asked for.
         const text = await planText({
           devices: { rows: [device('RAW', { path: '/mnt/tank/disk.img', size: 99 })] },
         });
-        expect(text).toContain('The system listed no zvol-backed `DISK` device');
+        expect(text).toContain('The system listed no `DISK` device');
         expect(text).toContain('/mnt/tank/disk.img (`size` 99)');
         expect(text).toContain('WHAT A CLONE DOES WITH ONE IS (unconfirmed) HERE');
+      });
+
+      it('names a raw disk the system gave no path for', async () => {
+        expect(await planText({ devices: { rows: [device('RAW', { size: 99 })] } })).toContain(
+          '(the system named no zvol or path for it) (`size` 99)',
+        );
+      });
+
+      it('will not read a device row that is not a record as a machine with no disks', async () => {
+        // The row answers no `vm` and no `dtype`, so it is a device that could
+        // not be read rather than one ruled out.
+        expect(await planText({ devices: { rows: [7] } })).toContain(
+          'NEITHER BE READ AS ONE NOR RULED OUT AS ONE',
+        );
+      });
+
+      it('says a raw disk reported no size it could read rather than leaving it out', async () => {
+        expect(
+          await planText({ devices: { rows: [device('RAW', { path: '/mnt/tank/disk.img' })] } }),
+        ).toContain('/mnt/tank/disk.img (this system reported no `size` this tool could read)');
       });
 
       it('says the disks could not be read where the device read failed', async () => {
@@ -1206,14 +1249,52 @@ describe('vm_clone', () => {
 
       it('names a disk the system gave neither a zvol nor a path for', async () => {
         expect(await planText({ devices: { rows: [device('DISK', { zvol_volsize: 20 })] } })).toContain(
-          '(the system named no zvol or path for it) (`zvol_volsize` 20)',
+          '(the system named no zvol or path for it) (`zvol_volsize` 20, AND IT NAMED NO ZVOL)',
         );
       });
 
-      it('counts no device kind that is not a disk', async () => {
-        expect(await planText({ devices: { rows: [device('NIC', { mac: 'aa:bb' })] } })).toContain(
-          'THE SYSTEM LISTED NO DISK DEVICE FOR THIS VIRTUAL MACHINE',
-        );
+      it('rules out a device kind this API declares with no zvol in it', async () => {
+        // Ruled out rather than unread: none of the five declares a zvol field,
+        // which is checkable against the client rather than assumed.
+        const text = await planText({ devices: { rows: [device('NIC', { mac: 'aa:bb' })] } });
+        expect(text).toContain('THE SYSTEM LISTED NO DISK DEVICE FOR THIS VIRTUAL MACHINE');
+        expect(text).not.toContain('FLOOR');
+      });
+
+      it.each([
+        ['an unmapped disk kind', device('ISCSI_DISK', { iscsi_target: 'tgt' })],
+        ['a configuration that was not a record', { id: 11, vm: 4, attributes: 'nope' }],
+        ['a row the system attributed to no machine', { ...device('DISK', {}), vm: null }],
+      ])('will not read %s as a machine with no disks', async (_case, row) => {
+        // TrueNAS already defines a disk kind this tool does not map, so a
+        // silently shorter list is a clone described as free that fills a pool.
+        const text = await planText({ devices: { rows: [row] } });
+        expect(text).toContain('WHAT THE COPY WILL OCCUPY IS NOT ESTABLISHED HERE');
+        expect(text).toContain('NEITHER BE READ AS ONE NOR RULED OUT AS ONE');
+        expect(text).toContain('NOT THE SAME ANSWER AS A MACHINE WITH NO DISKS');
+      });
+
+      it('makes a figure beside an unreadable device a floor rather than a total', async () => {
+        const text = await planText({
+          devices: { rows: [zvol('tank/builder-0', 20), device('ISCSI_DISK', { iscsi_target: 't' })] },
+        });
+        expect(text).toContain('Together they come to 20.');
+        expect(text).toContain('1 device on this machine could be NEITHER READ AS A DISK');
+        expect(text).toContain('SO ANY FIGURE ABOVE IS A FLOOR AND NOT A TOTAL');
+      });
+
+      it('counts each unreadable device rather than reporting only that there was one', async () => {
+        expect(
+          await planText({
+            devices: {
+              rows: [
+                zvol('tank/builder-0', 20),
+                device('ISCSI_DISK', { iscsi_target: 't' }),
+                { ...device('DISK', {}), vm: undefined },
+              ],
+            },
+          }),
+        ).toContain('2 devices on this machine');
       });
     });
 

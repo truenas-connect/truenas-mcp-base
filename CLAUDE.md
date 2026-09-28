@@ -2499,14 +2499,36 @@ wrong:
 
 **The space a copy will occupy is a plan-time supporting read, and its failure
 does not fail the plan** — `snapshot_task_run`'s reading of an unreadable
-`enabled` (#154). What the failure costs is stated instead, and there are three
-answers rather than two: the devices could not be read, the system listed none,
-or it listed some and they are named. **An unread device list reported as "no
+`enabled` (#154). What the failure costs is stated instead, and there are four
+answers rather than two: the devices could not be listed, they were listed and
+none could be read as a disk OR ruled out as one, they were listed and none is a
+disk, or some are and they are named. **An unread device list reported as "no
 disks" is a clone described as free that fills a pool.** The total over the
-zvols is all-or-nothing under #93 for the same direction — a total over the
-disks that DID report a size understates what the copy can come to occupy, and
-the smaller figure is the reassuring one to be wrong with in the one text a
-person reads before approving (#154).
+disks is all-or-nothing under #93 for the same direction — a total over the ones
+that DID report a size understates what the copy can come to occupy, and the
+smaller figure is the reassuring one to be wrong with in the one text a person
+reads before approving (#154).
+
+**A row that could not be read is COUNTED, and the figure beside it is a floor.**
+`readCloneDisk` has three ways to fail to answer — a `dtype` outside every kind
+named here, an `attributes` that was not a record, and a `vm` this tool could
+not read as a number, which names no machine and could be this one. Dropping any
+of them moves the account towards "this VM has no disk", which is the claim the
+sentence must not make: TrueNAS already declares a disk kind this file does not
+map (`ISCSI_DISK`, which #100 names as a case to expect), so a silently shorter
+list is exactly the free-looking clone above. **The kinds that ARE ruled out are
+named in a set rather than reached by a `default` arm** (`CDROM`, `DISPLAY`,
+`NIC`, `PCI`, `USB`) — none declares a zvol field, which is checkable against the
+client, and the two answers are different: ruled out, versus not read at all.
+
+**A `DISK` device need not be zvol-backed, and calling every one of them that
+is #96's mistake in a plan's prose.** `zvol_name` and `zvol_volsize` are both
+optional on the declared attributes and `vm_devices` already says they name the
+zvol "where one does" — a disk attached to a host block device declares neither.
+So the plan names which of them reported a zvol, **in the same phrase as the
+size rather than in a sentence beside the list**: adjacency is not qualification
+(#156), and a reader meeting the list first would take every entry in it for a
+zvol.
 
 `zvol_volsize` and a `RAW` disk's `size` carry **no unit** in the plan, which is
 `vm_devices`' own reading of those two fields (#96) rather than a second opinion

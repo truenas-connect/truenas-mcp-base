@@ -2378,14 +2378,38 @@ interface VmCloneDisk {
   label: string;
   /** The size the device declares, passed through with NO UNIT ASSERTED. */
   size: number | null;
+  /**
+   * Whether the row named a zvol at all.
+   *
+   * A `DISK` DEVICE NEED NOT BE ZVOL-BACKED — `zvol_name` and `zvol_volsize` are
+   * both optional on the declared attributes and `vm_devices`' own description
+   * says they name the zvol "where one does", which leaves a disk attached to a
+   * host block device declaring neither. Calling every `DISK` zvol-backed would
+   * be a description promising more than the read delivers, so the plan says
+   * which of them actually named one.
+   */
+  zvolNamed: boolean;
 }
 
 /** The disks a clone of this VM would have to account for, or why none was read. */
 interface VmCloneDisks {
-  /** Zvol-backed `DISK` devices — the ones whose zvols the clone copies. */
-  zvols: VmCloneDisk[];
+  /** `DISK` devices — the ones whose zvols a clone is said to copy. */
+  disks: VmCloneDisk[];
   /** File-backed `RAW` devices, whose treatment by a clone is unestablished. */
   files: VmCloneDisk[];
+  /**
+   * Rows this read could NOT rule out as disks: a `dtype` it has no mapping
+   * for, a configuration that was not a record, or a row the system attributed
+   * to no machine at all.
+   *
+   * COUNTED RATHER THAN DROPPED, which is #93's direction rule. Dropping them
+   * moves the account towards "this VM has no disk", and that is the one claim
+   * this sentence must not make without having established it: TrueNAS already
+   * defines a disk kind this file does not map (`ISCSI_DISK`, which #100 names
+   * as a case to expect), so a silently shorter list is a clone described as
+   * free that fills a pool.
+   */
+  unreadable: number;
   /** What stopped the device read, or null where it completed. */
   error: string | null;
 }
@@ -2394,29 +2418,55 @@ interface VmCloneDisks {
 const UNNAMED_DISK = '(the system named no zvol or path for it)';
 
 /**
- * One device row, where it is a disk of either kind.
+ * The device kinds the pinned surface declares that carry no zvol of their own.
  *
- * Null for every other `dtype`, and for a row this read cannot attribute to the
- * machine asked about: the id is checked on the RESPONSE and not only asked for
- * in the filter (#121, #153), since an unrecognised query parameter is dropped
- * rather than refused and a filter that did not apply comes back as every device
- * on the system — which would name another machine's disks in this plan.
+ * Named rather than reached by a `default` arm, because the two answers are
+ * different: a kind on this list was RULED OUT as something the copy pays for —
+ * checkable against the declared attributes, none of which has a zvol field —
+ * while a kind not on it was not read at all and is counted as such.
  */
-function readCloneDisk(
-  entry: unknown,
-  id: number,
-): { kind: 'DISK' | 'RAW'; disk: VmCloneDisk } | null {
+const NON_DISK_DEVICE_KINDS = new Set(['CDROM', 'DISPLAY', 'NIC', 'PCI', 'USB']);
+
+/** What one device row established about the space a clone of this VM would take. */
+type CloneDiskReading =
+  | { kind: 'DISK' | 'RAW'; disk: VmCloneDisk }
+  | { kind: 'UNREADABLE' }
+  | null;
+
+/**
+ * One device row, as far as the space a clone would take is concerned.
+ *
+ * Null for a row that is NOT this machine's and for a kind the surface declares
+ * with no zvol in it — both are ruled out rather than unread. The id is checked
+ * on the RESPONSE and not only asked for in the filter (#121, #153), since an
+ * unrecognised query parameter is dropped rather than refused and a filter that
+ * did not apply comes back as every device on the system, which would name
+ * another machine's disks in this plan.
+ *
+ * `UNREADABLE` for the three ways a row can fail to answer: a `vm` this tool
+ * could not read as a number, so the row names no machine and COULD BE THIS ONE
+ * (`vm_devices` says as much about the same field); an `attributes` that was not
+ * a record; and a `dtype` outside every kind named here. None of those is a
+ * device that copies nothing, and they are counted for that reason.
+ */
+function readCloneDisk(entry: unknown, id: number): CloneDiskReading {
   const row = (recordOrNull(entry) ?? {}) as Partial<VmDeviceEntry>;
-  if (numberOrNull(row.vm) !== id) return null;
+  const owner = numberOrNull(row.vm);
+  if (owner !== null && owner !== id) return null;
+  if (owner === null) return { kind: 'UNREADABLE' };
   const held = recordOrNull(row.attributes) ?? {};
-  switch (textOrNull(held['dtype'])) {
+  const dtype = textOrNull(held['dtype']);
+  if (dtype !== null && NON_DISK_DEVICE_KINDS.has(dtype)) return null;
+  switch (dtype) {
     case 'DISK': {
       const disk = held as AttributesOf<'DISK'>;
+      const zvolName = textOrNull(disk.zvol_name);
       return {
         kind: 'DISK',
         disk: {
-          label: textOrNull(disk.zvol_name) ?? textOrNull(disk.path) ?? UNNAMED_DISK,
+          label: zvolName ?? textOrNull(disk.path) ?? UNNAMED_DISK,
           size: numberOrNull(disk.zvol_volsize),
+          zvolNamed: zvolName !== null,
         },
       };
     }
@@ -2424,11 +2474,15 @@ function readCloneDisk(
       const raw = held as AttributesOf<'RAW'>;
       return {
         kind: 'RAW',
-        disk: { label: textOrNull(raw.path) ?? UNNAMED_DISK, size: numberOrNull(raw.size) },
+        disk: {
+          label: textOrNull(raw.path) ?? UNNAMED_DISK,
+          size: numberOrNull(raw.size),
+          zvolNamed: false,
+        },
       };
     }
     default:
-      return null;
+      return { kind: 'UNREADABLE' };
   }
 }
 
@@ -2456,52 +2510,114 @@ async function readVmCloneDisks(ctx: ToolContext, id: number): Promise<VmCloneDi
       ctx.system.client.api.query('vm.device.query', [['vm', '=', id]]),
     );
   } catch (reason) {
-    return { zvols: [], files: [], error: errorText(reason) };
+    return { disks: [], files: [], unreadable: 0, error: errorText(reason) };
   }
-  if (!Array.isArray(answered)) return { zvols: [], files: [], error: NOT_A_DEVICE_LIST };
-  const zvols: VmCloneDisk[] = [];
+  if (!Array.isArray(answered)) {
+    return { disks: [], files: [], unreadable: 0, error: NOT_A_DEVICE_LIST };
+  }
+  const disks: VmCloneDisk[] = [];
   const files: VmCloneDisk[] = [];
+  let unreadable = 0;
   for (const entry of answered) {
     const read = readCloneDisk(entry, id);
     if (read === null) continue;
-    (read.kind === 'DISK' ? zvols : files).push(read.disk);
+    if (read.kind === 'UNREADABLE') unreadable += 1;
+    else (read.kind === 'DISK' ? disks : files).push(read.disk);
   }
-  return { zvols, files, error: null };
-}
-
-/** One disk in the plan, named with the size field it declares and no unit. */
-function diskPhrase(disk: VmCloneDisk, sizeField: string): string {
-  return disk.size === null
-    ? `${disk.label} (this system reported no \`${sizeField}\` this tool could read)`
-    : `${disk.label} (\`${sizeField}\` ${disk.size})`;
+  return { disks, files, unreadable, error: null };
 }
 
 /**
- * What the zvol-backed disks come to, or why they do not come to anything.
+ * One `DISK` device in the plan, with the size it declares and no unit.
+ *
+ * A disk that named no zvol says so IN THE SAME PHRASE rather than in a sentence
+ * beside the list: adjacency is not qualification (#156), and a reader meeting
+ * the list first would take every entry in it for a zvol.
+ */
+function diskPhrase(disk: VmCloneDisk): string {
+  const size =
+    disk.size === null
+      ? 'this system reported no `zvol_volsize` this tool could read'
+      : `\`zvol_volsize\` ${disk.size}`;
+  return `${disk.label} (${size}${disk.zvolNamed ? '' : ', AND IT NAMED NO ZVOL'})`;
+}
+
+/** One `RAW` device in the plan, the same way. */
+function rawDiskPhrase(disk: VmCloneDisk): string {
+  return disk.size === null
+    ? `${disk.label} (this system reported no \`size\` this tool could read)`
+    : `${disk.label} (\`size\` ${disk.size})`;
+}
+
+/**
+ * What the `DISK` devices come to, or why they do not come to anything.
  *
  * All-or-nothing, under #93's direction rule: a total over the disks that DID
  * report a size would understate what the copy can come to occupy, and a smaller
  * figure in the one text a person reads before approving a copy is the
  * reassuring direction to be wrong in (#154).
  */
-function zvolTotalPhrase(zvols: VmCloneDisk[]): string {
-  if (zvols.some((disk) => disk.size === null)) {
+function diskTotalPhrase(disks: VmCloneDisk[]): string {
+  const sizes = disks.map((disk) => disk.size);
+  if (sizes.some((size) => size === null)) {
     return (
       'THEY DO NOT ADD UP TO A TOTAL HERE, because this system reported no size this tool could ' +
       'read for at least one of them and a total over the rest would understate what the copy ' +
       'can come to occupy.'
     );
   }
-  return `Together they come to ${zvols.reduce((sum, disk) => sum + (disk.size ?? 0), 0)}.`;
+  // Narrowed by the check above rather than by a fallback inside the sum, which
+  // is {@link totalVcpus}'s shape: a `?? 0` there would be a branch nothing can
+  // reach, and one a later edit could reach by weakening the check.
+  return `Together they come to ${(sizes as number[]).reduce((sum, size) => sum + size, 0)}.`;
+}
+
+/**
+ * What the plan says about the `DISK` devices whose backing it could not
+ * establish.
+ *
+ * Empty where every one of them named a zvol. Where any did not, the figure
+ * above is about devices that may carry no zvol at all, and saying so is what
+ * keeps the list from reading as a list of zvols (#96's rule about a name
+ * claiming more than the read delivers, reaching a plan's prose).
+ */
+function unnamedZvolSentence(disks: VmCloneDisk[]): string {
+  if (disks.every((disk) => disk.zvolNamed)) return '';
+  return (
+    ' AT LEAST ONE OF THOSE NAMED NO ZVOL, and a `DISK` device NEED NOT BE ZVOL-BACKED — it can ' +
+    'be a host block device attached to the machine, which this API declares the same way. ' +
+    'WHETHER A CLONE COPIES ANYTHING FOR ONE IS (unconfirmed) HERE.'
+  );
+}
+
+/**
+ * What the plan says about devices it could neither read as a disk nor rule out
+ * as one.
+ *
+ * Empty where there were none. Where there were any, EVERY FIGURE ABOVE IS A
+ * FLOOR: a device that could not be read is not a device that copies nothing,
+ * and folding it into the count silently would make the reassuring answer the
+ * one a person approves against (#93, #154).
+ */
+function unreadDevicesSentence(count: number): string {
+  if (count === 0) return '';
+  return (
+    ` ${plural(count, 'device')} on this machine could be NEITHER READ AS A DISK NOR RULED OUT ` +
+    'AS ONE — a kind this tool has no mapping for, a configuration that was not a record, or a ' +
+    'row the system attributed to no machine — SO ANY FIGURE ABOVE IS A FLOOR AND NOT A TOTAL. ' +
+    'TrueNAS already defines a disk kind this tool does not map (`ISCSI_DISK`), and a device ' +
+    'that could not be read is NOT a device the copy pays nothing for.'
+  );
 }
 
 /**
  * What the plan says the copy will occupy, from the disks read at plan time.
  *
- * Three answers rather than two, and the third is the one a caller acts on
- * differently: the devices could not be read at all, the system listed none, or
- * it listed some and they are named. An unread device list reported as "no
- * disks" would be a clone described as free that fills a pool.
+ * Four answers rather than two, and the ones a caller acts on differently are
+ * the middle pair: the devices could not be listed at all, they were listed and
+ * NONE of them could be read as a disk or ruled out as one, they were listed and
+ * none of them is a disk, or some are and they are named. An unread device list
+ * reported as "no disks" would be a clone described as free that fills a pool.
  */
 function vmCloneSpaceSentence(disks: VmCloneDisks): string {
   if (disks.error !== null) {
@@ -2512,34 +2628,45 @@ function vmCloneSpaceSentence(disks: VmCloneDisks): string {
       'a machine with no disks.'
     );
   }
-  if (disks.zvols.length === 0 && disks.files.length === 0) {
+  if (disks.disks.length === 0 && disks.files.length === 0) {
+    if (disks.unreadable === 0) {
+      return (
+        'THE SYSTEM LISTED NO DISK DEVICE FOR THIS VIRTUAL MACHINE when this plan was made — ' +
+        'neither a `DISK` nor a file-backed `RAW`, and every other device it listed is a kind ' +
+        'this API declares with no zvol in it — so there is no disk here for the call to copy ' +
+        'and no pool space is expected to go on one. THAT READING IS FROM PLAN TIME AND IS NOT ' +
+        'RE-CHECKED when the call runs.'
+      );
+    }
     return (
-      'THE SYSTEM LISTED NO DISK DEVICE FOR THIS VIRTUAL MACHINE when this plan was made — ' +
-      'neither a zvol-backed `DISK` nor a file-backed `RAW` — so there is no disk here for the ' +
-      'call to copy and no pool space is expected to go on one. THAT READING IS FROM PLAN TIME ' +
-      'AND IS NOT RE-CHECKED when the call runs.'
+      'WHAT THE COPY WILL OCCUPY IS NOT ESTABLISHED HERE: the system listed no device this tool ' +
+      `could read as a disk, and ${plural(disks.unreadable, 'device')} it did list could ` +
+      'NEITHER BE READ AS ONE NOR RULED OUT AS ONE — a kind this tool has no mapping for, a ' +
+      'configuration that was not a record, or a row the system attributed to no machine. THAT ' +
+      'IS NOT THE SAME ANSWER AS A MACHINE WITH NO DISKS.'
     );
   }
-  const zvolPart =
-    disks.zvols.length === 0
-      ? 'The system listed no zvol-backed `DISK` device for this virtual machine when this plan ' +
-        'was made, so no zvol is expected to be copied.'
+  const diskPart =
+    disks.disks.length === 0
+      ? 'The system listed no `DISK` device for this virtual machine when this plan was made, ' +
+        'so no zvol of its own is expected to be copied.'
       : 'THE SPACE THE COPY IS EXPECTED TO OCCUPY IS THE SIZE OF THE DISKS IT COPIES. The ' +
-        `system listed ${plural(disks.zvols.length, 'zvol-backed `DISK` device')} for it: ` +
-        `${disks.zvols.map((disk) => diskPhrase(disk, 'zvol_volsize')).join(', ')}. ` +
-        `${zvolTotalPhrase(disks.zvols)} THE API DECLARES NO UNIT FOR THOSE NUMBERS and none ` +
-        'is asserted here, so they are reported as the system spelled them and are not to be ' +
-        'converted. They are the sizes the DISKS ARE DECLARED AT, and WHETHER THE COPY TAKES ' +
-        'THAT SPACE AT ONCE OR TAKES IT AS IT DIVERGES FROM THE SOURCE IS (unconfirmed) HERE: ' +
-        'nothing on this API says which and it was not read off a live system.';
-  if (disks.files.length === 0) return zvolPart;
-  return (
-    `${zvolPart} IT ALSO HAS ${plural(disks.files.length, 'file-backed `RAW` disk device')} — ` +
-    `${disks.files.map((disk) => diskPhrase(disk, 'size')).join(', ')} — AND WHAT A CLONE DOES ` +
-    'WITH ONE IS (unconfirmed) HERE: nothing on this API says whether the image file is copied, ' +
-    'shared with the source, or left out of the clone, so its size is NOT counted above and a ' +
-    'clone that ends up sharing that file with the source is NOT ruled out.'
-  );
+        `system listed ${plural(disks.disks.length, '`DISK` device')} for it: ` +
+        `${disks.disks.map(diskPhrase).join(', ')}. ${diskTotalPhrase(disks.disks)} THE API ` +
+        'DECLARES NO UNIT FOR THOSE NUMBERS and none is asserted here, so they are reported as ' +
+        'the system spelled them and are not to be converted. They are the sizes the DISKS ARE ' +
+        'DECLARED AT, and WHETHER THE COPY TAKES THAT SPACE AT ONCE OR TAKES IT AS IT DIVERGES ' +
+        'FROM THE SOURCE IS (unconfirmed) HERE: nothing on this API says which and it was not ' +
+        `read off a live system.${unnamedZvolSentence(disks.disks)}`;
+  const filePart =
+    disks.files.length === 0
+      ? ''
+      : ` IT ALSO HAS ${plural(disks.files.length, 'file-backed `RAW` disk device')} — ` +
+        `${disks.files.map(rawDiskPhrase).join(', ')} — AND WHAT A CLONE DOES WITH ONE IS ` +
+        '(unconfirmed) HERE: nothing on this API says whether the image file is copied, shared ' +
+        'with the source, or left out of the clone, so its size is NOT counted above and a ' +
+        'clone that ends up sharing that file with the source is NOT ruled out.';
+  return `${diskPart}${filePart}${unreadDevicesSentence(disks.unreadable)}`;
 }
 
 /**
@@ -2612,7 +2739,10 @@ export const vmClone: MutatingTool = {
     'attached to the source and ZVOLS OF ITS OWN BEHIND ITS DISKS, so IT ' +
     'CONSUMES POOL SPACE, and the plan names the disks it read and what they ' +
     'come to — or says outright that it could not read them, which is not the ' +
-    'same answer as a machine with no disks. NEITHER THAT ACCOUNT NOR THE ' +
+    'same answer as a machine with no disks. WHERE A DEVICE COULD BE NEITHER ' +
+    'READ AS A DISK NOR RULED OUT AS ONE THE PLAN SAYS ITS FIGURE IS A FLOOR ' +
+    'RATHER THAN A TOTAL, and a `DISK` device that named no zvol is named as ' +
+    'that rather than counted as one. NEITHER THAT ACCOUNT NOR THE ' +
     'NAMING RULE BELOW IS ON THIS API SURFACE — `vm.clone` takes the id and an ' +
     'optional name and answers a bare boolean — SO BOTH ARE READ FROM THE ' +
     'TRUENAS IMPLEMENTATION AND ARE NOT SOMETHING THIS CATALOG CAN CHECK. ' +
