@@ -41,12 +41,14 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `destructiveness: 'reversible'`: `snapshots_create`, `alerts_dismiss`,
   `alerts_restore`, `scheduled_task_set_enabled`, `cloudsync_run`,
   `automated_task_set_enabled`, `snapshot_clone`, `snapshot_task_run`,
-  `snapshot_set_hold`, `vm_start`, `vm_stop`, `vm_restart`, `service_control` —
+  `snapshot_set_hold`, `vm_start`, `vm_stop`, `vm_restart`, `vm_clone`,
+  `service_control` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart` and
   `service_control` the five that start a background job,
   which each watches for a bounded time and then reports on rather than waiting
-  out. The three VM power tools are the catalog's only mutations over the older
-  libvirt-backed `vm` stack, and between them they are what makes
+  out. The three VM power tools and `vm_clone` are the catalog's only mutations
+  over the older libvirt-backed `vm` stack, and the power tools between them are
+  what makes
   `destructiveness: 'reversible'` true in the strong sense for the first time
   here: the reversal of a start is a stop, and both are tools rather than calls
   a reader has to go elsewhere for. What each still owes its description is what
@@ -54,6 +56,17 @@ confirmation UX, audit sinks) enters through injected interfaces.
   the guest had not written, and `vm_restart` hides two decisions its own API
   params do not mention, forcing after the shutdown timeout and overcommitting
   memory on the way back up, neither of them the caller's to make.
+  `vm_clone` copies a VM, its devices and the zvols behind its disks into a new
+  machine, so it destroys nothing and still consumes pool space — its plan names
+  the disks it read and what they come to, or says outright that it could not
+  read them, which is not the same answer as a machine with no disks. It is
+  `reversible` in the same narrow sense `snapshot_clone` is: nothing here
+  deletes the machine it makes, or its zvols, and the description says so beside
+  the field. Its method answers a bare boolean that does not name what it
+  created, so the clone is identified by listing every VM before the call and
+  again after it and taking the id that appeared — and where no name was given,
+  the name the middleware derives is read back rather than predicted, since the
+  rule it derives by is not on this API surface.
   `snapshot_clone` is the additive route
   back to a snapshot's data: it deletes nothing and modifies no dataset that
   exists, which is what lets the catalog decline the rollback that answers the
