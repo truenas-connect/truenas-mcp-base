@@ -925,6 +925,31 @@ describe('container_restart', () => {
     });
   });
 
+  it('still starts the container where the stop outlives the watch', async () => {
+    // THE BOUND MUST NOT CUT THE SUBSCRIPTION. `toArray()` emits only on
+    // completion and `api.call` is a `defer`, so a watch that unsubscribed here
+    // would leave `container.start` NEVER SENT — a restart silently degraded
+    // into a stop, reported as an operation that was still going.
+    const { ctx, call } = opsSystem('v26.0.0', {
+      'container.query': { emits: [[containerRow()]] },
+      'container.stop': { emits: [runningJob(), finishedJob()], delayMs: 60_000 },
+      'container.start': { emits: [null] },
+    });
+    vi.useFakeTimers();
+    const restarting = containerRestart.execute(ctx, { id: '7', force: false });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await restarting).toMatchObject({
+      dispatch: 'UNESTABLISHED',
+      operation_ended: false,
+    });
+    expect(call).not.toHaveBeenCalled();
+
+    // The tool has reported and returned; the operation it started has not been
+    // cancelled by that, and the start half runs when the stop finishes.
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(call.mock.calls).toEqual([['container.start', [7]]]);
+  });
+
   it('says a changed of false is the ordinary answer for a restart that worked', () => {
     expect(containerRestart.description).toContain(
       'A `changed: false` ACROSS A RESTART IS THE ORDINARY ANSWER FOR ONE THAT WORKED',

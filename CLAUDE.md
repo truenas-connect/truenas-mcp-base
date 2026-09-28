@@ -2620,6 +2620,26 @@ the route and the descriptions say so** — it is not a reason to dial the metho
 directly, which would not compile across the versions this family exists to
 cover.
 
+**THE BOUND MUST NOT UNSUBSCRIBE THE OPERATION, and that is a correctness
+constraint rather than a reporting one.** `watchJob` ends its watch with
+`takeUntil(timer(...))`, which is safe there because both of its stages are
+already in flight: the request went out with `callAndGetJobId` and `trackJob`
+only observes, so unsubscribing sends nothing and stops nothing. A COMPOSED
+operation has a stage that has not been dialled yet. v26+ `containerRestart` is
+`api.job('container.stop', …).pipe(toArray(), switchMap(… api.call(
+'container.start', …)))`; `toArray()` emits only on completion, unsubscribing is
+not a completion, and `api.call` is a `defer` — so a `takeUntil` there leaves the
+start NEVER SENT, turning a restart whose stop outlived the bound into a stop and
+reporting it as an operation still going. `watchOperation` therefore subscribes
+once, races a timer against the subscription, and deliberately does not tear it
+down. **Before bounding an observable you did not build, ask whether every stage
+behind it has already sent its request.**
+
+What that leaves is one subscription per call, which ends with the operation in
+the ordinary case and is the exposure any `api.job` consumer already has. An
+error arriving after the bound reaches the handler and is dropped there, which is
+what keeps it from surfacing as an unhandled rejection.
+
 What the ops watch answers that `watchJob` never has to is **whether there was a
 job at all**, so `dispatch` is four-valued: `JOB`, `SYNCHRONOUS` (only `null`
 emitted — the version performed it inline, so a null `job_id` is the expected

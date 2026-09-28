@@ -1,5 +1,5 @@
 import { vi } from 'vitest';
-import { concat, EMPTY, NEVER, Observable, of, throwError } from 'rxjs';
+import { concat, delay, EMPTY, NEVER, Observable, of, throwError } from 'rxjs';
 import {
   TrueNasApiClientV2510,
   TrueNasApiClientV26,
@@ -56,7 +56,7 @@ export type OpsVersion = 'v25.10.0' | 'v26.0.0' | 'v27.0.0';
  * progress and reaches `container_restart` as nothing at all.
  */
 export type OpsAnswer =
-  | { emits: unknown[]; completes?: boolean; thenFails?: unknown }
+  | { emits: unknown[]; completes?: boolean; thenFails?: unknown; delayMs?: number }
   | { fails: unknown }
   | { hangs: true };
 
@@ -98,7 +98,10 @@ function apiVersion(version: OpsVersion): ApiVersion {
 function answerOf(answer: OpsAnswer): Observable<unknown> {
   if ('fails' in answer) return throwError(() => answer.fails);
   if ('hangs' in answer) return NEVER;
-  const emitted = answer.emits.length === 0 ? EMPTY : of(...answer.emits);
+  const immediate = answer.emits.length === 0 ? EMPTY : of(...answer.emits);
+  // Everything after the delay, completion included — which is what a job that
+  // outlives a tool's watch and then finishes looks like from here.
+  const emitted = answer.delayMs === undefined ? immediate : immediate.pipe(delay(answer.delayMs));
   if ('thenFails' in answer) {
     return concat(
       emitted,

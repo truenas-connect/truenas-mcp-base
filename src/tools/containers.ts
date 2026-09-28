@@ -1,5 +1,5 @@
-import { firstValueFrom, lastValueFrom, Observable, takeUntil, tap, timer } from 'rxjs';
-import { catchError, EMPTY, throwError } from 'rxjs';
+import { firstValueFrom, Observable, timer } from 'rxjs';
+import type { Subscription } from 'rxjs';
 import type { Container, OperationMappings } from '@truenas/api-client';
 import { Role } from '@/interfaces';
 import { MutatingTool, PlanStep, ReadOnlyTool, ToolContext } from '@/catalog/tool';
@@ -285,6 +285,11 @@ export const containerList: ReadOnlyTool = {
  * descriptions say so; it is not a reason to dial the middleware methods
  * directly, which would not compile across the versions this family exists to
  * cover.
+ *
+ * THE OTHER COST IS THAT THE BOUND CANNOT CUT THE SUBSCRIPTION, and that one is
+ * a correctness constraint rather than a reporting one. See
+ * {@link watchOperation}: a composed operation has a stage that has NOT been
+ * dialled yet when the bound expires, so unsubscribing would cancel half of it.
  */
 
 /** Where the ids these three tools take come from, in the one wording used throughout. */
@@ -542,9 +547,35 @@ interface WatchedOperation {
  * - `UNESTABLISHED` — nothing arrived inside the bound. The operation may well be
  *   running; nothing about it was seen.
  *
- * ENDING THE WATCH DOES NOT END THE OPERATION. Every stage behind these
- * observables either sent its request before the first emission or only observes
- * afterwards, so unsubscribing sends nothing to the middleware.
+ * THE BOUND MUST NOT UNSUBSCRIBE THE OPERATION, AND THAT IS THE ONE PLACE THIS
+ * MUST NOT COPY `watchJob`. That helper ends its watch with
+ * `takeUntil(timer(...))`, which is safe there because both of its stages are
+ * already in flight when the bound expires: the request was sent by
+ * `callAndGetJobId` and `trackJob` only observes, so unsubscribing sends nothing
+ * and stops nothing.
+ *
+ * THAT IS NOT TRUE OF A COMPOSED OPERATION. On v26+ `containerRestart` is
+ * `api.job('container.stop', …).pipe(toArray(), switchMap(… api.call(
+ * 'container.start', …)))`, and `toArray()` emits only on COMPLETION. Unsubscribing
+ * at the bound is not a completion, so the projection never runs — and
+ * `api.call` is a `defer`, so the start is not merely unobserved, IT IS NEVER
+ * SENT. A `takeUntil` here turned a restart whose stop outlived thirty seconds
+ * into a stop, and told the caller the operation was still going. So the
+ * subscription is made once, read from, and DELIBERATELY NOT TORN DOWN when the
+ * bound expires; the bound races it rather than cutting it.
+ *
+ * WHAT THAT LEAVES BEHIND IS ONE SUBSCRIPTION PER CALL, and it is not a leak in
+ * the ordinary case: the operation ends when its job reaches a terminal state,
+ * or errors, and takes the subscription with it. An operation that never
+ * terminates holds one for the life of the client, which is the exposure any
+ * `api.job` consumer already has. An error arriving after the bound reaches the
+ * handler below and is dropped there, which is what keeps it from surfacing as
+ * an unhandled rejection.
+ *
+ * AN ERROR BEFORE ANY EMISSION STILL FAILS THE CALL, and one after it does not:
+ * by then the operation is under way, and rejecting would report a failure that
+ * did not happen. That is `watchJob`'s split made coarser — see the family
+ * comment above on what this seam costs.
  *
  * `operation_ended` REQUIRES BOTH COMPLETION AND AN EMISSION, as `watchJob`'s
  * `ended` does: a completion carrying nothing establishes nothing.
@@ -557,29 +588,44 @@ async function watchOperation(
   let sawEmission = false;
   let sawUnreadable = false;
   let lastJob: Record<string, unknown> | null = null;
-  await lastValueFrom(
-    operation.pipe(
-      tap((emitted) => {
+  let failed = false;
+  let failure: unknown = null;
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    let expiry: Subscription | undefined;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      expiry?.unsubscribe();
+      resolve();
+    };
+    operation.subscribe({
+      next: (emitted: unknown) => {
         sawEmission = true;
         const record = recordOrNull(emitted);
         if (record !== null) lastJob = record;
         else if (emitted !== null) sawUnreadable = true;
-      }),
-      tap({
-        complete: () => {
-          completed = true;
-        },
-      }),
-      // An error raised after something has been seen of the operation is not
-      // the call failing: it is under way, and rejecting here would report a
-      // failure that did not happen. Before any emission there is nothing to
-      // report, so an error there still fails — see the family comment above on
-      // what that costs at this seam.
-      catchError((error: unknown) => (sawEmission ? EMPTY : throwError(() => error))),
-      takeUntil(timer(options.watchMs)),
-    ),
-    { defaultValue: null },
-  );
+      },
+      error: (reason: unknown) => {
+        // Only the first era's failure is the call's. After the bound this
+        // records nothing and `finish` is a no-op, which is what stops a late
+        // error becoming an unhandled rejection.
+        if (!sawEmission && !settled) {
+          failed = true;
+          failure = reason;
+        }
+        finish();
+      },
+      complete: () => {
+        completed = true;
+        finish();
+      },
+    });
+    // Only where the operation did not already settle synchronously, so nothing
+    // schedules a timer it would immediately have to cancel.
+    if (!settled) expiry = timer(options.watchMs).subscribe(finish);
+  });
+  if (failed) throw failure;
   const job: Record<string, unknown> | null = lastJob;
   const dispatch: OperationDispatch =
     job !== null
@@ -859,16 +905,18 @@ function stopOptions(args: ContainerStopArgs): StopOptions {
  * about a step description shared by several tools: parameterise the clause
  * that differs rather than writing the one true of the tool written first.
  */
-const STOP_FORCE_ON_2510 = "`virt.instance.stop`'s own force";
+const STOP_FORCE_ON_2510 =
+  "On TrueNAS 25.10 that is `virt.instance.stop`'s own force, which takes the container down " +
+  'without waiting for it.';
 const RESTART_FORCE_ON_2510 =
-  "`virt.instance.restart`'s own `stop_args.force` — that one job brings the container down " +
-  'before starting it again, and this is how';
+  "On TrueNAS 25.10 that is `virt.instance.restart`'s own `stop_args.force`: the restart is one " +
+  'job there, and this is how that job takes the container down, without waiting for it, before ' +
+  'starting it again.';
 
 /** What `force` and `timeout` select, in the words both stop and restart use. */
 function forceSentence(force: boolean, timeout: number | null, olderForce: string): string {
   const chosen = force
-    ? `FORCE IS TRUE FOR THIS CALL. On TrueNAS 25.10 that is ${olderForce}, ` +
-      'which takes the container down without waiting for it. On 26 and later this one ' +
+    ? `FORCE IS TRUE FOR THIS CALL. ${olderForce} On 26 and later this one ` +
       'argument sets BOTH `container.stop`\'s `force` and its `force_after_timeout`, so the ' +
       'container is brought down whether or not it goes on its own. EITHER WAY, ANYTHING THE ' +
       'CONTAINER HAD NOT WRITTEN TO DISK CAN BE LOST.'
