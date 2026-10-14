@@ -174,13 +174,12 @@ function readContainerRow(row: Container): ContainerRow {
 }
 
 /**
- * The interpretation half of `container_list`'s description (#131), hoisted so
- * the two fields cannot drift apart.
+ * How to read a container listing. Delivered with the first result, not
+ * advertised: `description` no longer appends it.
  *
- * It carries one sentence that is selection class by `resultGuidance`'s own
- * rule — the pointer at `vms_list` for the other stack — which a caller needs
- * before choosing this tool rather than after. The follow-up that stops
- * appending this to `description` must leave that sentence there.
+ * The selection-class sentence — this does not list virtual machines, and
+ * `vms_list` does — is restated on `description`. The rest is how to read a
+ * null in a version-split field.
  */
 const CONTAINER_LIST_RESULT_GUIDANCE =
   '`api_version` is the API version negotiated with this system, and FOUR OF ' +
@@ -236,7 +235,9 @@ export const containerList: ReadOnlyTool = {
     'is why the negotiated version is reported beside the containers. ' +
     'The `id` reported here is what `container_start`, `container_stop` and ' +
     '`container_restart` take, and it is per-system. ' +
-    CONTAINER_LIST_RESULT_GUIDANCE,
+    'IT DOES NOT LIST VIRTUAL MACHINES OF ANY KIND — the operation behind it ' +
+    'filters to containers, and `vms_list` is what reports the libvirt-backed ' +
+    'and incus-backed VMs.',
   resultGuidance: CONTAINER_LIST_RESULT_GUIDANCE,
   inputSchema: { type: 'object', properties: {} },
   requiredRole: Role.ReadOnly,
@@ -760,8 +761,11 @@ const CONTAINER_START_GUIDANCE =
   '`resulting_status` can still read `STOPPED` or a transitional word on a ' +
   'container that comes up moments later — call `container_list` again to ' +
   'settle it. ' +
-  CONTAINER_OUTCOME_GUIDANCE +
-  ' THIS TOOL CANNOT STOP OR RESTART A CONTAINER (`container_stop` and ' +
+  CONTAINER_OUTCOME_GUIDANCE;
+
+/** Selection class: which operations this tool is not. Stays on `description`. */
+const CONTAINER_START_LIMITS =
+  'THIS TOOL CANNOT STOP OR RESTART A CONTAINER (`container_stop` and ' +
   '`container_restart` do), cannot resume a suspended one, and cannot create, ' +
   'change or delete one — NOTHING IN THIS CATALOG DELETES A CONTAINER.';
 
@@ -775,7 +779,7 @@ export const containerStart: MutatingTool = {
     ' WHETHER THIS STARTS A BACKGROUND JOB DEPENDS ON THE VERSION, and the ' +
     'result says which happened rather than assuming: TrueNAS 25.10 runs it as ' +
     'a job, and 26 and later perform it inline and report no job at all. ' +
-    CONTAINER_START_GUIDANCE,
+    CONTAINER_START_LIMITS,
   resultGuidance: CONTAINER_START_GUIDANCE,
   inputSchema: {
     type: 'object',
@@ -935,9 +939,11 @@ function forceSentence(force: boolean, timeout: number | null, olderForce: strin
   return `${chosen} ${wait}`;
 }
 
-const CONTAINER_STOP_GUIDANCE =
-  CONTAINER_OUTCOME_GUIDANCE +
-  ' THIS TOOL CANNOT STOP A RUNNING JOB once it has started one, cannot start ' +
+const CONTAINER_STOP_GUIDANCE = CONTAINER_OUTCOME_GUIDANCE;
+
+/** Selection class: which operations this tool is not. Stays on `description`. */
+const CONTAINER_STOP_LIMITS =
+  'THIS TOOL CANNOT STOP A RUNNING JOB once it has started one, cannot start ' +
   'a container (`container_start` does) or restart one (`container_restart` ' +
   'does), cannot suspend or resume one, and CANNOT RECOVER DATA A FORCED STOP ' +
   'LOST — starting the container again brings it up from what reached the disk.';
@@ -965,7 +971,7 @@ export const containerStop: MutatingTool = {
     'Omitted, no timeout is sent and the system\'s own default applies. ' +
     'THE RESULT IS ABOUT THE OPERATION THIS CALL STARTED, AND "STARTED" IS NOT ' +
     '"STOPPED". ' +
-    CONTAINER_STOP_GUIDANCE,
+    CONTAINER_STOP_LIMITS,
   resultGuidance: CONTAINER_STOP_GUIDANCE,
   inputSchema: {
     type: 'object',
@@ -1118,10 +1124,14 @@ const CONTAINER_RESTART_GUIDANCE =
   '`job_succeeded` and `job_error` are ALL ABOUT THE STOP HALF — the start half ' +
   'runs inline and reports no job — so a `job_succeeded` of true says the ' +
   'container was stopped and says nothing about whether it came back; ' +
-  '`resulting_status` is what speaks to that. THIS TOOL CANNOT STOP A RUNNING ' +
-  'JOB once it has started one, cannot start or stop a container without the ' +
-  'other half (`container_start` and `container_stop` do), cannot suspend or ' +
-  'resume one, and CANNOT RECOVER DATA A FORCED STOP LOST.';
+  '`resulting_status` is what speaks to that.';
+
+/** Selection class: which operations this tool is not. Stays on `description`. */
+const CONTAINER_RESTART_LIMITS =
+  'THIS TOOL CANNOT STOP A RUNNING JOB once it has started one, cannot start ' +
+  'or stop a container without the other half (`container_start` and ' +
+  '`container_stop` do), cannot suspend or resume one, and CANNOT RECOVER DATA ' +
+  'A FORCED STOP LOST.';
 
 export const containerRestart: MutatingTool = {
   name: 'container_restart',
@@ -1145,7 +1155,7 @@ export const containerRestart: MutatingTool = {
     'parameter — and NO UNIT IS ASSERTED for it. Omitted, the system\'s own ' +
     'default applies. THE RESULT IS ABOUT THE OPERATION THIS CALL STARTED, AND ' +
     '"STARTED" IS NOT "RESTARTED". ' +
-    CONTAINER_RESTART_GUIDANCE,
+    CONTAINER_RESTART_LIMITS,
   resultGuidance: CONTAINER_RESTART_GUIDANCE,
   inputSchema: {
     type: 'object',

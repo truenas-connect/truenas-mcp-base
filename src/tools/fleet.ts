@@ -880,18 +880,14 @@ function updateUnreadable(read: UpdateRead, system: string): Unreadable[] {
  * setting it was asked for.
  */
 /**
- * The interpretation half of this tool's description (#131), hoisted so the two
- * fields cannot drift: `description` is this text appended to the selection half,
- * and `resultGuidance` is this text. One copy means a reflow cannot drop a line
- * from one of them — the round-one failure on this very literal — and the
- * follow-up that stops advertising it deletes a reference rather than 140 lines.
+ * How to read a compliance report. Delivered with the first result, not
+ * advertised: `description` no longer appends it.
  *
- * **It ends at the literal's end, so it carries four sentences that are selection
- * class by `resultGuidance`'s own rule** — the pointers at `audit_config`,
- * `audit_log_query`, `share_access` and `iscsi_list`/`nvmeof_list`, plus the
- * read-only statement. A cross-tool pointer tells a caller this tool cannot
- * answer their question, which is worth knowing BEFORE choosing it. The follow-up
- * must leave those in `description` rather than deleting the whole reference.
+ * Four sentences in it are selection class and are restated on `description`,
+ * in the same words where the claim is the whole sentence — the pointers at
+ * `audit_config`, `audit_log_query`, `share_access` and
+ * `iscsi_list`/`nvmeof_list`, plus the read-only statement. A caller needs
+ * those before choosing the tool. The field-by-field reading stays here.
  */
 const COMPLIANCE_RESULT_GUIDANCE =
   '`system` is the system every fact below ' +
@@ -1056,7 +1052,15 @@ export const fleetComplianceReport: ReadOnlyTool = {
     'contract — is not this tool\'s to assert, so it reports the facts and the ' +
     'auditor decides. Any pass/fail reading of this report is the READER\'s ' +
     'judgement and not the system\'s. ' +
-    COMPLIANCE_RESULT_GUIDANCE,
+    'It only reads. It does not change a setting, renew a certificate, join or ' +
+    'leave a directory, alter a share, change what is audited, or install an ' +
+    'update. WHETHER AUDITING IS CONFIGURED ON CANNOT BE ANSWERED BY THIS TOOL — ' +
+    'that setting is `audit.config` on the middleware, and `audit_config` is the ' +
+    'tool that reads it. NO AUDIT ENTRY ITSELF IS RETURNED: those name people and ' +
+    'what they did, which is `audit_log_query`\'s answer and not this one. Who may ' +
+    'reach one share is `share_access`. iSCSI and NVMe-oF export block devices ' +
+    'rather than filesystem paths and are not counted as shares — see ' +
+    '`iscsi_list` and `nvmeof_list`.',
   resultGuidance: COMPLIANCE_RESULT_GUIDANCE,
   inputSchema: { type: 'object', properties: {} },
   requiredRole: Role.ReadOnly,

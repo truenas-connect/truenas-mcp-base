@@ -725,15 +725,12 @@ async function permissionsOf(
 }
 
 /**
- * The interpretation half of this tool's description (#131), hoisted so the two
- * fields cannot drift: `description` is this text appended to the selection
- * half, and `resultGuidance` is this text.
+ * How to read a dataset's permissions. Delivered with the first result, not
+ * advertised: `description` no longer appends it.
  *
- * It carries one sentence that is selection class by `resultGuidance`'s own
- * rule — the pointer at `storage_list_datasets` for the `id` these rows join
- * on. A cross-tool pointer tells a caller where the other half of an answer
- * lives, which is worth knowing before the call, so the follow-up that stops
- * appending this to `description` must leave that one in place.
+ * The selection-class pointer — the `id` is the one `storage_list_datasets`
+ * reports — is already on `description`, with the read-only statement. The
+ * rest is how to read the fields.
  */
 const DATASET_PERMISSIONS_RESULT_GUIDANCE =
   '`dataset` is the dataset that was asked about. `children` is every dataset ' +
@@ -885,8 +882,7 @@ export const datasetPermissions: ReadOnlyTool = {
     'not report and nothing in this catalog does — so an NFSv4 ACL reported ' +
     'here is a reason to check, not a proof that the mode is fixed. Share-level ' +
     'permissions are a different question again and `share_access` is what ' +
-    'answers it. ' +
-    DATASET_PERMISSIONS_RESULT_GUIDANCE,
+    'answers it.',
   resultGuidance: DATASET_PERMISSIONS_RESULT_GUIDANCE,
   inputSchema: {
     type: 'object',

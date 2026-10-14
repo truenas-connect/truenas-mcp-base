@@ -674,18 +674,12 @@ function ambiguous(selector: Selector, matches: AccessTarget[]): Error {
 }
 
 /**
- * The interpretation half of this tool's description (#131), hoisted so the two
- * fields cannot drift: `description` is this text appended to the selection half,
- * and `resultGuidance` is this text. One copy means a reflow cannot drop a line
- * from one of them — the round-one failure on this very literal — and the
- * follow-up that stops advertising it deletes a reference rather than 140 lines.
+ * How to read one share's access. Delivered with the first result, not
+ * advertised: `description` no longer appends it.
  *
- * **It ends at the literal's end, so it carries four sentences that are selection
- * class by `resultGuidance`'s own rule** — the pointers at `audit_config`,
- * `audit_log_query`, `share_access` and `iscsi_list`/`nvmeof_list`, plus the
- * read-only statement. A cross-tool pointer tells a caller this tool cannot
- * answer their question, which is worth knowing BEFORE choosing it. The follow-up
- * must leave those in `description` rather than deleting the whole reference.
+ * The one selection-class sentence it ends with — this tool reads access and
+ * changes none of it — is restated on `description`. How to name the share is
+ * already there. The rest is how to read the fields.
  */
 const SHARE_ACCESS_RESULT_GUIDANCE =
   '`failures` reports a protocol whose ' +
@@ -810,8 +804,8 @@ export const shareAccess: ReadOnlyTool = {
     'share nobody can reach are opposite answers. A string matching MORE THAN ' +
     'one share is also an error, listing what it matched — one path can be ' +
     'shared over both protocols at once and the two grant access differently, ' +
-    'so there is no single answer to give. ' +
-    SHARE_ACCESS_RESULT_GUIDANCE,
+    'so there is no single answer to give. This tool reads access and changes ' +
+    'none of it.',
   resultGuidance: SHARE_ACCESS_RESULT_GUIDANCE,
   inputSchema: {
     type: 'object',
