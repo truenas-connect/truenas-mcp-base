@@ -91,10 +91,13 @@ interface ToolBase {
    * {@link ToolBase.resultGuidance} — see there for where the line falls and
    * why it is drawn at all.
    *
-   * A tool that has been split carries the interpretation half in BOTH for now:
-   * one hoisted const, referenced here and there, so nothing is missing from
-   * what hosts render today. It stops being appended here only once an adapter
-   * renders the other field.
+   * A tool that has been split does not append {@link ToolBase.resultGuidance}
+   * here. The server renders that field with the first result, so advertising
+   * it again is a second copy of the same prose in every `tools/list`. What
+   * stays here from that text is only a sentence that bears on choosing the
+   * tool — a cross-tool pointer, a read-only statement — and each tool's
+   * const names which. A tool that has not been split still carries its
+   * interpretation text only in this field.
    */
   description: string;
   /**

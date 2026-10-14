@@ -1108,20 +1108,23 @@ describe('fleet_compliance_report — result guidance', () => {
    * The prose split (#131) is a text edit over a 10KB literal, and the first
    * attempt at it silently dropped two lines built from template literals with
    * all four CI jobs green — nothing in the repository asserted description
-   * text, so nothing could catch it. These pin the two properties that would
-   * have. Fifty-three more tools take the same edit.
+   * text, so nothing could catch it. The guidance is no longer appended to
+   * `description`; these pin that it is still delivered, and that the
+   * selection sentences did not leave with it.
    */
-  it('appends the same guidance text it delivers, from one source', () => {
-    // Structural rather than held here: both fields reference one hoisted
-    // const, so a reflow cannot drop a line from one copy — there is no second
-    // copy. This asserts the arrangement rather than the text, and it is what
-    // fails if someone reintroduces a literal in either field.
-    expect(fleetComplianceReport.description).toContain(
-      fleetComplianceReport.resultGuidance ?? '',
-    );
-    expect(fleetComplianceReport.description.endsWith(
-      fleetComplianceReport.resultGuidance ?? '',
-    )).toBe(true);
+  it('delivers the guidance with the result and does not advertise it', () => {
+    const guidance = fleetComplianceReport.resultGuidance ?? '';
+    expect(guidance.length).toBeGreaterThan(0);
+    expect(fleetComplianceReport.description.includes(guidance)).toBe(false);
+  });
+
+  it('keeps the selection pointers on the description', () => {
+    const description = fleetComplianceReport.description;
+    expect(description).toContain('It only reads. It does not change a setting');
+    expect(description).toContain('`audit_config` is the tool that reads it');
+    expect(description).toContain('`audit_log_query`\'s answer and not this one');
+    expect(description).toContain('Who may reach one share is `share_access`');
+    expect(description).toContain('see `iscsi_list` and `nvmeof_list`');
   });
 
   it('states the expiry horizon and the entry cap, both interpolated', () => {

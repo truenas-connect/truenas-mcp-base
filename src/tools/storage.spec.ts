@@ -1056,15 +1056,15 @@ describe('dataset_permissions', () => {
     }
   });
 
-  it('carries the interpretation half in both fields, and only that half', async () => {
-    // One hoisted const referenced twice (#131), so no reflow can drift them.
-    expect(datasetPermissions.description).toContain(datasetPermissions.resultGuidance ?? '');
-    expect(datasetPermissions.description.endsWith(datasetPermissions.resultGuidance ?? '')).toBe(
-      true,
-    );
-    // The selection half stays out of it: which id the tool takes, and that
-    // nothing here changes a permission, are things a caller needs BEFORE it
-    // chooses the tool.
+  it('delivers the interpretation half with the result and does not advertise it', () => {
+    const guidance = datasetPermissions.resultGuidance ?? '';
+    expect(guidance.length).toBeGreaterThan(0);
+    expect(datasetPermissions.description.includes(guidance)).toBe(false);
+    // The selection half stays on the description, and out of the guidance:
+    // which id the tool takes, and that nothing here changes a permission,
+    // are things a caller needs BEFORE it chooses the tool.
+    expect(datasetPermissions.description).toContain('`storage_list_datasets` reports');
+    expect(datasetPermissions.description).toContain('THIS TOOL ONLY READS');
     expect(datasetPermissions.resultGuidance).not.toContain('THIS TOOL ONLY READS');
   });
 });

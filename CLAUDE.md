@@ -1262,6 +1262,17 @@ an adapter renders `guidance`. The ordering is not discipline: while nothing
 renders the new field, removing the text from the old one would delete the
 caveats rather than move them.
 
+**That follow-up has landed for the tools that were copied.** `truenas-mcp-server`
+renders `resultGuidance` after the first data-bearing result, so
+`fleet_compliance_report`, `share_access`, `dataset_permissions`,
+`container_list`, `container_start`, `container_stop` and `container_restart`
+no longer append the const to `description`. The text is kept once, on
+`resultGuidance`. Sentences that bear on choosing the tool — the cross-tool
+pointers and the read-only statement each const's comment names — stay on
+`description`. The other tools never had a `resultGuidance` copy; their
+interpretation text is still only in `description`, and moving it is a further
+split rather than this dedupe.
+
 **The line is drawn by WHEN the text becomes actionable, not by length.**
 Interpretation guidance cannot be acted on at selection time — a caller cannot
 use "null means not read" before it holds a null. So this is not a summary of

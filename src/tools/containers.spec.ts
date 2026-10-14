@@ -266,26 +266,26 @@ describe('container_list', () => {
       // The version rules ONE of them in or out. A guidance claiming it
       // separates the set would be a two-valued account of a three-valued
       // outcome — and the third cause is the guards in this very file.
-      expect(containerList.description).toContain('CANNOT BE READ WITHOUT IT');
-      expect(containerList.description).toContain(
-        'THREE CAUSES AND THIS TOOL SEPARATES NONE OF THEM',
-      );
-      expect(containerList.description).toContain(
-        'it arrived in a form this tool would not read',
-      );
-      expect(containerList.description).toContain('rules the FIRST cause in or out');
+      // How to read the null is delivered with the result, not advertised.
+      const guidance = containerList.resultGuidance ?? '';
+      expect(guidance).toContain('CANNOT BE READ WITHOUT IT');
+      expect(guidance).toContain('THREE CAUSES AND THIS TOOL SEPARATES NONE OF THEM');
+      expect(guidance).toContain('it arrived in a form this tool would not read');
+      expect(guidance).toContain('rules the FIRST cause in or out');
     });
 
     it('says UNKNOWN is not a container at rest', () => {
-      expect(containerList.description).toContain('NOT a container at rest');
+      expect(containerList.resultGuidance).toContain('NOT a container at rest');
     });
 
     it('points at vms_list for the machines this does not list', () => {
       expect(containerList.description).toContain('IT DOES NOT LIST VIRTUAL MACHINES OF ANY KIND');
     });
 
-    it('carries the guidance as a suffix of the description, one copy of the prose', () => {
-      expect(containerList.description.endsWith(containerList.resultGuidance ?? '')).toBe(true);
+    it('delivers the guidance with the result and does not advertise it', () => {
+      const guidance = containerList.resultGuidance ?? '';
+      expect(guidance.length).toBeGreaterThan(0);
+      expect(containerList.description.includes(guidance)).toBe(false);
     });
   });
 });
@@ -321,9 +321,11 @@ describe('the container power tools', () => {
     },
   );
 
-  it('carry the guidance as a suffix of the description, one copy of the prose', () => {
+  it('deliver the guidance with the result and do not advertise it', () => {
     for (const tool of tools) {
-      expect(tool.description.endsWith(tool.resultGuidance ?? '')).toBe(true);
+      const guidance = tool.resultGuidance ?? '';
+      expect(guidance.length, tool.name).toBeGreaterThan(0);
+      expect(tool.description.includes(guidance), tool.name).toBe(false);
     }
   });
 
@@ -951,14 +953,15 @@ describe('container_restart', () => {
   });
 
   it('says a changed of false is the ordinary answer for a restart that worked', () => {
-    expect(containerRestart.description).toContain(
+    const guidance = containerRestart.resultGuidance ?? '';
+    expect(guidance).toContain(
       'A `changed: false` ACROSS A RESTART IS THE ORDINARY ANSWER FOR ONE THAT WORKED',
     );
-    expect(containerRestart.description).toContain('DOES NOT SEPARATE THE TWO');
+    expect(guidance).toContain('DOES NOT SEPARATE THE TWO');
   });
 
   it('says the job fields are about the stop half', () => {
-    expect(containerRestart.description).toContain('ALL ABOUT THE STOP HALF');
+    expect(containerRestart.resultGuidance).toContain('ALL ABOUT THE STOP HALF');
   });
 
   it('reports a restart that left the container running as changed false', async () => {
