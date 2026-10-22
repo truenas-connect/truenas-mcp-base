@@ -2868,6 +2868,26 @@ refuses SMB beside a disabled password (also read from the implementation).
 Neither is left to be discovered as a rejection at `execute`. Neither has been
 checked against a live system.
 
+### A limit below current usage is warned about, not refused (#189)
+
+`dataset_set_quota` accepts a `quota` or `refquota` at or below the usage it
+caps. ZFS accepts one, and the dataset is then over its limit and writes that
+add to it fail. Shrinking a quota to stop a runaway writer is a real use of
+exactly that, so the plan states it in capitals beside the current usage and
+does not refuse. Where the usage could not be read, the plan says the
+comparison was not made. Silence there would read as "there is room".
+
+**The limits are read the way `datasets_quota_report` reads them, through the
+same `quotaLimit`.** There is one account of what `0`, null and an unreadable
+property mean. A removal is sent as passed, `0` or null, and both are compared
+as `0` when `confirmed` is derived. Otherwise a null sent could never confirm
+(#184's problem, met here by normalising rather than by a token, because both
+spellings mean the same thing on the update).
+
+The read is plan-time only and is not a step, as `snapshots_create`'s is
+(#119). `execute` makes one call, and the result reads the limits off the
+updated dataset it answers with (#121).
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { EMPTY, Observable, of, throwError } from 'rxjs';
-import { fakeSystem } from '@/testing/fake-systems';
-import { SystemHandle, ToolContext } from '@/catalog/tool';
+import { failingSystem, fakeSystem } from '@/testing/fake-systems';
+import { PlanStep, SystemHandle, ToolContext } from '@/catalog/tool';
 import {
   datasetPermissions,
+  datasetSetQuota,
   listDatasets,
   poolStatus,
   quotaReport,
@@ -1066,5 +1067,207 @@ describe('dataset_permissions', () => {
     // nothing here changes a permission, are things a caller needs BEFORE it
     // chooses the tool.
     expect(datasetPermissions.resultGuidance).not.toContain('THIS TOOL ONLY READS');
+  });
+});
+
+describe('dataset_set_quota', () => {
+  const TIB = 1024 ** 4;
+  const GIB = 1024 ** 3;
+  /** One `pool.dataset.query` row, with the four properties the plan reads. */
+  const media = (over: Record<string, unknown> = {}) => ({
+    id: 'tank/media',
+    type: 'FILESYSTEM',
+    used: { parsed: 3 * TIB },
+    referenced: { parsed: GIB },
+    quota: { parsed: 4 * TIB },
+    refquota: { parsed: 0 },
+    ...over,
+  });
+  const system = (over: Record<string, unknown> = {}) =>
+    fakeSystem({ 'pool.dataset.query': [media()], 'pool.dataset.update': media(), ...over });
+  const describeStep = async (args: Record<string, unknown>, over: Record<string, unknown> = {}) => {
+    const steps = await datasetSetQuota.plan(system(over).ctx, { dataset: 'tank/media', ...args });
+    expect(steps).toHaveLength(1);
+    return (steps[0] as PlanStep).description;
+  };
+
+  describe('arguments', () => {
+    it('refuses a call naming neither limit, in the schema and in the parse', () => {
+      expect(datasetSetQuota.inputSchema['required']).toEqual(['dataset']);
+      expect(datasetSetQuota.inputSchema['anyOf']).toEqual([
+        { required: ['quota_bytes'] },
+        { required: ['refquota_bytes'] },
+      ]);
+      expect(() => datasetSetQuota.normalizeArgs?.({ dataset: 'tank/media' })).toThrow(
+        'Nothing to change: pass at least one of quota_bytes, refquota_bytes',
+      );
+    });
+
+    it('takes a whole number of bytes, 0 or more, or null', () => {
+      for (const bad of [-1, 1.5, '100', true, Number.MAX_SAFE_INTEGER + 1]) {
+        expect(() => datasetSetQuota.normalizeArgs?.({ dataset: 'tank/media', quota_bytes: bad })).toThrow(
+          '"quota_bytes" must be a whole number of bytes, 0 or more, or null',
+        );
+      }
+      expect(() => datasetSetQuota.normalizeArgs?.({ dataset: '', quota_bytes: 1 })).toThrow(/"dataset" is required/);
+      expect(() => datasetSetQuota.normalizeArgs?.({ quota_bytes: 1 })).toThrow(/"dataset" is required/);
+      expect(datasetSetQuota.normalizeArgs?.({ dataset: 'tank/media', refquota_bytes: null, quota_bytes: 0 })).toEqual({
+        dataset: 'tank/media',
+        quota_bytes: 0,
+        refquota_bytes: null,
+      });
+    });
+
+    it('is a full-access, reversible mutation', () => {
+      expect(datasetSetQuota.mutating).toBe(true);
+      expect(datasetSetQuota.destructiveness).toBe('reversible');
+      expect(datasetSetQuota.description).toContain(datasetSetQuota.resultGuidance as string);
+    });
+  });
+
+  describe('plan', () => {
+    it('reads the one dataset by id, with the walk off and the four properties', async () => {
+      const { ctx, query } = system();
+      await datasetSetQuota.plan(ctx, { dataset: 'tank/media', quota_bytes: 5 * TIB });
+      expect(query).toHaveBeenCalledWith('pool.dataset.query', [['id', '=', 'tank/media']], {
+        extra: { retrieve_children: false, properties: ['used', 'referenced', 'quota', 'refquota'] },
+      });
+    });
+
+    it('sends only the limits passed, under the names the update takes', async () => {
+      const [step] = await datasetSetQuota.plan(system().ctx, { dataset: 'tank/media', quota_bytes: 5 * TIB });
+      expect(step).toMatchObject({ method: 'pool.dataset.update', params: ['tank/media', { quota: 5 * TIB }] });
+      expect(step?.description).toContain('Only quota is sent.');
+      const [both] = await datasetSetQuota.plan(system().ctx, {
+        dataset: 'tank/media',
+        quota_bytes: 5 * TIB,
+        refquota_bytes: null,
+      });
+      expect(both?.params).toEqual(['tank/media', { quota: 5 * TIB, refquota: null }]);
+      expect(both?.description).toContain('Only quota and refquota are sent.');
+    });
+
+    it('fails naming a dataset the response does not list, compared on the id', async () => {
+      // A dropped filter answers with the whole table; another dataset is not this one.
+      const other = system({ 'pool.dataset.query': [media({ id: 'tank/other' }), 'junk'] });
+      await expect(datasetSetQuota.plan(other.ctx, { dataset: 'tank/media', quota_bytes: 1 })).rejects.toThrow(
+        'Dataset "tank/media" does not exist on this system',
+      );
+      const failing = failingSystem({}, { 'pool.dataset.query': new Error('busy') });
+      await expect(datasetSetQuota.plan(failing.ctx, { dataset: 'tank/media', quota_bytes: 1 })).rejects.toThrow(
+        'Dataset "tank/media" could not be read (pool.dataset.query failed: busy), so nothing is planned',
+      );
+    });
+
+    it('names each limit now, as it will be, and the usage it caps, in bytes and binary units', async () => {
+      const text = await describeStep({ quota_bytes: 5 * TIB, refquota_bytes: 2 * GIB });
+      expect(text).toContain(
+        '`quota` (caps `used`, the dataset together with its descendants and snapshots): now ' +
+          `${4 * TIB} bytes (4 TiB); will be ${5 * TIB} bytes (5 TiB); it currently has ${3 * TIB} bytes (3 TiB) \`used\`.`,
+      );
+      expect(text).toContain(
+        '`refquota` (caps `referenced`, the data the dataset itself holds alone): now no limit; will be ' +
+          `${2 * GIB} bytes (2 GiB); it currently has ${GIB} bytes (1 GiB) \`referenced\`.`,
+      );
+      expect(text).toContain('read when this plan was made and are not read again');
+      expect(text).not.toContain('WILL FAIL');
+    });
+
+    it('states both 0 and null as no limit', async () => {
+      expect(await describeStep({ quota_bytes: 0 })).toContain('will be no limit (sent as 0)');
+      expect(await describeStep({ quota_bytes: null })).toContain('will be no limit (sent as null)');
+    });
+
+    it('warns, and does not refuse, where the new limit is at or below the usage it caps', async () => {
+      const below = await describeStep({ quota_bytes: 2 * TIB });
+      expect(below).toContain(
+        'THE NEW QUOTA IS AT OR BELOW WHAT THE DATASET ALREADY HOLDS, SO WRITES THAT ADD TO ITS `used` ' +
+          'WILL FAIL, in the dataset and in every descendant, until space is freed or the limit is raised. ' +
+          'This is allowed and is not refused.',
+      );
+      const equal = await describeStep({ refquota_bytes: GIB });
+      expect(equal).toContain('THE NEW REFQUOTA IS AT OR BELOW WHAT THE DATASET ALREADY HOLDS');
+      expect(equal).not.toContain('every descendant');
+      // Removing a limit can never be below anything.
+      expect(await describeStep({ quota_bytes: 0 }, { 'pool.dataset.query': [media({ used: { parsed: 1 } })] })).not.toContain(
+        'WILL FAIL',
+      );
+    });
+
+    it('says the comparison was not made where the usage could not be read', async () => {
+      const text = await describeStep({ quota_bytes: TIB }, { 'pool.dataset.query': [media({ used: undefined })] });
+      expect(text).toContain('its current `used` could not be read');
+      expect(text).toContain('Whether the new quota is below what the dataset already holds was not established');
+      expect(text).not.toContain('WILL FAIL');
+    });
+
+    it('says a limit the dataset already holds changes nothing, and an unreadable one is not "no limit"', async () => {
+      expect(await describeStep({ quota_bytes: 4 * TIB })).toContain(
+        'It already holds that limit, so this changes nothing for it and is not an error.',
+      );
+      // `0` and null are one meaning, on both sides.
+      expect(await describeStep({ refquota_bytes: null })).toContain('It already holds that limit');
+      const unread = await describeStep({ quota_bytes: 0 }, { 'pool.dataset.query': [media({ quota: 'x' })] });
+      expect(unread).toContain('now a value that could not be read');
+      expect(unread).not.toContain('already holds');
+    });
+
+    it('renders a size that does not round exactly as about', async () => {
+      expect(await describeStep({ quota_bytes: 1536 * GIB + 1 })).toContain(`${1536 * GIB + 1} bytes (about 1.5 TiB)`);
+      expect(await describeStep({ quota_bytes: 1000 })).toContain('will be 1000 bytes;');
+      expect(await describeStep({ quota_bytes: 1 })).toContain('will be 1 byte;');
+    });
+  });
+
+  describe('execute', () => {
+    it('sends what was planned and reads the limits back off the response', async () => {
+      const { ctx, call } = system({
+        'pool.dataset.update': media({ quota: { parsed: 5 * TIB }, referenced: undefined }),
+      });
+      const result = await datasetSetQuota.execute(ctx, { dataset: 'tank/media', quota_bytes: 5 * TIB });
+      expect(call).toHaveBeenCalledWith('pool.dataset.update', ['tank/media', { quota: 5 * TIB }]);
+      expect(result).toEqual({
+        dataset: 'tank/media',
+        requested: { quota_bytes: 5 * TIB },
+        quota_bytes: 5 * TIB,
+        used_bytes: 3 * TIB,
+        refquota_bytes: 0,
+        referenced_bytes: null,
+        confirmed: true,
+      });
+    });
+
+    it('confirms a removal sent as null against a limit read back as 0 or as a null property', async () => {
+      for (const refquota of [{ parsed: 0 }, { parsed: null }, null]) {
+        const { ctx } = system({ 'pool.dataset.update': media({ refquota }) });
+        expect(await datasetSetQuota.execute(ctx, { dataset: 'tank/media', refquota_bytes: null })).toMatchObject({
+          refquota_bytes: 0,
+          confirmed: true,
+        });
+      }
+    });
+
+    it('is not a success where a limit came back as something else, and unestablished where it could not be read', async () => {
+      const other = system({ 'pool.dataset.update': media() });
+      expect(await datasetSetQuota.execute(other.ctx, { dataset: 'tank/media', quota_bytes: TIB })).toMatchObject({
+        quota_bytes: 4 * TIB,
+        confirmed: false,
+      });
+      const unread = system({ 'pool.dataset.update': media({ quota: 'x' }) });
+      expect(await datasetSetQuota.execute(unread.ctx, { dataset: 'tank/media', quota_bytes: TIB })).toMatchObject({
+        quota_bytes: null,
+        confirmed: null,
+      });
+      const notRecord = system({ 'pool.dataset.update': true });
+      expect(await datasetSetQuota.execute(notRecord.ctx, { dataset: 'tank/media', quota_bytes: TIB })).toEqual({
+        dataset: 'tank/media',
+        requested: { quota_bytes: TIB },
+        quota_bytes: null,
+        used_bytes: null,
+        refquota_bytes: null,
+        referenced_bytes: null,
+        confirmed: null,
+      });
+    });
   });
 });

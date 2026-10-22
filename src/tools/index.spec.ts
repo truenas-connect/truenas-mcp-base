@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the eighty-nine sketch tools', () => {
+  it('registers the ninety sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -94,6 +94,7 @@ describe('createDefaultCatalog', () => {
       'nvmeof_subsystem_create',
       'nvmeof_subsystem_update',
       'user_create',
+      'dataset_set_quota',
     ]);
   });
 
@@ -101,6 +102,12 @@ describe('createDefaultCatalog', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain('user_create');
     expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain('user_create');
     expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain('user_create');
+  });
+
+  it('advertises dataset_set_quota to a full-access credential only', () => {
+    expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain('dataset_set_quota');
+    expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain('dataset_set_quota');
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain('dataset_set_quota');
   });
 
   it('advertises the SMB, NFS, iSCSI target and NVMe-oF subsystem mutations to a sharing credential, and not to a read-only one', () => {

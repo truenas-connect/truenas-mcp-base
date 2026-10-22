@@ -1,7 +1,8 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
-import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+import { MutatingTool, PlanStep, ReadOnlyTool, SystemHandle, ToolContext } from '@/catalog/tool';
 import {
+  agreement,
   booleanOrNull,
   errorText,
   numberOrNull,
@@ -1003,6 +1004,260 @@ export const datasetPermissions: ReadOnlyTool = {
       // NOT cover is a descendant whose id could not be read, which is dropped
       // before this count is taken; the guidance names that separately.
       children_truncated: wantChildren ? descendants.length > reported.length : null,
+    };
+  },
+};
+
+/** The two limits `dataset_set_quota` sets, by the argument that names each. */
+const QUOTA_ARGS = { quota: 'quota_bytes', refquota: 'refquota_bytes' } as const;
+
+type QuotaKind = keyof typeof QUOTA_ARGS;
+
+/**
+ * What `dataset_set_quota` was asked to do. A limit not passed is absent, never
+ * null: null is a value the caller sends, and it means "no limit" exactly as `0`
+ * does — the client types both fields `number | (0 | null)` on the update.
+ */
+interface QuotaRequest {
+  dataset: string;
+  limits: Partial<Record<QuotaKind, number | null>>;
+}
+
+function parseQuotaRequest(args: Record<string, unknown>): QuotaRequest {
+  const dataset = args['dataset'];
+  if (typeof dataset !== 'string' || dataset === '') {
+    throw new Error('"dataset" is required and must be a dataset name, such as "tank/media"');
+  }
+  const limits: QuotaRequest['limits'] = {};
+  for (const kind of Object.keys(QUOTA_ARGS) as QuotaKind[]) {
+    const key = QUOTA_ARGS[kind];
+    const value = args[key];
+    if (value === undefined) continue;
+    if (value !== null && (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)) {
+      throw new Error(`"${key}" must be a whole number of bytes, 0 or more, or null`);
+    }
+    limits[kind] = value;
+  }
+  if (Object.keys(limits).length === 0) {
+    throw new Error('Nothing to change: pass at least one of quota_bytes, refquota_bytes');
+  }
+  return { dataset, limits };
+}
+
+/** The arguments as passed, under their own names, for the confirmation token and the result. */
+function quotaArgs(limits: QuotaRequest['limits']): Record<string, number | null> {
+  return Object.fromEntries(
+    (Object.keys(limits) as QuotaKind[]).map((kind) => [QUOTA_ARGS[kind], limits[kind] ?? null]),
+  );
+}
+
+const BYTE_UNITS = ['KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB'];
+
+/**
+ * A byte count as the plan states it: the exact number, then the same size in
+ * binary units so an approver does not have to count digits. The exact number
+ * comes first because it is what is sent; the rendering is marked "about"
+ * wherever rounding it to two places changed it.
+ */
+function bytesText(bytes: number): string {
+  const exact = `${bytes} ${bytes === 1 ? 'byte' : 'bytes'}`;
+  if (bytes < 1024) return exact;
+  let value = bytes;
+  let unit = -1;
+  while (value >= 1024 && unit < BYTE_UNITS.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const rounded = Number(value.toFixed(2));
+  const approximate = rounded * 1024 ** (unit + 1) === bytes ? '' : 'about ';
+  return `${exact} (${approximate}${rounded} ${BYTE_UNITS[unit]})`;
+}
+
+/** A limit as {@link quotaLimit} reads it, in words: `0` is no limit, null unreadable. */
+function limitText(limit: number | null): string {
+  if (limit === null) return 'a value that could not be read';
+  return limit === 0 ? 'no limit' : bytesText(limit);
+}
+
+/** What each limit caps, in `datasets_quota_report`'s own words, and the usage read beside it. */
+const QUOTA_CAPS: Record<QuotaKind, { caps: string; usage: 'used' | 'referenced' }> = {
+  quota: { caps: '`used`, the dataset together with its descendants and snapshots', usage: 'used' },
+  refquota: { caps: '`referenced`, the data the dataset itself holds alone', usage: 'referenced' },
+};
+
+/**
+ * One limit's sentence in the plan: what it caps, what it is now, what it will
+ * be, and the usage it caps.
+ *
+ * A limit at or below current usage is WARNED about and not refused. ZFS
+ * accepts it and the dataset is then over its limit, so every write that would
+ * add to the capped usage fails — and shrinking a quota to stop a runaway writer
+ * is a real use of exactly that. The warning is the one thing an approver must
+ * not miss, so it is stated outright; where the usage could not be read the plan
+ * says the comparison was not made rather than staying silent, since silence
+ * reads as "there is room".
+ */
+function limitSentence(kind: QuotaKind, sent: number | null, row: Record<string, unknown>): string {
+  const { caps, usage } = QUOTA_CAPS[kind];
+  const current = quotaLimit(row[kind]);
+  const used = propertyBytes(row[usage]);
+  const wanted = sent ?? 0;
+  const spelled = sent === null ? 'null' : String(sent);
+  const usageText = used === null ? `its current \`${usage}\` could not be read` : `it currently has ${bytesText(used)} \`${usage}\``;
+  let effect = '';
+  if (current === wanted) {
+    effect = ' It already holds that limit, so this changes nothing for it and is not an error.';
+  }
+  if (wanted > 0 && used === null) {
+    effect +=
+      ` Whether the new ${kind} is below what the dataset already holds was not established, ` +
+      'because that usage could not be read.';
+  } else if (wanted > 0 && used !== null && wanted <= used) {
+    effect +=
+      ` THE NEW ${kind.toUpperCase()} IS AT OR BELOW WHAT THE DATASET ALREADY HOLDS, SO WRITES ` +
+      `THAT ADD TO ITS \`${usage}\` WILL FAIL` +
+      `${kind === 'quota' ? ', in the dataset and in every descendant,' : ''} until space is freed or ` +
+      'the limit is raised. This is allowed and is not refused.';
+  }
+  return (
+    ` \`${kind}\` (caps ${caps}): now ${limitText(current)}; will be ` +
+    `${wanted === 0 ? `no limit (sent as ${spelled})` : bytesText(wanted)}; ${usageText}.${effect}`
+  );
+}
+
+/** The dataset row as the plan reads it, matched by id on the response (#153). */
+async function readQuotaDataset(ctx: ToolContext, dataset: string): Promise<Record<string, unknown>> {
+  let rows: unknown[];
+  try {
+    rows = await firstValueFrom(
+      // Inlined so the call's own parameter types apply, as above. Named by id,
+      // so the walk is off — `snapshots.ts`'s existence read — and the four
+      // properties are `datasets_quota_report`'s.
+      ctx.system.client.api.query('pool.dataset.query', [['id', '=', dataset]], {
+        extra: { retrieve_children: false, properties: ['used', 'referenced', 'quota', 'refquota'] },
+      }),
+    );
+  } catch (reason) {
+    throw new Error(
+      `Dataset "${dataset}" could not be read (pool.dataset.query failed: ${errorText(reason)}), so nothing is planned`,
+    );
+  }
+  const row = rows.map(recordOrNull).find((held) => held !== null && textOrNull(held['id']) === dataset);
+  if (row === undefined || row === null) {
+    throw new Error(
+      `Dataset "${dataset}" does not exist on this system — \`storage_list_datasets\` reports each ` +
+        "dataset's `id`, which is the name this takes",
+    );
+  }
+  return row;
+}
+
+const DATASET_SET_QUOTA_GUIDANCE =
+  '`dataset` is the dataset named. `requested` is exactly what was passed, under the ' +
+  "arguments' own names. `quota_bytes` and `refquota_bytes` are both limits as the " +
+  'response the update itself answered with states them — never copied from the request ' +
+  '— read the way `datasets_quota_report` reads them: `0` is no limit of that kind, and ' +
+  'null is a limit that could not be read, which is NOT "no limit". Both are reported ' +
+  'whichever was sent. `used_bytes` and `referenced_bytes` are the usage each limit caps, ' +
+  'off the same response, and null where it carried no value this tool could read; ' +
+  '`referenced` is not a field the API declares, so a null there is ordinary and is not ' +
+  'evidence of anything about the dataset. `confirmed` is whether every limit sent reads ' +
+  'back as sent, a null sent comparing as `0`: true is the system reporting back what was ' +
+  'asked for; FALSE IS NOT A SUCCESS — the call did not reject and a limit was stored as ' +
+  'something else; and null is a response in which a limit sent could not be read back ' +
+  'and none read back as different.';
+
+export const datasetSetQuota: MutatingTool = {
+  name: 'dataset_set_quota',
+  description:
+    "Sets, changes or removes one ZFS dataset's `quota`, its `refquota`, or both, on " +
+    'this TrueNAS system. Two-phase: called without a confirmation_token it returns a plan ' +
+    'for user approval; called with one it sends the change. `dataset` is the dataset\'s ' +
+    'full name, as `storage_list_datasets` and `datasets_quota_report` report it in `id`; ' +
+    'a name the system does not list fails the plan, naming it. `quota_bytes` and ' +
+    '`refquota_bytes` are limits in bytes, and at least one is required; ONLY THE LIMITS ' +
+    'PASSED ARE SENT. `0` and null both REMOVE that limit. The two limits cap different ' +
+    'things, as `datasets_quota_report` describes: `quota` caps `used`, the dataset with ' +
+    'its descendants and snapshots, and `refquota` caps `referenced`, the data the dataset ' +
+    'itself holds alone. THE PLAN STATES EACH LIMIT AS IT IS NOW, AS IT WILL BE, AND THE ' +
+    'USAGE IT CAPS, in bytes and in binary units, so the call that undoes it is in the ' +
+    'plan. A LIMIT AT OR BELOW CURRENT USAGE IS ACCEPTED, NOT REFUSED, AND THE PLAN SAYS ' +
+    'WRITES WILL THEN FAIL — lowering a quota to stop a runaway writer is a real use. The ' +
+    'current values are read when the plan is made and not again. Setting a limit the ' +
+    'dataset already holds is not an error. This tool does not set the quota warning or ' +
+    'critical alert thresholds, per-user or per-group quotas, reservations, or a volume\'s ' +
+    'size. `destructiveness` is `reversible`: nothing is deleted, and sending the old ' +
+    'values the plan names puts the limits back. ' +
+    DATASET_SET_QUOTA_GUIDANCE,
+  resultGuidance: DATASET_SET_QUOTA_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      dataset: {
+        type: 'string',
+        description: 'The dataset\'s full name, e.g. "tank/media", as `storage_list_datasets` reports it in `id`.',
+      },
+      quota_bytes: {
+        oneOf: [{ type: 'integer', minimum: 0 }, { type: 'null' }],
+        description:
+          'The new `quota`, in bytes: caps the dataset with its descendants and snapshots. 0 or null removes it.',
+      },
+      refquota_bytes: {
+        oneOf: [{ type: 'integer', minimum: 0 }, { type: 'null' }],
+        description: 'The new `refquota`, in bytes: caps the data the dataset itself holds. 0 or null removes it.',
+      },
+    },
+    required: ['dataset'],
+    anyOf: [{ required: ['quota_bytes'] }, { required: ['refquota_bytes'] }],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // Two numbers on one dataset, and the plan names the values to send back.
+  // A limit below usage stops writes and deletes nothing.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const { dataset, limits } = parseQuotaRequest(rawArgs);
+    return { dataset, ...quotaArgs(limits) };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const { dataset, limits } = parseQuotaRequest(rawArgs);
+    const row = await readQuotaDataset(ctx, dataset);
+    const sentences = (Object.keys(limits) as QuotaKind[])
+      .map((kind) => limitSentence(kind, limits[kind] ?? null, row))
+      .join('');
+    return [
+      {
+        method: 'pool.dataset.update',
+        params: [dataset, limits],
+        description:
+          `Set limits on dataset "${dataset}". Only ${Object.keys(limits).join(' and ')} ` +
+          `${Object.keys(limits).length === 1 ? 'is' : 'are'} sent.${sentences} The current values ` +
+          'and usage were read when this plan was made and are not read again.',
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const { dataset, limits } = parseQuotaRequest(rawArgs);
+    const updated: unknown = await firstValueFrom(
+      ctx.system.client.api.call('pool.dataset.update', [dataset, limits]),
+    );
+    // The update answers with the updated dataset, so the limits are read off
+    // that rather than echoed from the request (#121), through the same reading
+    // `datasets_quota_report` gives them.
+    const held = recordOrNull(updated);
+    const quota = held === null ? null : quotaLimit(held['quota']);
+    const refquota = held === null ? null : quotaLimit(held['refquota']);
+    const sent = Object.fromEntries(
+      (Object.keys(limits) as QuotaKind[]).map((kind) => [kind, limits[kind] ?? 0]),
+    );
+    return {
+      dataset,
+      requested: quotaArgs(limits),
+      quota_bytes: quota,
+      used_bytes: held === null ? null : propertyBytes(held['used']),
+      refquota_bytes: refquota,
+      referenced_bytes: held === null ? null : propertyBytes(held['referenced']),
+      confirmed: agreement(sent, { quota, refquota }),
     };
   },
 };
