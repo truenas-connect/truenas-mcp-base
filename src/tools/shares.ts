@@ -11,6 +11,7 @@ import {
   plural,
   readStep,
   recordOrNull,
+  refuseArgs,
   rowWithId,
   strictTextList,
   switchOutcome,
@@ -1268,16 +1269,6 @@ const SMB_SHARE_FIELDS = ['name', 'path', 'comment', 'readonly', 'browsable', 'e
 
 /** The only `purpose` this catalog creates a share with. */
 const DEFAULT_SHARE = 'DEFAULT_SHARE' as const;
-
-/**
- * Arguments the API takes and these tools do not, refused by name. Silently
- * dropping one would let a caller believe it was applied.
- */
-function refuseArgs(args: Record<string, unknown>, keys: readonly string[], why: string): void {
-  for (const key of keys) {
-    if (args[key] !== undefined) throw new Error(`"${key}" is not accepted by this tool: ${why}`);
-  }
-}
 
 /** Why `options` and `audit` are refused, worded once for both tools. */
 const OPTIONS_REFUSED =

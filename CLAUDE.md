@@ -1523,10 +1523,12 @@ targets and sessions worth reporting.
 carries the subsystems published through it — reduced to `subsystem_id` and
 `subsystem` (#100), never forwarded, and the NQN deliberately not repeated
 because it is reported once on the subsystem itself. iSCSI has the same
-relationship in a target's own `groups[].portal` and **this catalog does not
+relationship in a target's own `groups[].portal` and **`iscsi_list` does not
 read it**: `portal` sits beside `initiator` and `auth`, which are the initiator
 allowlist and the CHAP credential, and reading the group was out of #138's
-scope. So `iscsi_list` reports the portals and states outright that it does not
+scope. (`iscsi_target_create` and `iscsi_target_update` write `groups` and
+report them back since #185; the listing still does not.) So `iscsi_list`
+reports the portals and states outright that it does not
 say which portal serves which target. **A tool reporting two lists a caller
 would expect to be joined has to say it did not join them** — side by side is
 what an implied join looks like from the outside.
@@ -2789,6 +2791,27 @@ spelling, since `agreement` takes scalars.
 because two empty lists mean ANY client and read as nobody — #154's
 reassuring-silence direction. `plainPath` is the SMB path check, lifted out so
 both protocols refuse the same spellings.
+
+### Three numbers in a group, and one of them is not an id (#185)
+
+An iSCSI target's `groups[]` entry is `{ portal, initiator, authmethod, auth }`,
+all three references typed as bare numbers. `portal` and `initiator` are ROW IDS
+into `iscsi.portal` and `iscsi.initiator`; **`auth` is a CHAP credential's
+TAG**, which several `iscsi.auth` rows may share, and the middleware validates
+it with a query on `tag`. That is read from the TrueNAS implementation, not from
+the surface, so `iscsi_target_create` and `iscsi_target_update` match it on
+`tag`, say so in the schema and the description, and a plan naming an `id` that
+is not a tag fails rather than resolving to the wrong credential. (`iscsi_list`'s
+code comment used to say `portal` named a portal by tag; it names it by id.)
+
+**A reference the plan cannot resolve fails the plan, including where its table
+could not be read** — unlike #154's supporting reads, because the thing the
+approver would otherwise be shown is a bare number they cannot check. Each
+table is read once per plan and only where a group refers into it. A CHAP row is
+read through `tag` and `user` alone: it carries `secret` and `peersecret`.
+
+`refuseArgs` moved to `common.ts` beside `agreement`, as the second family to
+refuse API arguments by name.
 
 ## Conventions
 

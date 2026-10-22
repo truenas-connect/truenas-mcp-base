@@ -47,7 +47,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `service_control`, `container_start`, `container_stop`, `container_restart`,
   `pool_scrub_task_create`, `pool_scrub_task_update`, `share_set_enabled`,
   `smb_share_create`, `smb_share_update`, `nfs_share_create`,
-  `nfs_share_update` —
+  `nfs_share_update`, `iscsi_target_create`, `iscsi_target_update` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop` and `container_restart` the seven that
   start a background job,
@@ -154,6 +154,15 @@ confirmation UX, audit sinks) enters through injected interfaces.
   client, not nobody — and what identity mapping applies; the create plan also
   names the dataset and every export already covering the same, a parent or a
   child path. Nothing here deletes an NFS export.
+  `iscsi_target_create` makes one iSCSI target, always with mode `ISCSI`, and
+  `iscsi_target_update` changes an existing one's name, alias, portal groups or
+  authorised networks. Neither touches a target's mode or iSCSI parameters, and
+  neither maps an extent, so a created target serves no storage — which its plan
+  says. Every portal, initiator group and CHAP credential a group names is
+  resolved when the plan is made and named in words, a CHAP credential by its
+  tag and user only, never its secrets; `auth` is matched on the credential's
+  tag rather than its id. Both plans say who may connect — a null initiator is
+  any initiator, `NONE` is no CHAP. Nothing here deletes an iSCSI target.
   `container_list` and the three container power tools are the first family
   written against the client's `ops` layer rather than `api.call`, because every
   one of these operations changes SHAPE between TrueNAS versions and not just

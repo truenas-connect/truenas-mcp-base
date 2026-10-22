@@ -2,7 +2,7 @@ import { ToolCatalog } from '@/catalog/catalog';
 import { directoryServicesStatus, privilegesList, usersList } from '@/tools/accounts';
 import { alertsDismiss, alertSettings, alertsList, alertsRestore } from '@/tools/alerts';
 import { appEngineStatus, appsList, appsUpdateSummary } from '@/tools/apps';
-import { fcList, iscsiList, nvmeofList } from '@/tools/block';
+import { fcList, iscsiList, iscsiTargetCreate, iscsiTargetUpdate, nvmeofList } from '@/tools/block';
 import { bootPoolStatus } from '@/tools/boot';
 import { certificatesList } from '@/tools/certificates';
 import {
@@ -166,6 +166,8 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(smbShareUpdate);
   catalog.register(nfsShareCreate);
   catalog.register(nfsShareUpdate);
+  catalog.register(iscsiTargetCreate);
+  catalog.register(iscsiTargetUpdate);
   return catalog;
 }
 
@@ -200,6 +202,8 @@ export {
   fleetHealthRollup,
   haStatus,
   iscsiList,
+  iscsiTargetCreate,
+  iscsiTargetUpdate,
   listDatasets,
   networkConfig,
   networkInterfaces,
