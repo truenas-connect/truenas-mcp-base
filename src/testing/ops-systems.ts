@@ -2,8 +2,8 @@ import { vi } from 'vitest';
 import { concat, delay, EMPTY, NEVER, Observable, of, throwError } from 'rxjs';
 import {
   TrueNasApiClientV2510,
-  TrueNasApiClientV26,
   TrueNasApiClientV27,
+  TrueNasApiClientV28,
 } from '@truenas/api-client';
 import type { ApiVersion, OperationMappings } from '@truenas/api-client';
 import type { SystemHandle, ToolContext } from '@/catalog/tool';
@@ -22,8 +22,8 @@ import type { SystemHandle, ToolContext } from '@/catalog/tool';
  * `Observable<Job | null>` and reads WHICH of the two arrived, so a spec that
  * faked `client.ops` would be asserting the tool against this repository's own
  * belief about what each version emits. Three of those beliefs are not obvious
- * and one is counter-intuitive: v26+ `containerStart` emits `null` and never a
- * job, v26+ `containerRestart` emits the stop job's updates and THEN a `null`,
+ * and one is counter-intuitive: v27+ `containerStart` emits `null` and never a
+ * job, v27+ `containerRestart` emits the stop job's updates and THEN a `null`,
  * and it buffers those updates through `toArray()` so nothing at all is emitted
  * until the stop job has finished. A hand-written fake gets to be wrong about
  * all three and still pass.
@@ -41,7 +41,7 @@ import type { SystemHandle, ToolContext } from '@/catalog/tool';
  */
 
 /** The versions whose `ops` mapping this fixture can drive. */
-export type OpsVersion = 'v25.10.0' | 'v26.0.0' | 'v27.0.0';
+export type OpsVersion = 'v25.10.0' | 'v27.0.0' | 'v28.0.0';
 
 /**
  * One answer from the faked `api` seam.
@@ -50,7 +50,7 @@ export type OpsVersion = 'v25.10.0' | 'v26.0.0' | 'v27.0.0';
  * one that never completes at all are different things to a bounded watch, and
  * only the second reaches the bound.
  *
- * `completes: false` is the third of those and is what the v26 restart
+ * `completes: false` is the third of those and is what the v27 restart
  * composition needs — a job that has reported progress and not finished. Only
  * that shape shows the buffering: the same answer reaches `container_stop` as
  * progress and reaches `container_restart` as nothing at all.
@@ -76,7 +76,7 @@ export interface OpsSystem {
   ctx: ToolContext;
   /** `api.query`, which `containerQuery` dials on every version. */
   query: ReturnType<typeof vi.fn>;
-  /** `api.call`, which v26+ dials for the synchronous `container.start`. */
+  /** `api.call`, which v27+ dials for the synchronous `container.start`. */
   call: ReturnType<typeof vi.fn>;
   /** `api.job`, which every other operation dials. */
   job: ReturnType<typeof vi.fn>;
@@ -136,9 +136,9 @@ export function opsSystem(version: OpsVersion, answers: OpsAnswers = {}): OpsSys
   const client =
     version === 'v25.10.0'
       ? new TrueNasApiClientV2510('test-uuid', ['nas.example'], spec, false, 'nas')
-      : version === 'v26.0.0'
-        ? new TrueNasApiClientV26('test-uuid', ['nas.example'], spec, false, 'nas')
-        : new TrueNasApiClientV27('test-uuid', ['nas.example'], spec, false, 'nas');
+      : version === 'v27.0.0'
+        ? new TrueNasApiClientV27('test-uuid', ['nas.example'], spec, false, 'nas')
+        : new TrueNasApiClientV28('test-uuid', ['nas.example'], spec, false, 'nas');
 
   // `api` is `readonly` on the class, and the mappings read it at call time
   // rather than capturing it, so replacing it here is what puts the fake
