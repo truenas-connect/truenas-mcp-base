@@ -2,6 +2,7 @@ import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { MutatingTool, PlanStep, ReadOnlyTool, ToolContext } from '@/catalog/tool';
 import {
+  agreement,
   booleanOrNull,
   errorText,
   numberOrNull,
@@ -771,27 +772,6 @@ function comparableOfFields(fields: ScrubTaskFields): ScrubComparable {
     ...(fields.enabled === undefined ? {} : { enabled: fields.enabled }),
     ...(fields.description === undefined ? {} : { description: fields.description }),
   };
-}
-
-/**
- * Whether `got` holds what `wanted` names, key by key: false as soon as one key
- * reads back as a different value, null where none does but at least one could
- * not be read on either side, and true only where every key was read on both
- * and agrees. A definite mismatch outranks an unreadable field — one value the
- * system reported back as something else is already "not what was asked for".
- */
-function agreement(wanted: ScrubComparable, got: ScrubComparable): boolean | null {
-  let unread = false;
-  for (const key of Object.keys(wanted)) {
-    const want = wanted[key] ?? null;
-    const have = got[key] ?? null;
-    if (want === null || have === null) {
-      unread = true;
-    } else if (want !== have) {
-      return false;
-    }
-  }
-  return unread ? null : true;
 }
 
 /** The fields sent, in the plan's words, in the order the schema lists them. */

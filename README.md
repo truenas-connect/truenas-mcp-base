@@ -45,7 +45,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `automated_task_set_enabled`, `snapshot_clone`, `snapshot_task_run`,
   `snapshot_set_hold`, `vm_start`, `vm_stop`, `vm_restart`, `vm_clone`,
   `service_control`, `container_start`, `container_stop`, `container_restart`,
-  `pool_scrub_task_create`, `pool_scrub_task_update`, `share_set_enabled` —
+  `pool_scrub_task_create`, `pool_scrub_task_update`, `share_set_enabled`,
+  `smb_share_create`, `smb_share_update` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop` and `container_restart` the seven that
   start a background job,
@@ -134,6 +135,15 @@ confirmation UX, audit sinks) enters through injected interfaces.
   share cuts off the clients connected to it, which its plan says; a share on a
   locked encrypted dataset serves nothing even when enabled, which its result
   reports as `locked`.
+  `smb_share_create` makes one SMB share over a dataset's mountpoint or a
+  directory inside one, always with the `DEFAULT_SHARE` purpose, and
+  `smb_share_update` changes an existing one's name, path, comment, read-only,
+  browsable or enabled setting. Neither touches a share's preset options or
+  audit settings, and neither asks for any change to the dataset's ACL. The
+  create plan names the dataset the path belongs to, every share already
+  answering to the name in any letter case, and what the system's own pre-check
+  said; the update plan states each value beside the one it replaces. Nothing
+  here deletes an SMB share.
   `container_list` and the three container power tools are the first family
   written against the client's `ops` layer rather than `api.call`, because every
   one of these operations changes SHAPE between TrueNAS versions and not just

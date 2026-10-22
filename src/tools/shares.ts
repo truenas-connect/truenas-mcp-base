@@ -2,10 +2,13 @@ import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import { MutatingTool, PlanStep, ReadOnlyTool, SystemHandle, ToolContext } from '@/catalog/tool';
 import {
+  agreement,
   booleanOrNull,
   errorText,
+  isMissingMethod,
   NONE_REPORTED,
   numberOrNull,
+  plural,
   readStep,
   recordOrNull,
   rowWithId,
@@ -964,6 +967,23 @@ function labelled(name: string, value: string | null): string {
 }
 
 /**
+ * An SMB share as a plan names it: by its name and path. Shared with
+ * `smb_share_update`, whose plan has to make the same share recognisable.
+ */
+function identifySmbShare(row: Record<string, unknown>): string {
+  return `${labelled('name', textOrNull(row['name']))}, ${labelled('path', textOrNull(row['path']))}`;
+}
+
+/**
+ * What a plan that can switch an SMB share off says about who that cuts off.
+ * One text for `share_set_enabled` and `smb_share_update`, which can both send
+ * `enabled: false`.
+ */
+const SMB_CONNECTED_CLIENTS =
+  'Disabling it cuts off every client connected to it now. This catalog has no listing of ' +
+  'SMB sessions, so whether anyone is connected is NOT established here.';
+
+/**
  * An NFS export's aliases as the plan states them. An empty list is an export
  * with none, and is said so; a list that could not be read is stated as absent
  * rather than as empty, which would be a claim the read did not make.
@@ -985,11 +1005,8 @@ const SHARE_SWITCH_KINDS: readonly ShareSwitchKind[] = [
       firstValueFrom(ctx.system.client.api.query('sharing.smb.query', [['id', '=', id]])),
     update: (ctx, id, enabled) =>
       firstValueFrom(ctx.system.client.api.call('sharing.smb.update', [id, { enabled }])),
-    identify: (row) =>
-      `${labelled('name', textOrNull(row['name']))}, ${labelled('path', textOrNull(row['path']))}`,
-    connectedClients:
-      'Disabling it cuts off every client connected to it now. This catalog has no listing of ' +
-      'SMB sessions, so whether anyone is connected is NOT established here.',
+    identify: identifySmbShare,
+    connectedClients: SMB_CONNECTED_CLIENTS,
   },
   {
     protocol: 'NFS',
@@ -1180,6 +1197,721 @@ export const shareSetEnabled: MutatingTool = {
       requested_enabled: enabled,
       ...outcome,
       locked: booleanOrNull(recordOrNull(updated)?.['locked']),
+    };
+  },
+};
+
+/**
+ * `smb_share_create` and `smb_share_update`: making one SMB share over a path
+ * on this system, and changing an existing one's basic settings.
+ *
+ * TWO TOOLS AND NOT ONE, on #121's test read the other way: the two calls
+ * differ in what the caller is TOLD, not only in which method is dialled. A
+ * create names the dataset a path belongs to and every share already answering
+ * to the name; an update names what each field holds now beside what it is
+ * about to hold. One tool with a discriminator would carry two plans.
+ *
+ * THE BASIC SETTINGS AND NOTHING ELSE. `purpose` is fixed to `DEFAULT_SHARE` on
+ * create and never sent on update, because each of the other seven presets
+ * changes behaviour in its own way and needs its own account; `options` and
+ * `audit` are refused by name rather than dropped, so a caller who passed one
+ * is told it was not applied instead of finding out later.
+ *
+ * THE PATH MUST BELONG TO A DATASET, checked at plan time against the
+ * mountpoints `pool.dataset.query` reports and never against the shape of the
+ * string: `/mnt/<pool>/…` is a convention, and a dataset is what decides. A
+ * directory inside a dataset is legal in TrueNAS, so the plan says which of the
+ * two the path is rather than refusing the second. `EXTERNAL` is refused — it
+ * belongs to the `EXTERNAL_SHARE` preset.
+ *
+ * WHETHER CREATING A SHARE CHANGES THE DATASET'S ACL IS NOT ESTABLISHED. The
+ * webui prompts for an ACL after creating one, which suggests the method does
+ * not, and that is a suggestion. So nothing here says the ACL is left
+ * unchanged; what is said is that this tool does not ASK for any change (#120).
+ *
+ * THE ROLE IS `Role.Sharing`, with `share_set_enabled`'s caveat: that the
+ * sharing-admin role grants `sharing.smb.create` and `sharing.smb.update` is
+ * read from the middleware's role definitions and is (unconfirmed) against a
+ * live system's `privilege.roles`.
+ */
+
+/**
+ * The settings both tools send. Every one is optional on update. A `type` and
+ * not an `interface` so that it can be handed to {@link agreement} as a record.
+ */
+type SmbShareFields = {
+  name?: string;
+  path?: string;
+  comment?: string;
+  readonly?: boolean;
+  browsable?: boolean;
+  enabled?: boolean;
+};
+
+/** The order the plan states the fields in, which is the schema's. */
+const SMB_SHARE_FIELDS = ['name', 'path', 'comment', 'readonly', 'browsable', 'enabled'] as const;
+
+/** The only `purpose` this catalog creates a share with. */
+const DEFAULT_SHARE = 'DEFAULT_SHARE' as const;
+
+/**
+ * Arguments the API takes and these tools do not, refused by name. Silently
+ * dropping one would let a caller believe it was applied.
+ */
+function refuseArgs(args: Record<string, unknown>, keys: readonly string[], why: string): void {
+  for (const key of keys) {
+    if (args[key] !== undefined) throw new Error(`"${key}" is not accepted by this tool: ${why}`);
+  }
+}
+
+/** Why `options` and `audit` are refused, worded once for both tools. */
+const OPTIONS_REFUSED =
+  "the share's preset options and its audit settings are out of this tool's scope";
+
+/**
+ * The basic settings, each validated where it was passed and left out where it
+ * was not, in the order the schema lists them — so the record this returns is
+ * exactly what is sent, and is what the plan states. Strict on every type: a
+ * coerced `"false"` would make a share read-only, or browsable, that the caller
+ * asked to be neither.
+ */
+function parseSmbFields(args: Record<string, unknown>): SmbShareFields {
+  const fields: SmbShareFields = {};
+  const name = args['name'];
+  if (name !== undefined) {
+    if (textOrNull(name) === null) throw new Error('"name" must be a non-empty string');
+    fields.name = name as string;
+  }
+  const path = args['path'];
+  if (path !== undefined) {
+    if (path === 'EXTERNAL') {
+      throw new Error(
+        '"path" may not be "EXTERNAL": that is the EXTERNAL_SHARE preset, which this tool does not create',
+      );
+    }
+    if (typeof path !== 'string' || !path.startsWith('/')) {
+      throw new Error('"path" must be an absolute path, such as "/mnt/tank/projects"');
+    }
+    // The dataset check compares the path to mountpoints as a string, so only
+    // a path spelled one way per directory may reach it: a `..` segment would
+    // let `/mnt/tank/../../etc` read as inside `tank`, and an empty one would
+    // read `/mnt/tank//projects` as a directory inside `tank` when it is the
+    // mountpoint of `tank/projects`. Refused rather than normalised, so what is
+    // sent is what was compared — and what `confirmed` compares the stored
+    // path against.
+    if (path.slice(1).split('/').some((segment) => segment === '' || segment === '.' || segment === '..')) {
+      throw new Error(
+        '"path" must be written plainly: no empty, "." or ".." segment and no trailing slash',
+      );
+    }
+    fields.path = path;
+  }
+  const comment = args['comment'];
+  if (comment !== undefined) {
+    // An empty comment is allowed: it is how an update clears one.
+    if (typeof comment !== 'string') throw new Error('"comment" must be a string');
+    fields.comment = comment;
+  }
+  for (const key of ['readonly', 'browsable', 'enabled'] as const) {
+    const value = args[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'boolean') throw new Error(`"${key}" must be a boolean`);
+    fields[key] = value;
+  }
+  return fields;
+}
+
+/** What `smb_share_create` was asked to do. */
+type SmbCreate = SmbShareFields & { name: string; path: string };
+
+function parseSmbCreate(args: Record<string, unknown>): SmbCreate {
+  refuseArgs(args, ['options', 'audit'], OPTIONS_REFUSED);
+  const purpose = args['purpose'];
+  if (purpose !== undefined && purpose !== DEFAULT_SHARE) {
+    throw new Error(
+      `"purpose" may only be "${DEFAULT_SHARE}": each other preset changes how the share behaves, and this tool creates none of them`,
+    );
+  }
+  if (args['name'] === undefined) throw new Error('"name" is required');
+  if (args['path'] === undefined) throw new Error('"path" is required');
+  return parseSmbFields(args) as SmbCreate;
+}
+
+/** What `smb_share_update` was asked to do. */
+interface SmbUpdate {
+  id: number;
+  fields: SmbShareFields;
+}
+
+function parseSmbUpdate(args: Record<string, unknown>): SmbUpdate {
+  refuseArgs(args, ['options', 'audit'], OPTIONS_REFUSED);
+  refuseArgs(args, ['purpose'], "this tool leaves an existing share's purpose as it is");
+  const id = args['id'];
+  if (typeof id !== 'number' || !Number.isInteger(id)) {
+    throw new Error('"id" is required and must be a whole number');
+  }
+  const fields = parseSmbFields(args);
+  if (Object.keys(fields).length === 0) {
+    throw new Error(`Nothing to change: pass at least one of ${SMB_SHARE_FIELDS.join(', ')}`);
+  }
+  return { id, fields };
+}
+
+/** One value as a plan states it: quoted as it will be sent, so nothing is paraphrased. */
+function sentValue(value: string | boolean | null): string {
+  return value === null ? NONE_REPORTED : JSON.stringify(value);
+}
+
+/**
+ * An SMB share as these tools report it, field by field. `comment` keeps an
+ * empty string as itself rather than null, unlike `shares_list`: an update can
+ * clear a comment by sending `""`, and reading that back as null would make the
+ * call read as unconfirmed when it did exactly what was asked.
+ */
+interface SmbShareRow {
+  id: number | null;
+  name: string | null;
+  path: string | null;
+  purpose: string | null;
+  enabled: boolean | null;
+  comment: string | null;
+  readonly: boolean | null;
+  browsable: boolean | null;
+  locked: boolean | null;
+}
+
+function smbShareRow(row: Record<string, unknown>): SmbShareRow {
+  const comment = row['comment'];
+  return {
+    id: numberOrNull(row['id']),
+    name: textOrNull(row['name']),
+    path: textOrNull(row['path']),
+    purpose: textOrNull(row['purpose']),
+    enabled: booleanOrNull(row['enabled']),
+    comment: typeof comment === 'string' ? comment : null,
+    readonly: booleanOrNull(row['readonly']),
+    browsable: booleanOrNull(row['browsable']),
+    locked: booleanOrNull(row['locked']),
+  };
+}
+
+/** A row's values on the fields a request sent, for {@link agreement}. */
+function comparableOf(row: SmbShareRow, fields: SmbShareFields): Record<string, string | boolean | null> {
+  return Object.fromEntries(Object.keys(fields).map((key) => [key, row[key as keyof SmbShareFields]]));
+}
+
+/** The dataset a share path belongs to, as the plan names it. */
+interface PathOwner {
+  dataset: string;
+  mountpoint: string;
+  /** True where the path IS the dataset's mountpoint, false where it is inside it. */
+  exact: boolean;
+  /** Dataset rows whose id or mountpoint could not be read, and so were not compared. */
+  unreadable: number;
+}
+
+/** A path compared without trailing slashes, which name the same directory. */
+function trimmedPath(path: string): string {
+  const trimmed = path.replace(/\/+$/, '');
+  return trimmed.length === 0 ? '/' : trimmed;
+}
+
+/**
+ * The dataset whose mountpoint is the path, or the deepest one the path lies
+ * inside, or the error naming the path.
+ *
+ * Every dataset is read, because the question is which mountpoint the path sits
+ * under and a filter on the dataset id would have to guess that from the path.
+ * `retrieve_children` is what lists every dataset as its own row — the walk the
+ * three listings in `storage.ts` take for the same reason — and `properties` is
+ * empty because `id` and `mountpoint` are fields of the entry itself.
+ *
+ * A row whose id or mountpoint cannot be read is COUNTED rather than silently
+ * skipped: if it is the deepest mountpoint over the path, the dataset named here
+ * is its parent, and the plan has to say that this may be so (#93).
+ */
+async function datasetOfPath(ctx: ToolContext, path: string): Promise<PathOwner> {
+  let rows: unknown;
+  try {
+    rows = await firstValueFrom(
+      ctx.system.client.api.query('pool.dataset.query', [], {
+        extra: { retrieve_children: true, properties: [] },
+      }),
+    );
+  } catch (reason) {
+    throw new Error(
+      `Which dataset path "${path}" belongs to could not be read (pool.dataset.query failed: ` +
+        `${errorText(reason)}), so no share over it is planned`,
+    );
+  }
+  if (!Array.isArray(rows)) {
+    throw new Error(
+      `Which dataset path "${path}" belongs to could not be read (pool.dataset.query did not ` +
+        'answer with a list), so no share over it is planned',
+    );
+  }
+  const wanted = trimmedPath(path);
+  let owner: Omit<PathOwner, 'unreadable'> | null = null;
+  let unreadable = 0;
+  for (const row of rows) {
+    const held = recordOrNull(row);
+    const dataset = textOrNull(held?.['id']);
+    if (dataset === null) {
+      unreadable += 1;
+      continue;
+    }
+    // A volume has no mountpoint and a filesystem can name `none` or `legacy`:
+    // neither is a directory a share could sit under. A filesystem reporting
+    // NO mountpoint is another matter — the client declares the field nullable,
+    // and a locked dataset is the likely case — so it is counted as unread.
+    const mountpoint = textOrNull(held?.['mountpoint']);
+    if (mountpoint === null) {
+      if (textOrNull(held?.['type']) !== 'VOLUME') unreadable += 1;
+      continue;
+    }
+    if (!mountpoint.startsWith('/')) continue;
+    const mount = trimmedPath(mountpoint);
+    const exact = wanted === mount;
+    if (!exact && !wanted.startsWith(mount === '/' ? '/' : `${mount}/`)) continue;
+    if (owner === null || mount.length > owner.mountpoint.length) {
+      owner = { dataset, mountpoint: mount, exact };
+    }
+  }
+  if (owner === null) {
+    throw new Error(
+      `Path "${path}" is not the mountpoint of any dataset this system lists, and not inside one — ` +
+        `\`storage_list_datasets\` reports each dataset's mountpoint` +
+        (unreadable > 0 ? `; ${plural(unreadable, 'dataset')} could not be read, and so could not be compared` : ''),
+    );
+  }
+  return { ...owner, unreadable };
+}
+
+/** What the plan says about which dataset a path belongs to. */
+function pathSentence(path: string, owner: PathOwner): string {
+  const where = owner.exact
+    ? `Path "${path}" is the mountpoint of dataset "${owner.dataset}".`
+    : `Path "${path}" is a directory inside dataset "${owner.dataset}", which is mounted at ` +
+      `"${owner.mountpoint}" — not that dataset's own mountpoint, which TrueNAS allows; whether ` +
+      'the directory exists is not checked here.';
+  const unread =
+    owner.unreadable > 0
+      ? ` ${plural(owner.unreadable, 'dataset')} could not be read, so the path may belong to one ` +
+        'of them rather than to the dataset named.'
+      : '';
+  return `${where}${unread}`;
+}
+
+/**
+ * What the plan says about SMB shares that already answer to a name.
+ *
+ * Compared IGNORING LETTER CASE, because Windows clients do not tell share
+ * names apart by case — whether the middleware refuses such a name is
+ * (unconfirmed), so a match is named and not refused. Plan-time only and not a
+ * step, since `execute` does not make this read (#119); its failure does not
+ * fail the plan (#154), and is stated instead. A share whose name could not be
+ * read is COUNTED, by #93's direction: leaving it out moves the sentence towards
+ * "no other share has this name", which is the claim that makes a clash look
+ * safe. `exceptId` is the share an update is renaming, which trivially matches
+ * itself.
+ */
+async function nameClashSentence(ctx: ToolContext, name: string, exceptId: number | null): Promise<string> {
+  let rows: unknown;
+  try {
+    rows = await firstValueFrom(ctx.system.client.api.query('sharing.smb.query'));
+  } catch (reason) {
+    return (
+      ' Whether another SMB share already has this name could not be read ' +
+      `(sharing.smb.query failed: ${errorText(reason)}).`
+    );
+  }
+  if (!Array.isArray(rows)) {
+    return (
+      ' Whether another SMB share already has this name could not be read ' +
+      '(sharing.smb.query did not answer with a list).'
+    );
+  }
+  const folded = name.toLowerCase();
+  const clashes: string[] = [];
+  let unnamed = 0;
+  for (const row of rows) {
+    const share = smbShareRow(recordOrNull(row) ?? {});
+    if (exceptId !== null && share.id === exceptId) continue;
+    if (share.name === null) {
+      unnamed += 1;
+    } else if (share.name.toLowerCase() === folded) {
+      clashes.push(`"${share.name}" (id ${share.id ?? NONE_REPORTED}, ${labelled('path', share.path)})`);
+    }
+  }
+  const unread =
+    unnamed > 0 ? ` ${plural(unnamed, 'other SMB share')} reported no name this tool could read.` : '';
+  if (clashes.length === 0) {
+    return ` No other SMB share on this system has this name in any letter case.${unread}`;
+  }
+  return (
+    ` ${plural(clashes.length, 'other SMB share')} already ${clashes.length === 1 ? 'has' : 'have'} ` +
+    `this name, ignoring letter case: ${clashes.join('; ')}. Windows clients do not tell share ` +
+    `names apart by case, and whether the system refuses this one is (unconfirmed).${unread}`
+  );
+}
+
+/**
+ * The middleware's own pre-check for a new share, run at plan time.
+ *
+ * What it validates is (unconfirmed): it takes a share name and answers
+ * `null`, and nothing on the surface says more. So a REJECTION fails the plan
+ * with the system's reason — it is the system saying it would not take this
+ * share — and a system with NO SUCH METHOD gets a plan saying the check was not
+ * run, rather than a refusal on the strength of a check that does not exist
+ * there. Any other failure is read as the check having run and refused: the
+ * cost of getting that wrong is a plan to retry, where the opposite reading
+ * would let a refused share through to approval.
+ *
+ * Plan-time only and not a step: `execute` does not call it (#119).
+ */
+async function precheckSentence(ctx: ToolContext, name: string): Promise<string> {
+  try {
+    await firstValueFrom(ctx.system.client.api.call('sharing.smb.share_precheck', [{ name }]));
+  } catch (reason) {
+    if (isMissingMethod(reason)) {
+      return (
+        " The system's own SMB share pre-check (sharing.smb.share_precheck) could not be " +
+        'called — this system has no such method — so it was not run.'
+      );
+    }
+    throw new Error(`The system's SMB share pre-check refused this share: ${errorText(reason)}`);
+  }
+  return (
+    " The system's own SMB share pre-check (sharing.smb.share_precheck) accepted it; what that " +
+    'check covers is (unconfirmed).'
+  );
+}
+
+/**
+ * What both plans say about the path becoming reachable. A share is an
+ * EXPOSURE rather than a destruction, and the approver is told so plainly
+ * rather than left to infer it from "create".
+ */
+function exposureSentence(path: string): string {
+  return (
+    ` Path "${path}" becomes reachable over SMB by whoever the dataset's ACL admits, within ` +
+    "the share's own settings; `share_access` reports who that is once the share exists. This " +
+    "tool does not ask for any change to the dataset's ACL or permissions; whether the " +
+    'system changes them on its own is (unconfirmed).'
+  );
+}
+
+/** The fields a create did NOT send, which the system then decides. */
+function defaultsSentence(fields: SmbShareFields): string {
+  const unsent = (['comment', 'readonly', 'browsable', 'enabled'] as const).filter(
+    (key) => fields[key] === undefined,
+  );
+  if (unsent.length === 0) return '';
+  return (
+    ` Not sent, and so left to the system's defaults, which are not read here: ` +
+    `${unsent.join(', ')}.`
+  );
+}
+
+const SMB_CREATE_GUIDANCE =
+  '`requested` is exactly what was sent, `purpose` included. `share` is the ' +
+  'created share read back off the response the create itself answered with — ' +
+  'never copied from the request — or null where that response was not a ' +
+  'record. Its fields are `id`, which is what `smb_share_update` and ' +
+  '`share_set_enabled` take; `name`; `path`; `purpose`; `enabled`; `comment`, ' +
+  'which is `""` where the share has none; `readonly`; `browsable`; and ' +
+  '`locked`, true where the dataset is locked by encryption and the share ' +
+  'serves nothing until it is unlocked. Each is null where the response stated ' +
+  'no value this tool could read. `confirmed` is whether `share` holds every ' +
+  'value sent: true is the system reporting back what was asked for; FALSE IS ' +
+  'NOT A SUCCESS — the call did not reject and at least one value was stored as ' +
+  'something else, compared exactly as spelled; and null is a response in which ' +
+  'some value sent could not be read back and none read back as different. A ' +
+  'null `share` means nothing here establishes that a share was created, and is ' +
+  'not evidence that none was — `shares_list` shows what the system now holds.';
+
+export const smbShareCreate: MutatingTool = {
+  name: 'smb_share_create',
+  description:
+    'Creates one SMB share on this TrueNAS system, over a path that belongs to ' +
+    'one of its datasets. Two-phase: called without a confirmation_token it ' +
+    'returns a plan for user approval; called with one it creates the share. ' +
+    '`name` and `path` are required; `comment`, `readonly`, `browsable` and ' +
+    '`enabled` are optional, and the system decides any that are not passed. ' +
+    "THE SHARE IS CREATED WITH THE `DEFAULT_SHARE` PURPOSE AND NO OTHER: `purpose` " +
+    'accepts that value alone, and `options` and `audit` are refused. `path` ' +
+    "must be a dataset's mountpoint or a directory inside one, and the plan names " +
+    'which dataset and which of the two; a path that is neither fails the plan, ' +
+    'naming it, and `EXTERNAL` is refused. That check is made when the plan is ' +
+    'made and not again. THE PLAN NAMES EVERY SMB SHARE ALREADY ANSWERING TO THE ' +
+    'NAME IN ANY LETTER CASE, and runs the system\'s own pre-check, ' +
+    '`sharing.smb.share_precheck`, whose refusal fails the plan with its reason. ' +
+    'A SHARE IS AN EXPOSURE: the path becomes reachable over SMB by whoever the ' +
+    "dataset's ACL admits, and `share_access` reports who that is. This tool does " +
+    "not ask for any change to the dataset's ACL or permissions, and whether the " +
+    'system changes them on its own when a share is created is (unconfirmed). It ' +
+    'does not start the SMB service, which `service_control` does. ' +
+    '`destructiveness` is `reversible`, but NO TOOL IN THIS CATALOG DELETES AN SMB ' +
+    'SHARE: undoing this means switching it off with `share_set_enabled`, or ' +
+    'deleting it outside this catalog. ' +
+    SMB_CREATE_GUIDANCE,
+  resultGuidance: SMB_CREATE_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      name: {
+        type: 'string',
+        description: 'The share name SMB clients connect to, e.g. "projects".',
+      },
+      path: {
+        type: 'string',
+        description:
+          "The absolute path to share: a dataset's mountpoint, as `storage_list_datasets` " +
+          'reports it, or a directory inside one.',
+      },
+      comment: { type: 'string', description: 'Optional; a description of the share.' },
+      readonly: { type: 'boolean', description: 'Optional; true serves the share read-only.' },
+      browsable: {
+        type: 'boolean',
+        description: 'Optional; whether clients browsing the server see the share listed.',
+      },
+      enabled: { type: 'boolean', description: 'Optional; whether the share is created switched on.' },
+      purpose: {
+        type: 'string',
+        enum: [DEFAULT_SHARE],
+        description: `Optional, and only "${DEFAULT_SHARE}", which is what is sent either way.`,
+      },
+    },
+    required: ['name', 'path'],
+  },
+  requiredRole: Role.Sharing,
+  mutating: true,
+  // Additive: the share is a new row and nothing existing is removed. What it
+  // exposes is stated in the plan rather than recorded here.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    return parseSmbCreate(rawArgs);
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const fields = parseSmbCreate(rawArgs);
+    const owner = await datasetOfPath(ctx, fields.path);
+    const clash = await nameClashSentence(ctx, fields.name, null);
+    const precheck = await precheckSentence(ctx, fields.name);
+    return [
+      {
+        method: 'sharing.smb.create',
+        params: [{ purpose: DEFAULT_SHARE, ...fields }],
+        description:
+          `Create an SMB share with purpose "${DEFAULT_SHARE}", ` +
+          `${Object.entries(fields)
+            .map(([key, value]) => `${key} ${sentValue(value as string | boolean)}`)
+            .join(', ')}. ${pathSentence(fields.path, owner)}${exposureSentence(fields.path)}` +
+          `${defaultsSentence(fields)}${clash}${precheck}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const fields = parseSmbCreate(rawArgs);
+    // The path check is the plan's and is not made again here, as
+    // `snapshots_create`'s dataset check is not: `execute` stays a function of
+    // the arguments, and a dataset gone since the plan is the middleware's to
+    // refuse.
+    const requested = { purpose: DEFAULT_SHARE, ...fields };
+    const created: unknown = await firstValueFrom(
+      ctx.system.client.api.call('sharing.smb.create', [requested]),
+    );
+    const held = recordOrNull(created);
+    const share = held === null ? null : smbShareRow(held);
+    return {
+      requested,
+      share,
+      confirmed:
+        share === null
+          ? null
+          : agreement(requested, { purpose: share.purpose, ...comparableOf(share, fields) }),
+    };
+  },
+};
+
+/** Each field sent, beside what the share holds for it now. */
+function smbChangesText(fields: SmbShareFields, share: SmbShareRow): string {
+  return Object.entries(fields)
+    .map(
+      ([key, value]) =>
+        `${key} ${sentValue(value as string | boolean)} (now ${sentValue(share[key as keyof SmbShareFields])})`,
+    )
+    .join('; ');
+}
+
+function readSmbShare(ctx: ToolContext, id: number): Promise<unknown> {
+  return firstValueFrom(ctx.system.client.api.query('sharing.smb.query', [['id', '=', id]]));
+}
+
+const SMB_UPDATE_GUIDANCE =
+  '`requested` is exactly what was sent. `previous` is the share as read ' +
+  'immediately before the call, and `resulting` is the share read back off the ' +
+  'response the update itself answered with — never copied from the request. ' +
+  'Both carry the fields `smb_share_create` reports, `comment` being `""` where ' +
+  'the share has none; `previous` is null where that read failed or listed no ' +
+  'such share, and `resulting` is null where the response was not a record. ' +
+  '`changes` names each field that was SENT, as `requested`, `before` (off ' +
+  '`previous`) and `after` (off `resulting`), and `before` or `after` is null ' +
+  'wherever the reading behind it is. `lookup` says what the read did: `FOUND`, ' +
+  '`NOT_FOUND` (deleted between the plan and the confirmation), or `UNREADABLE` ' +
+  'with `lookup_error` naming why; THE UPDATE IS ATTEMPTED IN ALL THREE CASES, ' +
+  'because what runs must be what was approved. `changed` is true where ' +
+  '`before` and `after` differ in one of the sent fields and false where they ' +
+  'agree in all, WHICH IS TWO OUTCOMES AND NOT ONE: the share already held those ' +
+  'values, or the call did not apply. `confirmed` is what tells those apart, and ' +
+  '`changed` must not be read without it. `confirmed` is whether `resulting` ' +
+  'holds every value sent: true is the system reporting back what was asked ' +
+  'for; FALSE IS NOT A SUCCESS — the call did not reject and at least one value ' +
+  'was stored as something else, compared exactly as spelled; null is a ' +
+  'response in which some value sent could not be read back and none read back ' +
+  'as different. Both are null wherever a reading they need is missing.';
+
+export const smbShareUpdate: MutatingTool = {
+  name: 'smb_share_update',
+  description:
+    "Changes one existing SMB share's basic settings on this TrueNAS system: its " +
+    '`name`, `path`, `comment`, `readonly`, `browsable` or `enabled`. ' +
+    'Two-phase: called without a confirmation_token it returns a plan for user ' +
+    'approval; called with one it sends the change. `id` is the SMB share\'s id ' +
+    'as `shares_list` reports it for protocol `SMB`; PLANNING AGAINST AN id NO SMB ' +
+    'SHARE HAS FAILS, naming it — an NFS export\'s id is a different table and is ' +
+    'never taken here. ONLY THE FIELDS PASSED ARE SENT, and at least one is ' +
+    "required. The share's purpose is left as it is: `purpose`, `options` and " +
+    '`audit` are refused. A new `path` is checked as `smb_share_create` checks one ' +
+    "— a dataset's mountpoint or a directory inside one, never `EXTERNAL` — and " +
+    'the plan names its dataset; a new `name` is compared with every other SMB ' +
+    'share ignoring letter case. THE PLAN STATES EACH VALUE SENT BESIDE THE ONE ' +
+    'THE SHARE HOLDS NOW, so the call that undoes it is in the plan. Changing ' +
+    '`path` exposes the new path over SMB to whoever its dataset\'s ACL admits, ' +
+    'and this tool does not ask for any change to an ACL; changing `name` means ' +
+    'clients connecting by the old name no longer find the share; `enabled: ' +
+    'false` cuts off whoever is connected, and this catalog has no listing of SMB ' +
+    'sessions. SENDING A SHARE A VALUE IT ALREADY HOLDS IS NOT AN ERROR. This ' +
+    'tool cannot create or delete a share; `smb_share_create` creates one, and ' +
+    '`share_set_enabled` switches one on or off alone. ' +
+    SMB_UPDATE_GUIDANCE,
+  resultGuidance: SMB_UPDATE_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'integer',
+        description:
+          "The SMB share's `id`, as `shares_list` reports it for protocol `SMB` on the " +
+          'system being targeted. An NFS export with the same id is a different share.',
+      },
+      name: { type: 'string', description: 'A new share name, non-empty.' },
+      path: {
+        type: 'string',
+        description: "A new absolute path: a dataset's mountpoint, or a directory inside one.",
+      },
+      comment: { type: 'string', description: 'A new description; "" clears it.' },
+      readonly: { type: 'boolean', description: 'true serves the share read-only.' },
+      browsable: {
+        type: 'boolean',
+        description: 'Whether clients browsing the server see the share listed.',
+      },
+      enabled: { type: 'boolean', description: 'true switches the share on, false off.' },
+    },
+    required: ['id'],
+  },
+  requiredRole: Role.Sharing,
+  mutating: true,
+  // Every field it sends can be sent back, and the plan states the value each
+  // held. What a rename or a new path does to connected clients is stated in
+  // the plan rather than recorded here.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const { id, fields } = parseSmbUpdate(rawArgs);
+    return { id, ...fields };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const { id, fields } = parseSmbUpdate(rawArgs);
+    const row = rowWithId(await readSmbShare(ctx, id), id);
+    if (row === null) {
+      throw new Error(
+        `No SMB share with id ${id} on this system — ids come from \`shares_list\`, where an ` +
+          'SMB share and an NFS export can carry the same id',
+      );
+    }
+    const share = smbShareRow(row);
+    const notes: string[] = [];
+    if (fields.name !== undefined && fields.name !== share.name) {
+      notes.push(
+        ` Clients that connect by the name ${sentValue(share.name)} will no longer find the share under it.` +
+          (await nameClashSentence(ctx, fields.name, id)),
+      );
+    }
+    if (fields.path !== undefined && fields.path !== share.path) {
+      const owner = await datasetOfPath(ctx, fields.path);
+      notes.push(
+        ` This stops sharing ${sentValue(share.path)}. ${pathSentence(fields.path, owner)}` +
+          exposureSentence(fields.path),
+      );
+    }
+    if (fields.enabled === false && share.enabled !== false) {
+      notes.push(` ${SMB_CONNECTED_CLIENTS}`);
+    }
+    const already =
+      agreement(fields, comparableOf(share, fields)) === true
+        ? ' The share already holds every value this sends, which is not an error.'
+        : '';
+    return [
+      readStep('sharing.smb.query', 'SMB share', id),
+      {
+        method: 'sharing.smb.update',
+        params: [id, fields],
+        description:
+          `Change the SMB share with ${identifySmbShare(row)} (id ${id}): ` +
+          `${smbChangesText(fields, share)}. Only these fields are sent.${notes.join('')}${already}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const { id, fields } = parseSmbUpdate(rawArgs);
+    let previous: SmbShareRow | null = null;
+    let lookupError: string | null = null;
+    try {
+      const row = rowWithId(await readSmbShare(ctx, id), id);
+      previous = row === null ? null : smbShareRow(row);
+    } catch (reason) {
+      lookupError = errorText(reason);
+    }
+    // Issued whatever the read said: skipping it for a share the read no longer
+    // lists would be `execute` branching on state the confirmation token cannot
+    // bind.
+    const requested = fields;
+    const updated: unknown = await firstValueFrom(
+      ctx.system.client.api.call('sharing.smb.update', [id, requested]),
+    );
+    const held = recordOrNull(updated);
+    const resulting = held === null ? null : smbShareRow(held);
+    const before = previous === null ? null : comparableOf(previous, fields);
+    const after = resulting === null ? null : comparableOf(resulting, fields);
+    const changes = Object.fromEntries(
+      Object.entries(requested).map(([key, value]) => [
+        key,
+        { requested: value, before: before?.[key] ?? null, after: after?.[key] ?? null },
+      ]),
+    );
+    // `changed` compares the two READINGS on the fields that were sent, never
+    // the request: a response still holding the old value is a call that did
+    // not apply, not one that changed nothing.
+    const same = before === null || after === null ? null : agreement(before, after);
+    return {
+      id,
+      requested,
+      lookup: lookupError !== null ? 'UNREADABLE' : previous === null ? 'NOT_FOUND' : 'FOUND',
+      lookup_error: lookupError,
+      previous,
+      resulting,
+      changes,
+      changed: same === null ? null : !same,
+      confirmed: after === null ? null : agreement(requested, after),
     };
   },
 };
