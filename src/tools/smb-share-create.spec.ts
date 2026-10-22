@@ -190,7 +190,7 @@ describe('smb_share_create', () => {
       }
     });
 
-    it('compares the mountpoint on the response, so a dropped filter cannot answer for another dataset', async () => {
+    it('reads every dataset, with the walk on and no filter, to compare mountpoints itself', async () => {
       const { ctx, query } = system();
       await smbShareCreate.plan(ctx, args);
       expect(query).toHaveBeenCalledWith('pool.dataset.query', [], {
