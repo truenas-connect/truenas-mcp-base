@@ -14,11 +14,15 @@ import {
   booleanOrNull,
   effectiveLimit,
   errorText,
+  NONE_REPORTED,
   numberOrNull,
   plural,
+  readStep,
   recordOrNull,
   refuseArgs,
+  rowWithId,
   strictTextList,
+  switchOutcome,
   textOrNull,
 } from '@/tools/common';
 
@@ -44,10 +48,14 @@ import {
  * domain and the bind method are read from, and it is reported rather than
  * fatal for the reason `readConfig` gives.
  *
- * `user_create` is the family's one mutation, and it reads the same three
+ * `user_create` is the family's first mutation, and it reads the same three
  * namespaces from the other side: `group.query` to resolve the groups it is
  * given by name, `privilege.query` to refuse any of them that holds a
  * privilege, and `user.query` for an account already under the username.
+ *
+ * `user_set_locked` is the second. It reads `user.query` for the account it is
+ * given by id, `auth.me` to refuse locking the account the catalog itself is
+ * signed in as, and `privilege.query` to name what the account's groups hold.
  *
  * All three payloads are ones where over-returning is a hazard rather than a
  * cost. The account record holds `unixhash`, `smbhash`, `sshpubkey` and
@@ -213,7 +221,8 @@ export const usersList: ReadOnlyTool = {
     'and `full_name` identify the account, and `full_name` is null where none ' +
     "is set. `id` is the middleware's own record id and `uid` the POSIX user " +
     'id: DIFFERENT NUMBERS, and neither follows the other — `id` is what group ' +
-    'membership is expressed in, and `uid` is what a file on disk is owned by. ' +
+    'membership is expressed in and what `user_set_locked` takes, and `uid` is ' +
+    'what a file on disk is owned by. ' +
     '`local` is whether the account is defined on this system, and FALSE MEANS ' +
     'THE ACCOUNT COMES FROM A DIRECTORY SERVICE — Active Directory or LDAP — ' +
     'rather than that it is disabled or missing. `shell` is the login shell, ' +
@@ -1121,9 +1130,9 @@ export const userCreate: MutatingTool = {
     'and again when the account is created, and nothing is created if either ' +
     'fails then. `sudo_commands`, `uid` and `group_create` are refused. A username ' +
     'an existing account already has fails the plan, naming it. ' +
-    '`destructiveness` is `reversible`, but NO TOOL IN THIS CATALOG DELETES OR ' +
-    'DISABLES A USER: undoing this means deleting the account outside this ' +
-    'catalog. ' +
+    '`destructiveness` is `reversible`, but NO TOOL IN THIS CATALOG DELETES A ' +
+    'USER: undoing this means deleting the account outside this catalog, and ' +
+    'the most this catalog can do is lock it with `user_set_locked`. ' +
     USER_CREATE_GUIDANCE,
   resultGuidance: USER_CREATE_GUIDANCE,
   inputSchema: {
@@ -1252,6 +1261,331 @@ export const userCreate: MutatingTool = {
                 smb: user.smb,
               },
             ),
+    };
+  },
+};
+
+/** The caller's arguments to `user_set_locked`, or the error naming what is wrong with them. */
+function parseUserSetLocked(args: Record<string, unknown>): { id: number; locked: boolean } {
+  // Strict on both, as `share_set_enabled` is: a coerced `"false"` would lock
+  // an account the caller asked to unlock, and `3.5` is no account's record id.
+  const id = args['id'];
+  if (typeof id !== 'number' || !Number.isInteger(id)) {
+    throw new Error("\"id\" is required and must be a whole number: the account's `id` as `users_list` reports it");
+  }
+  const locked = args['locked'];
+  if (typeof locked !== 'boolean') throw new Error('"locked" is required and must be a boolean');
+  return { id, locked };
+}
+
+/**
+ * Whatever `user.query` answered for this id, unread. The filter is bandwidth
+ * and not the control: {@link rowWithId} checks the id on the response.
+ */
+function readAccount(ctx: ToolContext, id: number): Promise<unknown> {
+  return firstValueFrom(ctx.system.client.api.query('user.query', [['id', '=', id]]));
+}
+
+/** An account as a plan or a refusal names it: by username and full name, beside the id. */
+function accountText(row: Record<string, unknown>, id: number): string {
+  const username = textOrNull(row['username']);
+  const fullName = textOrNull(row['full_name']);
+  return (
+    `${username === null ? `username ${NONE_REPORTED}` : `"${username}"`} ` +
+    `(full name ${fullName === null ? NONE_REPORTED : JSON.stringify(fullName)}, id ${id})`
+  );
+}
+
+/**
+ * Refuses an account this tool does not lock or unlock: one that is not local,
+ * and one that is `builtin` or `immutable`, naming the field. A field that
+ * cannot be read refuses too, since an account that could not be ruled out has
+ * not been — the same direction `user_create`'s privilege check takes.
+ */
+function refuseProtectedAccount(row: Record<string, unknown>, label: string): void {
+  if (row['local'] !== true) {
+    throw new Error(
+      `Account ${label} is not reported as a local account, and this tool locks local accounts ` +
+        'only — a directory-service account is disabled in its directory',
+    );
+  }
+  for (const field of ['builtin', 'immutable'] as const) {
+    const value = booleanOrNull(row[field]);
+    if (value === true) {
+      throw new Error(`Account ${label} is ${field} (${field} true), and this tool does not lock or unlock it`);
+    }
+    if (value === null) {
+      throw new Error(
+        `Account ${label}'s ${field} could not be read, so whether it is ${field} cannot be ruled ` +
+          'out, and this tool does not lock or unlock it',
+      );
+    }
+  }
+}
+
+/**
+ * Refuses to lock the account the catalog is signed in as, which `auth.me`
+ * names by `pw_name` and `pw_uid` — not by the record id this tool takes, so
+ * the account is matched on its username OR its uid, and matching more refuses
+ * more. Whether a lock ends the session already using it is (unconfirmed), and
+ * that is exactly why this is refused rather than warned about: if it does, the
+ * catalog loses the system part-way through, with nothing left to unlock it.
+ *
+ * A read that fails or names no user refuses too: the one thing it exists to
+ * rule out has not been. Only a lock is checked — unlocking the catalog's own
+ * account cannot lock it out.
+ */
+async function refuseOwnAccount(ctx: ToolContext, row: Record<string, unknown>, label: string): Promise<void> {
+  const unread = (why: string) =>
+    new Error(
+      `Which account this catalog is signed in as could not be read (${why}), so locking ` +
+        `${label} cannot be ruled out as locking the catalog out of this system, and nothing is planned`,
+    );
+  let me: unknown;
+  try {
+    me = await firstValueFrom(ctx.system.client.api.call('auth.me'));
+  } catch (reason) {
+    throw unread(`auth.me failed: ${errorText(reason)}`);
+  }
+  const session = recordOrNull(me);
+  const name = textOrNull(session?.['pw_name']);
+  const uid = numberOrNull(session?.['pw_uid']);
+  if (name === null && uid === null) throw unread('auth.me named no user');
+  if (
+    (name !== null && name === textOrNull(row['username'])) ||
+    (uid !== null && uid === numberOrNull(row['uid']))
+  ) {
+    throw new Error(
+      `Account ${label} is the account this catalog is signed in to this system as (auth.me), and ` +
+        'the catalog will not lock its own account: whether a lock ends the session it is using is ' +
+        '(unconfirmed), and if it did, nothing here could unlock it again',
+    );
+  }
+}
+
+/**
+ * What the plan says about the privileges the account's groups hold, since
+ * locking the last account holding one is a lockout an approver should see.
+ *
+ * Plan-time only and not a step, since `execute` does not make this read
+ * (#119), and every failure is stated rather than failing the plan (#154).
+ * The account's groups are its primary group and the ids in `groups`; a
+ * privilege's `local_groups` entry is matched on its `id` against those, or
+ * on its `gid` against the primary group's — matching on more names more. Where
+ * anything stops that from being read in full, the sentence says so rather
+ * than claiming none: a shorter list says the account holds less authority.
+ */
+async function privilegeSentence(ctx: ToolContext, row: Record<string, unknown>, locked: boolean): Promise<string> {
+  const where = '`privileges_list` reports which groups hold which roles.';
+  const primary = recordOrNull(row['group']);
+  const primaryId = numberOrNull(primary?.['id']);
+  const primaryGid = numberOrNull(primary?.['gid']);
+  // Absent is not "no other group": `users_list` reads it as no membership
+  // reported, and a list not reported cannot rule a privilege out.
+  const auxiliary = idList(row['groups']);
+  let partial = primaryId === null || auxiliary === null;
+  const ids = [...(primaryId === null ? [] : [primaryId]), ...(auxiliary ?? [])];
+  let rows: unknown;
+  try {
+    rows = await firstValueFrom(ctx.system.client.api.query('privilege.query'));
+  } catch (reason) {
+    return ` Whether its groups hold a privilege could not be read (privilege.query failed: ${errorText(reason)}); ${where}`;
+  }
+  if (!Array.isArray(rows)) {
+    return ` Whether its groups hold a privilege could not be read (privilege.query did not answer with a list); ${where}`;
+  }
+  const held: string[] = [];
+  for (const entry of rows) {
+    const privilege = recordOrNull(entry);
+    const groups = privilege?.['local_groups'];
+    if (privilege === null || !Array.isArray(groups)) {
+      partial = true;
+      continue;
+    }
+    const label =
+      textOrNull(privilege['name']) ?? `with id ${numberOrNull(privilege['id']) ?? 'unread'}`;
+    const holds = groups.some((group) => {
+      const record = recordOrNull(group);
+      const id = numberOrNull(record?.['id']);
+      const gid = numberOrNull(record?.['gid']);
+      if (id === null && gid === null) partial = true;
+      return (id !== null && ids.includes(id)) || (gid !== null && gid === primaryGid);
+    });
+    if (holds) held.push(`"${label}"`);
+  }
+  const caveat = partial
+    ? ' Not every group or privilege could be read, so others may be held too.'
+    : '';
+  if (held.length === 0) {
+    return partial
+      ? ` Whether its groups hold a privilege could not be read in full, so this plan does not say they hold none; ${where}`
+      : ' None of its groups holds a privilege.';
+  }
+  const effect = locked
+    ? 'LOCKING IT BARS THAT ADMINISTRATIVE ACCESS, and whether any other account still holds ' +
+      'it is not read here — if this is the last such account, no account that can log in holds it afterwards.'
+    : 'Unlocking it restores that administrative access.';
+  return ` Its groups hold ${plural(held.length, 'privilege')} ${held.join(', ')}. ${effect}${caveat}`;
+}
+
+/** What the plan says the call will do, given the lock state read now. */
+function lockSentence(current: boolean | null, target: boolean): string {
+  if (current === null) return 'Whether it is locked now could not be read, so this may change nothing.';
+  if (current === target) {
+    return `It is already ${current ? 'locked' : 'unlocked'}, so this changes nothing and is not an error.`;
+  }
+  return `It is ${current ? 'locked' : 'unlocked'}, so this will ${target ? 'lock' : 'unlock'} it.`;
+}
+
+/** How many API keys the account has, off a row or a response; null where the list could not be read. */
+function apiKeyCount(row: Record<string, unknown> | null): number | null {
+  const keys = idList(row?.['api_keys']);
+  return keys === null ? null : keys.length;
+}
+
+/**
+ * What a lock is and is not shown to do — one text for the description and the
+ * plan, so neither can promise more than the other.
+ */
+const LOCK_REACH =
+  'A lock is understood to bar the account from logging in with a password (unconfirmed). ' +
+  "WHETHER IT REVOKES THE ACCOUNT'S API KEYS OR ENDS ITS OPEN SESSIONS IS NOT ESTABLISHED, and " +
+  'this tool does neither: a locked account\'s existing API keys and sessions have not been ' +
+  'shown to stop working.';
+
+const USER_SET_LOCKED_GUIDANCE =
+  '`requested_locked` is what was asked for. `previously_locked` is the ' +
+  "account's lock state as read immediately before the call. " +
+  '`resulting_locked` is the state read back off the response the update ' +
+  'itself answered with, which is the updated account. `changed` is true where ' +
+  'those two disagree and false where they are the same, WHICH IS TWO OUTCOMES ' +
+  'AND NOT ONE: either the account was already in the requested state, or the ' +
+  'call did not apply and left it in the other one. `confirmed` is what tells ' +
+  'those two apart, and `changed` must not be read without it. ALL THREE OF ' +
+  '`previously_locked`, `resulting_locked` AND `changed` ARE NULL WHERE THE ' +
+  'STATE BEHIND THEM COULD NOT BE ESTABLISHED, WHICH IS NOT "NOTHING CHANGED", ' +
+  'and `changed` is null whenever either of the other two is. `confirmed` is ' +
+  'whether `resulting_locked` is what was requested: true is the system ' +
+  'reporting back the state that was asked for, FALSE IS NOT A SUCCESS — the ' +
+  'call did not reject and the account is not in the requested state — and ' +
+  'null is a response that stated no `locked` this tool could read. `lookup` ' +
+  'says what the read before the call did: `FOUND`, `NOT_FOUND` (no account ' +
+  'with that id was listed — it was deleted between the plan and the ' +
+  'confirmation) or `UNREADABLE`, with `lookup_error` naming why; `FOUND` ' +
+  'beside a null `previously_locked` is an account that stated no `locked` ' +
+  'this tool could read. THE UPDATE IS ATTEMPTED IN ALL THREE CASES, because ' +
+  'what runs must be what was approved. `api_key_count` is how many API keys ' +
+  'the updated account has, off the same response, and null where that list ' +
+  'could not be read: A LOCK HAS NOT BEEN SHOWN TO STOP THEM WORKING, so a ' +
+  'non-zero count beside `resulting_locked: true` is access that may well ' +
+  'remain. No password hash, generated password or SSH key is returned.';
+
+export const userSetLocked: MutatingTool = {
+  name: 'user_set_locked',
+  description:
+    'Locks or unlocks one local user account on this TrueNAS system, and ' +
+    'changes nothing else about it. Two-phase: called without a ' +
+    'confirmation_token it returns a plan for user approval; called with one it ' +
+    "sends the lock. `id` is the account's `id` as `users_list` reports it — " +
+    "the middleware's record id, NOT the `uid`. `locked` is the state to move " +
+    'it to, true or false, and is required: there is no toggle. ONLY THE ' +
+    '`locked` FIELD IS SENT. ' +
+    LOCK_REACH +
+    ' Revoking API keys, ending sessions, disabling the password or SSH login ' +
+    'and deleting the account are not done by any tool here. THE PLAN FAILS ' +
+    '— naming why — for an id `users_list` does not report, compared on the ' +
+    'response; for an account that is not local, which is disabled in its ' +
+    'directory; for a `builtin` or `immutable` account, naming which; and, when ' +
+    'locking, FOR THE ACCOUNT THIS CATALOG IS ITSELF SIGNED IN AS (`auth.me`), ' +
+    'since whether a lock ends the session in use is (unconfirmed) and nothing ' +
+    'could unlock it afterwards. Where whether the account is builtin, ' +
+    'immutable or the catalog\'s own cannot be read, the plan fails rather than ' +
+    'guessing. These checks are made when the plan is made and not again. The ' +
+    'plan names the account by username and full name, says how many API keys ' +
+    'it has, and names every privilege its groups hold — locking the last ' +
+    'account holding an administrative privilege is a lockout, and whether ' +
+    'another account holds it is not read. LOCKING AN ACCOUNT ALREADY LOCKED, ' +
+    'OR UNLOCKING ONE ALREADY UNLOCKED, IS NOT AN ERROR, and the result says ' +
+    'which happened. `destructiveness` is `reversible`: the call with `locked` ' +
+    'flipped is the inverse. ' +
+    USER_SET_LOCKED_GUIDANCE,
+  resultGuidance: USER_SET_LOCKED_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'integer',
+        description:
+          "The account's `id` as `users_list` reports it, on the system being targeted. " +
+          'Not the `uid`.',
+      },
+      locked: {
+        type: 'boolean',
+        description: 'The state to move the account to: true locks it, false unlocks it. Required — this is not a toggle.',
+      },
+    },
+    required: ['id', 'locked'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // One boolean on one row, and the call with it flipped puts it back.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    return { ...parseUserSetLocked(rawArgs) };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const { id, locked } = parseUserSetLocked(rawArgs);
+    let rows: unknown;
+    try {
+      rows = await readAccount(ctx, id);
+    } catch (reason) {
+      throw new Error(`The account with id ${id} could not be read (user.query failed: ${errorText(reason)}), so nothing is planned`);
+    }
+    const row = rowWithId(rows, id);
+    if (row === null) {
+      throw new Error(
+        `No user account with id ${id} on this system — \`users_list\` reports each account's ` +
+          '`id`, which is the record id and not the `uid`',
+      );
+    }
+    const label = accountText(row, id);
+    refuseProtectedAccount(row, label);
+    if (locked) await refuseOwnAccount(ctx, row, label);
+    const privileges = await privilegeSentence(ctx, row, locked);
+    const keys = apiKeyCount(row);
+    const keyText =
+      keys === null
+        ? ' How many API keys it has could not be read.'
+        : ` It has ${plural(keys, 'API key')}.`;
+    return [
+      readStep('user.query', 'user account', id),
+      {
+        method: 'user.update',
+        params: [id, { locked }],
+        description:
+          `${locked ? 'Lock' : 'Unlock'} local user ${label}. Only the locked flag is sent. ` +
+          `${lockSentence(booleanOrNull(row['locked']), locked)}${keyText}` +
+          `${locked ? ` ${LOCK_REACH}` : ''}${privileges}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const { id, locked } = parseUserSetLocked(rawArgs);
+    // The response is kept for the API keys as well as handed to the shared
+    // outcome, so the two are read off the one answer rather than two calls.
+    let updated: unknown = null;
+    const outcome = await switchOutcome(
+      () => readAccount(ctx, id),
+      async () => (updated = await firstValueFrom(ctx.system.client.api.call('user.update', [id, { locked }]))),
+      id,
+      locked,
+      'locked',
+    );
+    return {
+      id,
+      requested_locked: locked,
+      ...outcome,
+      api_key_count: apiKeyCount(recordOrNull(updated)),
     };
   },
 };

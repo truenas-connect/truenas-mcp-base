@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the eighty-nine sketch tools', () => {
+  it('registers the ninety sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -94,13 +94,16 @@ describe('createDefaultCatalog', () => {
       'nvmeof_subsystem_create',
       'nvmeof_subsystem_update',
       'user_create',
+      'user_set_locked',
     ]);
   });
 
-  it('advertises user_create to a full-access credential only', () => {
-    expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain('user_create');
-    expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain('user_create');
-    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain('user_create');
+  it('advertises user_create and user_set_locked to a full-access credential only', () => {
+    for (const name of ['user_create', 'user_set_locked']) {
+      expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain(name);
+      expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain(name);
+      expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(name);
+    }
   });
 
   it('advertises the SMB, NFS, iSCSI target and NVMe-oF subsystem mutations to a sharing credential, and not to a read-only one', () => {

@@ -48,7 +48,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `pool_scrub_task_create`, `pool_scrub_task_update`, `share_set_enabled`,
   `smb_share_create`, `smb_share_update`, `nfs_share_create`,
   `nfs_share_update`, `iscsi_target_create`, `iscsi_target_update`,
-  `nvmeof_subsystem_create`, `nvmeof_subsystem_update`, `user_create` —
+  `nvmeof_subsystem_create`, `nvmeof_subsystem_update`, `user_create`,
+  `user_set_locked` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop` and `container_restart` the seven that
   start a background job,
@@ -181,7 +182,15 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `privileges_list`'s source — or that grants sudo commands is refused, at plan
   time and again when the account is created, because membership in either is
   administrative authority. Without an SSH key nobody can log in to the new
-  account, which its plan says. Nothing here deletes or disables a user.
+  account, which its plan says. Nothing here deletes a user.
+  `user_set_locked` locks or unlocks one local account, named by the `id`
+  `users_list` reports, and sends nothing but `locked`. Whether a lock revokes
+  the account's API keys or ends its open sessions is not established, and its
+  description and plan say so rather than promising either; it does neither
+  itself. It refuses a directory, `builtin` or `immutable` account, and refuses
+  to lock the account the catalog is itself signed in as. Its plan names the
+  privileges the account's groups hold, since locking the last account holding
+  one is a lockout.
   `container_list` and the three container power tools are the first family
   written against the client's `ops` layer rather than `api.call`, because every
   one of these operations changes SHAPE between TrueNAS versions and not just

@@ -131,6 +131,7 @@ export {
   fcList,
   usersList,
   userCreate,
+  userSetLocked,
   directoryServicesStatus,
   privilegesList,
   networkInterfaces,
