@@ -227,7 +227,9 @@ export const usersList: ReadOnlyTool = {
     'THE ACCOUNT COMES FROM A DIRECTORY SERVICE — Active Directory or LDAP — ' +
     'rather than that it is disabled or missing. `shell` is the login shell, ' +
     'null where the system reported none, which is usual for a directory ' +
-    'account. `locked` is whether the account is barred from logging in, and ' +
+    'account. `locked` is whether the account is locked, which is understood to ' +
+    'bar logging in with a password (unconfirmed) — `user_set_locked` says what ' +
+    'a lock has not been shown to stop — and ' +
     'is null where the system reported no value, WHICH IS NOT THE SAME AS ' +
     'UNLOCKED. `primary_group` is the group the account owns new files as, and ' +
     '`auxiliary_groups` the other groups it is a member of. Each is reported ' +
@@ -1422,9 +1424,12 @@ async function privilegeSentence(ctx: ToolContext, row: Record<string, unknown>,
       : ' None of its groups holds a privilege.';
   }
   const effect = locked
-    ? 'LOCKING IT BARS THAT ADMINISTRATIVE ACCESS, and whether any other account still holds ' +
-      'it is not read here — if this is the last such account, no account that can log in holds it afterwards.'
-    : 'Unlocking it restores that administrative access.';
+    ? 'Locking it is understood to bar password login to an account holding that administrative ' +
+      'access (unconfirmed); ITS API KEYS AND OPEN SESSIONS MAY KEEP IT. Whether any other account ' +
+      'still holds it is not read here — if this is the last such account, no account that can log ' +
+      'in with a password may hold it afterwards.'
+    : 'Unlocking it is understood to restore password login to an account holding that ' +
+      'administrative access (unconfirmed).';
   return ` Its groups hold ${plural(held.length, 'privilege')} ${held.join(', ')}. ${effect}${caveat}`;
 }
 

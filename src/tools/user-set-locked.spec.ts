@@ -175,11 +175,19 @@ describe('user_set_locked', () => {
 
     it('names every privilege the account holds through its groups', async () => {
       const [, step] = await userSetLocked.plan(system().ctx, lock);
-      expect(step.description).toContain('Its groups hold 1 privilege "Ops". LOCKING IT BARS THAT ADMINISTRATIVE ACCESS');
+      expect(step.description).toContain(
+        'Its groups hold 1 privilege "Ops". Locking it is understood to bar password login to an account ' +
+          'holding that administrative access (unconfirmed); ITS API KEYS AND OPEN SESSIONS MAY KEEP IT.',
+      );
+      // The privilege sentence claims no more than the lock's reach does.
+      expect(step.description).not.toMatch(/BARS THAT ADMINISTRATIVE ACCESS/i);
       // By the primary group's gid too, and unlocking says what it restores.
       const byGid = [{ id: 3, name: 'Projects Admin', local_groups: [{ gid: 3001 }] }];
       const [, unlock] = await userSetLocked.plan(system({ 'privilege.query': byGid }).ctx, { id: 41, locked: false });
-      expect(unlock.description).toContain('Its groups hold 1 privilege "Projects Admin". Unlocking it restores');
+      expect(unlock.description).toContain(
+        'Its groups hold 1 privilege "Projects Admin". Unlocking it is understood to restore password login',
+      );
+      expect(unlock.description).not.toMatch(/restores that administrative access/i);
     });
 
     it('says none only where every group and privilege was read', async () => {
