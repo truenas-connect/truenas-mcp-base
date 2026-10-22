@@ -273,6 +273,18 @@ export function agreement(
   return unread ? null : true;
 }
 
+/**
+ * Arguments the API takes and a mutating tool does not, refused by name.
+ * Silently dropping one would let a caller believe it was applied. Here since
+ * #185, when the iSCSI target mutations became the second family to refuse
+ * arguments this way after the SMB and NFS shares (#183, #184).
+ */
+export function refuseArgs(args: Record<string, unknown>, keys: readonly string[], why: string): void {
+  for (const key of keys) {
+    if (args[key] !== undefined) throw new Error(`"${key}" is not accepted by this tool: ${why}`);
+  }
+}
+
 /** `1 alert` / `2 alerts`, so a rendered reason reads as English at either count. */
 export function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? '' : 's'}`;

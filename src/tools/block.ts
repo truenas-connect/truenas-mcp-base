@@ -1,13 +1,19 @@
 import type { QueryEntity } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
-import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+import { ApiSurface, MutatingTool, PlanStep, ReadOnlyTool, SystemHandle, ToolContext } from '@/catalog/tool';
 import {
+  agreement,
   booleanOrNull,
   errorText,
   isMissingMethod,
+  NONE_REPORTED,
   numberOrNull,
+  readStep,
   recordOrNull,
+  refuseArgs,
+  rowWithId,
+  strictTextList,
   textOrNull,
   unreportedKeys,
 } from '@/tools/common';
@@ -226,9 +232,10 @@ async function readPortals(system: SystemHandle): Promise<Portal[]> {
   const portals = await firstValueFrom(system.client.api.query('iscsi.portal.query'));
   return portals.map((portal) => ({
     id: numberOrNull(portal.id),
-    // The portal group number a target's `groups[].portal` names it by. It is
-    // reported because it is what such a mapping would be read against; this
-    // tool does not make that join, and says so in its description.
+    // The portal group number the system knows the portal by. A target's
+    // `groups[].portal` names the portal by `id` instead, which is what
+    // `iscsi_target_create` resolves it against; this tool does not make that
+    // join, and says so in its description.
     tag: numberOrNull(portal.tag),
     comment: textOrNull(portal.comment),
     listen: Array.isArray(portal.listen)
@@ -1378,3 +1385,888 @@ export const fcList: ReadOnlyTool = {
     };
   },
 };
+
+/**
+ * `iscsi_target_create` and `iscsi_target_update`: making one iSCSI target, and
+ * changing an existing one's name, alias, portal groups and authorised networks.
+ *
+ * TWO TOOLS AND NOT ONE, for the reason the share pairs are two (#183, #184): a
+ * create says what the new target will and will not serve; an update names each
+ * value beside the one it replaces.
+ *
+ * A GROUP IS THREE REFERENCES, AND EACH IS RESOLVED AT PLAN TIME. `portal` and
+ * `initiator` are ROW IDS into `iscsi.portal` and `iscsi.initiator`; `auth` is a
+ * CHAP credential TAG in `iscsi.auth`, not a row id — several credentials can
+ * share one tag, and the middleware validates `auth` by querying on `tag`.
+ * That reading is from the TrueNAS implementation rather than the API surface,
+ * which types all three as bare numbers. A reference that does not resolve
+ * fails the plan naming its table, and every resolved one is named in human
+ * terms: an approver cannot check a number.
+ *
+ * A CHAP CREDENTIAL ROW CARRIES `secret` AND `peersecret`, and is read through
+ * an allowlist of `tag` and `user` and nothing else (#97, #100). Nothing that
+ * reaches a plan or a result is built from the row itself.
+ *
+ * ACCESS IS STATED IN WORDS, NEVER LEFT TO A NULL. `initiator: null` admits any
+ * initiator, `authmethod: NONE` is no CHAP, and an empty `auth_networks` is
+ * read here as unrestricted — each one reads as "restricted" to an approver
+ * who sees nothing, which is #154's costly direction.
+ *
+ * THE RESOLUTION READS ARE PLAN-TIME ONLY AND NOT STEPS (#119), and so is
+ * `iscsi.target.validate_name`: `execute` makes none of them. The confirmation
+ * token binds the arguments, and the ids are the arguments, so what runs is
+ * the call the plan named; a portal deleted between the two is the
+ * middleware's to refuse.
+ *
+ * THE ROLE IS `Role.Sharing`, with `share_set_enabled`'s caveat: that the
+ * sharing-admin role grants `iscsi.target.create` and `iscsi.target.update` is
+ * (unconfirmed) against a live system's `privilege.roles`.
+ */
+
+/** The authentication methods a group accepts. */
+const ISCSI_AUTHMETHODS = ['NONE', 'CHAP', 'CHAP_MUTUAL'] as const;
+type IscsiAuthmethod = (typeof ISCSI_AUTHMETHODS)[number];
+
+/** One portal group as sent: the keys passed, in this order and no others. */
+interface TargetGroup {
+  portal: number;
+  initiator?: number | null;
+  authmethod?: IscsiAuthmethod;
+  auth?: number | null;
+}
+
+/** The keys a group may carry, in the order a parsed group holds them. */
+const GROUP_KEYS = ['portal', 'initiator', 'authmethod', 'auth'] as const;
+
+/** The settings both tools send. Every one is optional on update. */
+type TargetFields = {
+  name?: string;
+  alias?: string | null;
+  groups?: TargetGroup[];
+  auth_networks?: string[];
+};
+
+/** The order the plan states the fields in, which is the schema's. */
+const TARGET_FIELDS = ['name', 'alias', 'groups', 'auth_networks'] as const;
+
+/** Why `mode` and `iscsi_parameters` are refused, worded once for both tools. */
+const TARGET_REFUSED =
+  "a target's mode and its iSCSI parameters are out of this tool's scope; a target is created " +
+  'with mode ISCSI';
+
+/** The one mode this catalog creates a target with. */
+const ISCSI_MODE = 'ISCSI' as const;
+
+function isWholeNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value);
+}
+
+/**
+ * The groups as sent, refused whole where any entry is not one. An unknown key
+ * inside a group is refused rather than dropped, for `refuseArgs`'s reason: a
+ * key silently dropped reads as applied.
+ */
+function parseGroups(value: unknown): TargetGroup[] {
+  if (!Array.isArray(value)) {
+    throw new Error('"groups" must be a list of { portal, initiator, authmethod, auth }');
+  }
+  return value.map((entry, index) => {
+    const at = `"groups[${index}]`;
+    const group = recordOrNull(entry);
+    if (group === null) throw new Error(`${at}" must be an object`);
+    const stray = Object.keys(group).find((key) => !(GROUP_KEYS as readonly string[]).includes(key));
+    if (stray !== undefined) {
+      throw new Error(`${at}.${stray}" is not accepted: a group takes ${GROUP_KEYS.join(', ')}`);
+    }
+    const portal = group['portal'];
+    if (!isWholeNumber(portal)) {
+      throw new Error(`${at}.portal" is required and must be a whole number: a portal's id`);
+    }
+    const parsed: TargetGroup = { portal };
+    const initiator = group['initiator'];
+    if (initiator !== undefined) {
+      if (initiator !== null && !isWholeNumber(initiator)) {
+        throw new Error(`${at}.initiator" must be an initiator group's id, or null for any initiator`);
+      }
+      parsed.initiator = initiator;
+    }
+    const authmethod = group['authmethod'];
+    if (authmethod !== undefined) {
+      if (!(ISCSI_AUTHMETHODS as readonly unknown[]).includes(authmethod)) {
+        throw new Error(`${at}.authmethod" must be one of ${ISCSI_AUTHMETHODS.join(', ')}`);
+      }
+      parsed.authmethod = authmethod as IscsiAuthmethod;
+    }
+    const auth = group['auth'];
+    if (auth !== undefined) {
+      if (auth !== null && !isWholeNumber(auth)) {
+        throw new Error(`${at}.auth" must be a CHAP credential's tag, or null for none`);
+      }
+      parsed.auth = auth;
+    }
+    // The middleware refuses CHAP with no credential, so the plan does too
+    // rather than promising a call that will be rejected (#161).
+    if (parsed.authmethod !== undefined && parsed.authmethod !== 'NONE' && (parsed.auth ?? null) === null) {
+      throw new Error(`${at}.auth" is required where authmethod is ${parsed.authmethod}: a CHAP credential's tag`);
+    }
+    return parsed;
+  });
+}
+
+/**
+ * The target settings, each validated where it was passed and left out where
+ * it was not, in the schema's order — so the record is exactly what is sent.
+ */
+function parseTargetFields(args: Record<string, unknown>): TargetFields {
+  refuseArgs(args, ['mode', 'iscsi_parameters'], TARGET_REFUSED);
+  const fields: TargetFields = {};
+  const name = args['name'];
+  if (name !== undefined) {
+    if (textOrNull(name) === null) throw new Error('"name" must be a non-empty string');
+    fields.name = name as string;
+  }
+  const alias = args['alias'];
+  if (alias !== undefined) {
+    // Null is how an alias is cleared; an empty one is refused rather than read
+    // as null, so a caller who meant one is not told the other happened.
+    if (alias !== null && textOrNull(alias) === null) {
+      throw new Error('"alias" must be a non-empty string, or null for no alias');
+    }
+    fields.alias = alias as string | null;
+  }
+  if (args['groups'] !== undefined) fields.groups = parseGroups(args['groups']);
+  const networks = args['auth_networks'];
+  if (networks !== undefined) {
+    if (!Array.isArray(networks) || !networks.every((entry) => textOrNull(entry) !== null)) {
+      throw new Error('"auth_networks" must be a list of networks in CIDR form, such as "10.0.0.0/24"');
+    }
+    fields.auth_networks = networks as string[];
+  }
+  return fields;
+}
+
+/** What `iscsi_target_create` was asked to do. */
+type TargetCreateArgs = TargetFields & { name: string };
+
+/** What `iscsi_target_create` sends: the settings passed, with mode ISCSI. */
+type TargetCreate = TargetCreateArgs & { mode: typeof ISCSI_MODE };
+
+/** The create's arguments, without the mode it adds — which it would refuse. */
+function parseTargetCreateArgs(args: Record<string, unknown>): TargetCreateArgs {
+  const fields = parseTargetFields(args);
+  if (fields.name === undefined) throw new Error('"name" is required');
+  return { ...fields, name: fields.name };
+}
+
+function parseTargetCreate(args: Record<string, unknown>): TargetCreate {
+  return { ...parseTargetCreateArgs(args), mode: ISCSI_MODE };
+}
+
+/** What `iscsi_target_update` was asked to do. */
+interface TargetUpdate {
+  id: number;
+  fields: TargetFields;
+}
+
+function parseTargetUpdate(args: Record<string, unknown>): TargetUpdate {
+  const fields = parseTargetFields(args);
+  const id = args['id'];
+  if (!isWholeNumber(id)) throw new Error('"id" is required and must be a whole number');
+  if (Object.keys(fields).length === 0) {
+    throw new Error(`Nothing to change: pass at least one of ${TARGET_FIELDS.join(', ')}`);
+  }
+  return { id, fields };
+}
+
+/** One group as these tools report it off a target row. */
+interface TargetGroupRow {
+  portal: number;
+  initiator: number | null;
+  authmethod: string | null;
+  auth: number | null;
+}
+
+/**
+ * A target's groups, all of them or none. Null where the field was not a list,
+ * AND where any one group could not be read — #93's direction: a group list one
+ * entry shorter says the target is not published through that portal, and a
+ * group whose `initiator` would not read cannot be told from one admitting any
+ * initiator, which is the reading that costs. An absent `initiator` or `auth`
+ * is read as null, which is what the system stores for none.
+ */
+function readGroups(value: unknown): TargetGroupRow[] | null {
+  if (!Array.isArray(value)) return null;
+  const groups: TargetGroupRow[] = [];
+  for (const entry of value) {
+    const group = recordOrNull(entry);
+    const portal = numberOrNull(group?.['portal']);
+    const initiator = group?.['initiator'] ?? null;
+    const auth = group?.['auth'] ?? null;
+    const authmethod = group?.['authmethod'] ?? null;
+    if (
+      portal === null ||
+      (initiator !== null && numberOrNull(initiator) === null) ||
+      (auth !== null && numberOrNull(auth) === null) ||
+      (authmethod !== null && textOrNull(authmethod) === null)
+    ) {
+      return null;
+    }
+    groups.push({
+      portal,
+      initiator: initiator as number | null,
+      authmethod: authmethod as string | null,
+      auth: auth as number | null,
+    });
+  }
+  return groups;
+}
+
+/**
+ * An iSCSI target as these tools report it, field by field. `iscsi_parameters`
+ * and `rel_tgt_id` are not reported: the first is out of these tools' scope
+ * and the second is the system's own bookkeeping.
+ */
+interface TargetRow {
+  id: number | null;
+  name: string | null;
+  alias: string | null;
+  mode: string | null;
+  groups: TargetGroupRow[] | null;
+  auth_networks: string[] | null;
+}
+
+function targetRow(row: Record<string, unknown>): TargetRow {
+  return {
+    id: numberOrNull(row['id']),
+    name: textOrNull(row['name']),
+    alias: textOrNull(row['alias']),
+    mode: textOrNull(row['mode']),
+    groups: readGroups(row['groups']),
+    // Whole or not at all: a network list one entry shorter is a narrower
+    // restriction than the one the target holds.
+    auth_networks: strictTextList(row['auth_networks']),
+  };
+}
+
+/**
+ * An alias as stored: the alias, `''` where the target has none — which the
+ * system may spell as null or as an empty string — and null where it could not
+ * be read. #184's `storedMapping`, for the same reason: a cleared alias could
+ * otherwise never be confirmed.
+ */
+function storedAlias(value: unknown): string | null {
+  if (value === null || value === undefined || value === '') return '';
+  return typeof value === 'string' ? value : null;
+}
+
+/** What `agreement` compares a group list as, where the comparison holds. */
+const AS_SENT = 'as sent';
+
+/**
+ * Whether a stored group list holds the groups sent, in order: false where a
+ * group is missing, extra or differs in a key that was SENT, null where the
+ * stored list could not be read, true otherwise. A key a group did not send is
+ * the system's to fill and is not compared.
+ */
+function groupsMatch(sent: TargetGroup[], stored: TargetGroupRow[] | null): boolean | null {
+  if (stored === null) return null;
+  if (stored.length !== sent.length) return false;
+  return sent.every((group, index) =>
+    GROUP_KEYS.every((key) => group[key] === undefined || group[key] === stored[index][key]),
+  );
+}
+
+/** What a request sent, in the terms {@link targetComparable} reads a row in. */
+function targetSent(fields: TargetFields & { mode?: string }): Record<string, string | null> {
+  return Object.fromEntries(
+    Object.entries(fields).map(([key, value]) => [
+      key,
+      key === 'groups' ? AS_SENT : key === 'auth_networks' ? JSON.stringify(value) : ((value as string | null) ?? ''),
+    ]),
+  );
+}
+
+/**
+ * A row's values for the fields sent, as {@link agreement} compares them
+ * against {@link targetSent}: a list of networks by its exact spelling, the
+ * alias through {@link storedAlias}, and the groups as whether they hold the
+ * groups sent.
+ */
+function targetComparable(
+  raw: Record<string, unknown>,
+  fields: TargetFields & { mode?: string },
+): Record<string, string | null> {
+  const row = targetRow(raw);
+  return Object.fromEntries(
+    Object.keys(fields).map((key) => {
+      if (key === 'alias') return [key, storedAlias(raw['alias'])];
+      if (key === 'groups') {
+        const match = groupsMatch(fields.groups ?? [], row.groups);
+        return [key, match === null ? null : match ? AS_SENT : 'different'];
+      }
+      if (key === 'auth_networks') return [key, row.auth_networks === null ? null : JSON.stringify(row.auth_networks)];
+      return [key, row[key as 'name' | 'mode']];
+    }),
+  );
+}
+
+/** Two readings of a target, for the fields sent, compared as themselves. */
+function targetReading(raw: Record<string, unknown>, keys: readonly string[]): Record<string, string | null> {
+  const row = targetRow(raw);
+  return Object.fromEntries(
+    keys.map((key) => {
+      if (key === 'alias') return [key, storedAlias(raw['alias'])];
+      const value = row[key as keyof TargetRow];
+      return [key, value === null ? null : typeof value === 'string' ? value : JSON.stringify(value)];
+    }),
+  );
+}
+
+/** One field as the target holds it now, as a plan states it. */
+function storedTargetValue(raw: Record<string, unknown>, key: string): string {
+  if (key === 'alias') {
+    const alias = storedAlias(raw['alias']);
+    return alias === '' ? 'null' : alias === null ? NONE_REPORTED : JSON.stringify(alias);
+  }
+  const value = targetRow(raw)[key as keyof TargetRow];
+  return value === null ? NONE_REPORTED : JSON.stringify(value);
+}
+
+/**
+ * A CHAP credential as a plan may name it: its tag and its user, and nothing
+ * else. THIS IS THE CREDENTIAL BOUNDARY — the row carries `secret` and
+ * `peersecret`, and only these two keys are ever read off it.
+ */
+interface ChapLabel {
+  tag: number | null;
+  user: string | null;
+}
+
+/** A portal as a plan names it: its tag, its comment and where it listens. */
+function portalLabel(row: Record<string, unknown>): string {
+  const listen = Array.isArray(row['listen'])
+    ? row['listen'].map((entry) => {
+        const held = recordOrNull(entry);
+        const ip = textOrNull(held?.['ip']);
+        const port = numberOrNull(held?.['port']);
+        const where = `${ip ?? NONE_REPORTED}:${port ?? NONE_REPORTED}`;
+        // The wildcard reads as a placeholder and is the opposite (#138).
+        return ip === '0.0.0.0'
+          ? `${where} (every IPv4 address)`
+          : ip === '::'
+            ? `${where} (every IPv6 address)`
+            : where;
+      })
+    : null;
+  const comment = textOrNull(row['comment']);
+  return (
+    `tag ${numberOrNull(row['tag']) ?? NONE_REPORTED}` +
+    `${comment === null ? '' : `, "${comment}"`}, listening on ` +
+    `${listen === null ? NONE_REPORTED : listen.length === 0 ? 'no address' : listen.join(', ')}`
+  );
+}
+
+/** One table a group refers into, read once per plan and only where needed. */
+interface Lookup {
+  table: string;
+  rows: unknown[] | null;
+  error: string | null;
+}
+
+async function readTable(read: () => Promise<unknown>, table: string): Promise<Lookup> {
+  try {
+    const rows = await read();
+    return Array.isArray(rows)
+      ? { table, rows, error: null }
+      : { table, rows: null, error: `${table}.query did not answer with a list` };
+  } catch (reason) {
+    return { table, rows: null, error: `${table}.query failed: ${errorText(reason)}` };
+  }
+}
+
+/** Why a reference could not be resolved, naming the table it was looked up in. */
+function unresolved(at: string, what: string, lookup: Lookup, hint: string): Error {
+  return new Error(
+    lookup.error === null
+      ? `${at}: no ${what} in ${lookup.table} on this system — ${hint}`
+      : `${at}: ${what} could not be resolved, because ${lookup.error}`,
+  );
+}
+
+/**
+ * Every group sent, resolved against the tables it names and described in
+ * words — or a refusal naming the first reference that does not resolve.
+ *
+ * Each table is read only where some group refers into it, and once. A table
+ * that could not be read fails the plan exactly as a missing row does: the
+ * plan cannot name what it cannot read, and an approver shown a bare id is
+ * approving something they cannot check.
+ */
+async function groupsSentence(ctx: ToolContext, groups: TargetGroup[]): Promise<string> {
+  if (groups.length === 0) {
+    return (
+      ' IT NAMES NO PORTAL GROUP; whether a target with none is reachable through any portal is ' +
+      '(unconfirmed), and `iscsi_list` reports the portals this system has.'
+    );
+  }
+  const api = ctx.system.client.api;
+  const tables = new Map<string, Promise<Lookup>>();
+  const table = (name: string, read: () => Promise<unknown>): Promise<Lookup> => {
+    let lookup = tables.get(name);
+    if (lookup === undefined) {
+      lookup = readTable(read, name);
+      tables.set(name, lookup);
+    }
+    return lookup;
+  };
+  const tableOf: Tables = {
+    portals: () => table('iscsi.portal', () => firstValueFrom(api.query('iscsi.portal.query'))),
+    initiators: () => table('iscsi.initiator', () => firstValueFrom(api.query('iscsi.initiator.query'))),
+    auths: () => table('iscsi.auth', () => firstValueFrom(api.query('iscsi.auth.query'))),
+  };
+  const parts: string[] = [];
+  for (const [index, group] of groups.entries()) {
+    const at = `groups[${index}]`;
+    const portals = await tableOf.portals();
+    const portal = rowWithId(portals.rows, group.portal);
+    if (portal === null) {
+      throw unresolved(`${at}.portal`, `portal with id ${group.portal}`, portals, "ids come from `iscsi_list`'s portals");
+    }
+    parts.push(
+      `through portal id ${group.portal} (${portalLabel(portal)}): ` +
+        `${await initiatorPhrase(group, tableOf, at)}; ${await authPhrase(group, tableOf, at)}`,
+    );
+  }
+  return ` It is published ${parts.join('; and ')}.`;
+}
+
+/** The three tables a group refers into, each read at most once per plan. */
+interface Tables {
+  portals: () => Promise<Lookup>;
+  initiators: () => Promise<Lookup>;
+  auths: () => Promise<Lookup>;
+}
+
+/** Who a group admits, in words. */
+async function initiatorPhrase(group: TargetGroup, tables: Tables, at: string): Promise<string> {
+  const id = group.initiator;
+  if (id === undefined) {
+    return (
+      'initiator not sent, so the system decides which initiators it admits, which is not read ' +
+      'here — (unconfirmed) that this is any initiator'
+    );
+  }
+  if (id === null) return 'ANY INITIATOR MAY CONNECT (initiator null)';
+  const lookup = await tables.initiators();
+  const row = rowWithId(lookup.rows, id);
+  if (row === null) {
+    throw unresolved(`${at}.initiator`, `initiator group with id ${id}`, lookup, 'the system lists its initiator groups there');
+  }
+  const comment = textOrNull(row['comment']);
+  const names = strictTextList(row['initiators']);
+  const label = `initiator group id ${id}${comment === null ? '' : ` ("${comment}")`}`;
+  if (names === null) return `${label}, whose initiator list could not be read, so who it admits is not established`;
+  if (names.length === 0) {
+    return `${label}, which lists no initiator — read here as admitting ANY initiator, which is (unconfirmed)`;
+  }
+  return `only the initiators ${label} lists: ${names.map((name) => `"${name}"`).join(', ')}`;
+}
+
+/** What authentication a group asks for, in words. */
+async function authPhrase(group: TargetGroup, tables: Tables, at: string): Promise<string> {
+  const method = group.authmethod;
+  const credential = await chapPhrase(group.auth, tables, at);
+  if (method === undefined) {
+    return (
+      `authmethod not sent, so the system's default applies, which is not read here — ` +
+      `(unconfirmed) that this is NONE, no CHAP${credential}`
+    );
+  }
+  if (method === 'NONE') return `NO CHAP (authmethod NONE)${credential}`;
+  return `${method === 'CHAP' ? 'CHAP' : 'mutual CHAP'} required${credential}`;
+}
+
+/**
+ * The CHAP credentials a group's `auth` tag names, by tag and user, or nothing
+ * where it names none. Matched on TAG, not id: several credential rows can
+ * share one tag, and the middleware validates `auth` against the tag.
+ */
+async function chapPhrase(tag: number | null | undefined, tables: Tables, at: string): Promise<string> {
+  if (!isWholeNumber(tag)) return '';
+  const lookup = await tables.auths();
+  const labels: ChapLabel[] = (lookup.rows ?? []).flatMap((entry) => {
+    const held = recordOrNull(entry);
+    if (held === null || numberOrNull(held['tag']) !== tag) return [];
+    return [{ tag, user: textOrNull(held['user']) }];
+  });
+  if (labels.length === 0) {
+    throw unresolved(`${at}.auth`, `CHAP credential with tag ${tag}`, lookup, 'it is matched on `tag`, not `id`');
+  }
+  return (
+    ` with CHAP credential tag ${tag} ` +
+    `(${labels.map((label) => `user ${label.user === null ? NONE_REPORTED : `"${label.user}"`}`).join(', ')})`
+  );
+}
+
+/** Which networks initiators may connect from, in words, given what is sent. */
+function networksSentence(networks: string[] | undefined): string {
+  if (networks === undefined) {
+    return (
+      ' `auth_networks` is not sent, so the system decides which networks initiators may connect ' +
+      'from; (unconfirmed) that this is none, which is read here as any network.'
+    );
+  }
+  if (networks.length === 0) {
+    return (
+      ' `auth_networks` IS EMPTY, WHICH IS READ HERE AS INITIATORS FROM ANY NETWORK MAY CONNECT — ' +
+      'not as nobody; that empty means unrestricted is (unconfirmed).'
+    );
+  }
+  return ` Only initiators connecting from ${networks.map((network) => `"${network}"`).join(', ')} may connect.`;
+}
+
+/**
+ * What the system's own name check said, which is a refusal where it names a
+ * problem. Plan-time only and not a step (#119). A check that could not be
+ * called is stated, never read as either answer.
+ */
+async function nameCheckSentence(ctx: ToolContext, name: string, id: number | null): Promise<string> {
+  let answer: unknown;
+  try {
+    answer = await firstValueFrom(
+      ctx.system.client.api.call('iscsi.target.validate_name', id === null ? [name] : [name, id]),
+    );
+  } catch (reason) {
+    return (
+      " The system's own name check (iscsi.target.validate_name) could not be called " +
+      `(${isMissingMethod(reason) ? 'this system has no such method' : errorText(reason)}), so it was not run.`
+    );
+  }
+  if (typeof answer === 'string' && answer.length > 0) {
+    throw new Error(`The system refuses the target name "${name}": ${answer}`);
+  }
+  if (answer !== null) {
+    return (
+      " The system's own name check (iscsi.target.validate_name) answered with nothing this tool " +
+      'could read, so whether it accepts the name is not established.'
+    );
+  }
+  return (
+    " The system's own name check (iscsi.target.validate_name) accepted the name; what that " +
+    'check covers is (unconfirmed).'
+  );
+}
+
+/** What both plans say about where a target's portal relationship can be seen. */
+const GROUPS_UNLISTED =
+  ' `iscsi_list` does not report a target\'s groups, so which portal serves this target is ' +
+  "visible in this tool's own result and not in that listing.";
+
+/** The JSON schema for each target setting, shared by both tools. */
+const TARGET_FIELD_SCHEMA = {
+  alias: {
+    oneOf: [{ type: 'string' }, { type: 'null' }],
+    description: 'A label for the target. null for none, which clears it on update.',
+  },
+  groups: {
+    type: 'array',
+    description:
+      'The portal groups the target is published through. Each names a portal by its `id`, an ' +
+      'initiator group by its `id` (null for ANY initiator), an `authmethod`, and a CHAP ' +
+      'credential by its `tag` — NOT its id — in `auth`.',
+    items: {
+      type: 'object',
+      properties: {
+        portal: { type: 'integer', description: "A portal's `id`, as `iscsi_list` reports it." },
+        initiator: {
+          oneOf: [{ type: 'integer' }, { type: 'null' }],
+          description: "An initiator group's `id`; null admits ANY initiator.",
+        },
+        authmethod: {
+          type: 'string',
+          enum: [...ISCSI_AUTHMETHODS],
+          description: 'NONE is no CHAP; CHAP and CHAP_MUTUAL require `auth`.',
+        },
+        auth: {
+          oneOf: [{ type: 'integer' }, { type: 'null' }],
+          description: "A CHAP credential's `tag`, which several credentials may share. null for none.",
+        },
+      },
+      required: ['portal'],
+    },
+  },
+  auth_networks: {
+    type: 'array',
+    items: { type: 'string' },
+    description:
+      'Networks, in CIDR form, initiators may connect from. Empty is read as ANY network, which ' +
+      'is (unconfirmed).',
+  },
+} as const;
+
+const TARGET_ROW_FIELDS =
+  '`id`, which is what `iscsi_target_update` takes; `name`; `alias`, null where the target has ' +
+  'none AND where it could not be read; `mode`; `groups`, each `portal` and `initiator` an id ' +
+  'and `auth` a CHAP credential TAG, with `initiator` null meaning ANY initiator, and the whole ' +
+  'list null where any group could not be read, which is not evidence of either; and ' +
+  '`auth_networks`, null where it could not be read whole. A target\'s iSCSI parameters are not ' +
+  'reported. Every other field is null where the response stated no value this tool could read.';
+
+const TARGET_CREATE_GUIDANCE =
+  '`requested` is exactly what was sent. `target` is the created target read back off the ' +
+  'response the create itself answered with — never copied from the request — or null where ' +
+  `that response was not a record. Its fields are ${TARGET_ROW_FIELDS} ` +
+  '`confirmed` is whether `target` holds every value sent: true is the system reporting back ' +
+  'what was asked for; FALSE IS NOT A SUCCESS — the call did not reject and at least one value ' +
+  'was stored as something else, the networks compared exactly as spelled and in order and the ' +
+  'groups in order, on the keys each group sent; and null is a response in which some value ' +
+  'sent could not be read back and none read back as different. A null `target` means nothing ' +
+  'here establishes that a target was created, and is not evidence that none was — `iscsi_list` ' +
+  'shows what the system now holds.';
+
+export const iscsiTargetCreate: MutatingTool = {
+  name: 'iscsi_target_create',
+  description:
+    'Creates one iSCSI target on this TrueNAS system, served over iSCSI. Two-phase: called ' +
+    'without a confirmation_token it returns a plan for user approval; called with one it ' +
+    'creates the target. `name` is required; `alias`, `groups` and `auth_networks` are ' +
+    'optional, and the system decides any that are not passed. `mode` is not taken — the ' +
+    'target is created with mode ISCSI — and `mode` and `iscsi_parameters` are refused. EVERY ' +
+    'PORTAL, INITIATOR GROUP AND CHAP CREDENTIAL A GROUP NAMES IS RESOLVED WHEN THE PLAN IS ' +
+    'MADE, and one that does not resolve fails the plan, naming the table; `auth` is a CHAP ' +
+    "credential's TAG, not its id. THE PLAN SAYS IN WORDS WHO MAY CONNECT: `initiator` null is " +
+    'ANY INITIATOR, `authmethod` NONE is no CHAP, and an empty `auth_networks` is read as any ' +
+    "network. A CHAP credential is named by its tag and user only; its secrets are never read " +
+    "into a plan or a result. The system's own name check runs at plan time where it can. A " +
+    'NEW TARGET HAS NO EXTENT MAPPED AND SERVES NO STORAGE: no tool in this catalog maps an ' +
+    "extent, and `iscsi_list` reports a target's extents once one is mapped. `iscsi_list` does " +
+    "not report a target's groups. `destructiveness` is `reversible`, but NO TOOL IN THIS " +
+    'CATALOG DELETES AN iSCSI TARGET: undoing this means deleting it outside this catalog. ' +
+    TARGET_CREATE_GUIDANCE,
+  resultGuidance: TARGET_CREATE_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      name: {
+        type: 'string',
+        description: 'The target name; the IQN initiators connect to is built from it.',
+      },
+      ...TARGET_FIELD_SCHEMA,
+    },
+    required: ['name'],
+  },
+  requiredRole: Role.Sharing,
+  mutating: true,
+  // Additive: the target is a new row and nothing existing is removed. What it
+  // admits is stated in the plan rather than recorded here.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    return parseTargetCreateArgs(rawArgs);
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const body = parseTargetCreate(rawArgs);
+    const named = await nameCheckSentence(ctx, body.name, null);
+    const groups =
+      body.groups === undefined
+        ? ' `groups` is not sent, so the target is created with whatever groups the system defaults to, which is (unconfirmed) none.'
+        : await groupsSentence(ctx, body.groups);
+    const unsent = TARGET_FIELDS.filter((key) => key !== 'name' && body[key] === undefined);
+    const defaults =
+      unsent.length === 0
+        ? ''
+        : ` Not sent, and so left to the system's defaults, which are not read here: ${unsent.join(', ')}.`;
+    return [
+      {
+        method: 'iscsi.target.create',
+        params: [body],
+        description:
+          `Create an iSCSI target, ${Object.entries(body)
+            .map(([key, value]) => `${key} ${JSON.stringify(value)}`)
+            .join(', ')}.${named}${groups}${networksSentence(body.auth_networks)}` +
+          ' A NEW TARGET HAS NO EXTENT MAPPED AND SERVES NO STORAGE: no tool in this catalog maps ' +
+          "an extent onto it, and `iscsi_list` reports a target's extents once one is mapped." +
+          `${GROUPS_UNLISTED}${defaults}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const body = parseTargetCreate(rawArgs);
+    // The resolution and the name check are the plan's and are not made again
+    // here, as `nfs_share_create`'s path check is not.
+    const created: unknown = await firstValueFrom(ctx.system.client.api.call('iscsi.target.create', [body]));
+    const held = recordOrNull(created);
+    return {
+      requested: body,
+      target: held === null ? null : targetRow(held),
+      confirmed: held === null ? null : agreement(targetSent(body), targetComparable(held, body)),
+    };
+  },
+};
+
+const TARGET_UPDATE_GUIDANCE =
+  '`requested` is exactly what was sent. `previous` is the target as read immediately before ' +
+  'the call, and `resulting` is the target read back off the response the update itself ' +
+  'answered with — never copied from the request. Both carry the fields `iscsi_target_create` ' +
+  'reports; `previous` is null where that read failed or listed no such target, and ' +
+  '`resulting` is null where the response was not a record. `changes` names each field that ' +
+  'was SENT, as `requested`, `before` (off `previous`) and `after` (off `resulting`), and ' +
+  '`before` or `after` is null wherever the reading behind it is — or, for `alias`, where the ' +
+  'target has none. `lookup` says what the read did: `FOUND`, `NOT_FOUND` (deleted between the ' +
+  'plan and the confirmation), or `UNREADABLE` with `lookup_error` naming why; THE UPDATE IS ' +
+  'ATTEMPTED IN ALL THREE CASES, because what runs must be what was approved. `changed` is true ' +
+  'where the target before and after differ in one of the sent fields and false where they ' +
+  'agree in all, WHICH IS TWO OUTCOMES AND NOT ONE: the target already held those values, or ' +
+  'the call did not apply. `confirmed` is what tells those apart, and `changed` must not be ' +
+  'read without it. `confirmed` is whether `resulting` holds every value sent: true is the ' +
+  'system reporting back what was asked for; FALSE IS NOT A SUCCESS — the call did not reject ' +
+  'and at least one value was stored as something else, the networks compared exactly as ' +
+  'spelled and in order and the groups in order, on the keys each group sent; null is a ' +
+  'response in which some value sent could not be read back and none read back as different. ' +
+  'Both are null wherever a reading they need is missing.';
+
+export const iscsiTargetUpdate: MutatingTool = {
+  name: 'iscsi_target_update',
+  description:
+    "Changes one existing iSCSI target's `name`, `alias`, `groups` or `auth_networks` on this " +
+    'TrueNAS system. Two-phase: called without a confirmation_token it returns a plan for user ' +
+    "approval; called with one it sends the change. `id` is the target's id as `iscsi_list` " +
+    'reports it; PLANNING AGAINST AN id NO iSCSI TARGET HAS FAILS, naming it. ONLY THE FIELDS ' +
+    'PASSED ARE SENT, and at least one is required; `alias` passed as null clears it. `mode` and ' +
+    '`iscsi_parameters` are refused, and the plan states the target\'s mode where it is not ISCSI. ' +
+    '`groups` REPLACES THE WHOLE LIST, and the plan shows it whole beside the list it replaces; ' +
+    'every portal, initiator group and CHAP credential it names is resolved when the plan is ' +
+    "made, as `iscsi_target_create` resolves them, `auth` being a CHAP credential's TAG. THE " +
+    'PLAN STATES EACH VALUE SENT BESIDE THE ONE THE TARGET HOLDS NOW, so the call that undoes it ' +
+    'is in the plan, AND SAYS IN WORDS WHO MAY CONNECT through the groups and networks it sends. ' +
+    'RENAMING A TARGET CHANGES THE IQN INITIATORS CONNECT TO, so initiators configured with the ' +
+    'old name will no longer find it. SENDING A TARGET A VALUE IT ALREADY HOLDS IS NOT AN ERROR. ' +
+    "`iscsi_list` does not report a target's groups. This tool cannot create or delete a target; " +
+    '`iscsi_target_create` creates one. ' +
+    TARGET_UPDATE_GUIDANCE,
+  resultGuidance: TARGET_UPDATE_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'integer',
+        description: "The iSCSI target's `id`, as `iscsi_list` reports it on the system being targeted.",
+      },
+      name: {
+        type: 'string',
+        description: 'A new target name. The IQN initiators connect to is built from it.',
+      },
+      ...TARGET_FIELD_SCHEMA,
+    },
+    required: ['id'],
+  },
+  requiredRole: Role.Sharing,
+  mutating: true,
+  // Every field it sends can be sent back, and the plan states the value each
+  // held. What a rename or a narrower group does to connected initiators is
+  // stated in the plan rather than recorded here.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const { id, fields } = parseTargetUpdate(rawArgs);
+    return { id, ...fields };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const { id, fields } = parseTargetUpdate(rawArgs);
+    const row = rowWithId(await readTarget(ctx, id), id);
+    if (row === null) {
+      throw new Error(`No iSCSI target with id ${id} on this system — ids come from \`iscsi_list\``);
+    }
+    const target = targetRow(row);
+    const notes: string[] = [];
+    if (target.mode !== ISCSI_MODE) {
+      notes.push(
+        target.mode === null
+          ? " The target's mode could not be read; this tool does not change it."
+          : ` This target's mode is ${target.mode}, so it is served over Fibre Channel too or instead; this tool does not change it.`,
+      );
+    }
+    if (fields.name !== undefined && fields.name !== target.name) {
+      notes.push(
+        ` RENAMING IT CHANGES THE IQN INITIATORS CONNECT TO: initiators configured with ` +
+          `${target.name === null ? 'the old name' : `"${target.name}"`} will no longer find it.` +
+          (await nameCheckSentence(ctx, fields.name, id)),
+      );
+    }
+    if (fields.groups !== undefined) {
+      notes.push(
+        ' `groups` REPLACES THE WHOLE LIST: the target is published through exactly the groups ' +
+          'sent, and an initiator connected through a portal no longer listed loses that path; ' +
+          'whether the system merges a partial list instead is (unconfirmed).' +
+          (await groupsSentence(ctx, fields.groups)),
+      );
+    }
+    if (fields.auth_networks !== undefined) notes.push(networksSentence(fields.auth_networks));
+    const already =
+      agreement(targetSent(fields), targetComparable(row, fields)) === true
+        ? ' The target already holds every value this sends, which is not an error.'
+        : '';
+    const changes = Object.entries(fields)
+      .map(([key, value]) => `${key} ${JSON.stringify(value)} (now ${storedTargetValue(row, key)})`)
+      .join('; ');
+    return [
+      readStep('iscsi.target.query', 'iSCSI target', id),
+      {
+        method: 'iscsi.target.update',
+        params: [id, fields],
+        description:
+          `Change the iSCSI target named ${target.name === null ? NONE_REPORTED : `"${target.name}"`} ` +
+          `(id ${id}): ${changes}. Only these fields are sent.${notes.join('')}${already}` +
+          (fields.groups === undefined ? '' : GROUPS_UNLISTED),
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const { id, fields } = parseTargetUpdate(rawArgs);
+    let previous: Record<string, unknown> | null = null;
+    let lookupError: string | null = null;
+    try {
+      previous = rowWithId(await readTarget(ctx, id), id);
+    } catch (reason) {
+      lookupError = errorText(reason);
+    }
+    // Issued whatever the read said: skipping it for a target the read no
+    // longer lists would be `execute` branching on state the confirmation
+    // token cannot bind.
+    const updated: unknown = await firstValueFrom(ctx.system.client.api.call('iscsi.target.update', [id, fields]));
+    const resulting = recordOrNull(updated);
+    const keys = Object.keys(fields);
+    const before = previous === null ? null : targetRow(previous);
+    const after = resulting === null ? null : targetRow(resulting);
+    const changes = Object.fromEntries(
+      Object.entries(fields).map(([key, value]) => [
+        key,
+        {
+          requested: value,
+          before: before?.[key as keyof TargetRow] ?? null,
+          after: after?.[key as keyof TargetRow] ?? null,
+        },
+      ]),
+    );
+    // `changed` compares the two READINGS on the fields that were sent, never
+    // the request: a response still holding the old value is a call that did
+    // not apply, not one that changed nothing.
+    const same =
+      previous === null || resulting === null
+        ? null
+        : agreement(targetReading(previous, keys), targetReading(resulting, keys));
+    return {
+      id,
+      requested: fields,
+      lookup: lookupError !== null ? 'UNREADABLE' : previous === null ? 'NOT_FOUND' : 'FOUND',
+      lookup_error: lookupError,
+      previous: before,
+      resulting: after,
+      changes,
+      changed: same === null ? null : !same,
+      confirmed: resulting === null ? null : agreement(targetSent(fields), targetComparable(resulting, fields)),
+    };
+  },
+};
+
+function readTarget(ctx: ToolContext, id: number): Promise<unknown> {
+  return firstValueFrom(ctx.system.client.api.query('iscsi.target.query', [['id', '=', id]]));
+}

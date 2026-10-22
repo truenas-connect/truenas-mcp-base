@@ -123,6 +123,8 @@ export {
   nfsShareUpdate,
   nfsClients,
   iscsiList,
+  iscsiTargetCreate,
+  iscsiTargetUpdate,
   nvmeofList,
   fcList,
   usersList,
