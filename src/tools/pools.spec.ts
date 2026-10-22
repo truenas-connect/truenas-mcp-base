@@ -1049,7 +1049,12 @@ describe('pool_scrub_task_create', () => {
     );
     expect(create.description).toContain('id 2 (disabled,');
     expect(create.description).not.toContain('id 3');
-    expect(create.description).toContain('This adds another beside them, which is allowed');
+    expect(create.description).toContain('This asks for another beside them');
+    // Nothing on the surface says a second task is accepted, or refused.
+    expect(create.description).not.toContain('allowed');
+    expect(create.description).toContain(
+      'Whether the system accepts a second scrub task on one pool is (unconfirmed)',
+    );
   });
 
   it('counts a task whose pool it cannot read, rather than leaving it out', async () => {
@@ -1128,6 +1133,9 @@ describe('pool_scrub_task_create', () => {
   it('states that no tool here deletes a scrub task', () => {
     expect(poolScrubTaskCreate.description).toContain('NO TOOL IN THIS CATALOG DELETES A SCRUB TASK');
     expect(poolScrubTaskCreate.description).toContain('THE PLAN NAMES EVERY SCRUB TASK THE POOL ALREADY HAS');
+    expect(poolScrubTaskCreate.description).toContain(
+      'WHETHER THE SYSTEM ACCEPTS A SECOND TASK ON ONE POOL IS (unconfirmed)',
+    );
     expect(poolScrubTaskCreate.resultGuidance).toContain('FALSE IS NOT A SUCCESS');
   });
 });

@@ -624,8 +624,9 @@ const SCRUB_LIST_GUIDANCE =
   'and a pool whose every row is `enabled: false` is not either; that is the ' +
   'finding, not a gap — UNLESS A ROW WITH A NULL `pool_id` AND `pool_name` IS ' +
   'PRESENT, which is a task whose pool could not be read and may be that pool\'s, ' +
-  'so the finding is then not established for any pool. A pool can carry more ' +
-  'than one task. (unconfirmed) TrueNAS ' +
+  'so the finding is then not established for any pool. Every row is reported ' +
+  'whichever pool it names; whether the system allows more than one task on a ' +
+  'pool is (unconfirmed). (unconfirmed) TrueNAS ' +
   'uses `threshold` to skip a scheduled scrub when the pool was scrubbed recently ' +
   'enough, so a schedule firing does not by itself mean a scrub ran — ' +
   '`storage_scrub_history` reports when the last one actually did.';
@@ -869,13 +870,23 @@ async function resolvePool(ctx: ToolContext, name: string): Promise<ResolvedPool
   return { name, id };
 }
 
+/** The sentence {@link existingTasksSentence} ends on wherever a task may already exist, worded once. */
+const SECOND_TASK_UNCONFIRMED =
+  'Whether the system accepts a second scrub task on one pool is (unconfirmed); if it ' +
+  'refuses, nothing is created and `pool_scrub_task_update` changes the task that is there.';
+
 /**
  * What the create plan says about the scrub tasks the pool already has.
  *
  * Plan-time only and not a step, because `execute` does not make this read
- * (#119), and its failure does not fail the plan (#154): a second task is
- * legal, so not knowing whether there is a first is something to state rather
- * than a reason to refuse.
+ * (#119), and its failure does not fail the plan (#154): not knowing whether
+ * there is a first task is something to state rather than a reason to refuse.
+ *
+ * WHETHER THE SYSTEM ACCEPTS A SECOND TASK ON ONE POOL IS NOT ESTABLISHED. The
+ * ticket calls it legal; nothing on the client surface says either way, and the
+ * middleware may refuse it. So the plan names what is there and states the
+ * question as `(unconfirmed)` rather than calling the duplicate allowed — and
+ * does not refuse on the strength of a rule it cannot read either (#120).
  *
  * Every task whose `pool` reads as this pool's id is named. A row whose pool
  * could not be read at all is COUNTED and said to be unattributed rather than
@@ -889,13 +900,13 @@ async function existingTasksSentence(ctx: ToolContext, pool: ResolvedPool): Prom
   } catch (reason) {
     return (
       `Whether pool "${pool.name}" already has a scrub task could not be read ` +
-      `(pool.scrub.query failed: ${errorText(reason)}); a second task on one pool is allowed.`
+      `(pool.scrub.query failed: ${errorText(reason)}). ${SECOND_TASK_UNCONFIRMED}`
     );
   }
   if (!Array.isArray(rows)) {
     return (
       `Whether pool "${pool.name}" already has a scrub task could not be read ` +
-      '(pool.scrub.query did not answer with a list); a second task on one pool is allowed.'
+      `(pool.scrub.query did not answer with a list). ${SECOND_TASK_UNCONFIRMED}`
     );
   }
   const tasks = rows.map(scrubTaskRow);
@@ -910,9 +921,9 @@ async function existingTasksSentence(ctx: ToolContext, pool: ResolvedPool): Prom
   }
   return (
     `Pool "${pool.name}" already has ${plural(own.length, 'scrub task')}: ` +
-    `${own.map(describeScrubTask).join('; ')}. This adds another beside ` +
-    `${own.length === 1 ? 'it' : 'them'}, which is allowed; whether that is what was meant ` +
-    `is the approver's call.${extra}`
+    `${own.map(describeScrubTask).join('; ')}. This asks for another beside ` +
+    `${own.length === 1 ? 'it' : 'them'}, and whether that is what was meant is the ` +
+    `approver's call. ${SECOND_TASK_UNCONFIRMED}${extra}`
   );
 }
 
@@ -968,8 +979,10 @@ export const poolScrubTaskCreate: MutatingTool = {
     '(unconfirmed) TrueNAS uses it to skip a scheduled scrub when the pool was ' +
     'scrubbed recently enough. `enabled` is required; `description` is ' +
     'optional. THE PLAN NAMES EVERY SCRUB TASK THE POOL ALREADY HAS, or says it ' +
-    'has none, or that this could not be read: a second task on one pool is ' +
-    'allowed, and whether it was meant is the approver\'s call. The pool is ' +
+    'has none, or that this could not be read. WHETHER THE SYSTEM ACCEPTS A ' +
+    'SECOND TASK ON ONE POOL IS (unconfirmed): where the pool already has one, ' +
+    '`pool_scrub_task_update` changing that task may be what was wanted, and a ' +
+    'refused create creates nothing. The pool is ' +
     'looked up by name again when the task is created, and nothing is created ' +
     'if no pool of that name is listed then. `destructiveness` is `reversible`, ' +
     'but NO TOOL IN THIS CATALOG DELETES A SCRUB TASK: undoing this means ' +
