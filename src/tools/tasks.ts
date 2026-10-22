@@ -2309,11 +2309,14 @@ const SCHEDULE_SET_GUIDANCE =
   '`minute`, `hour`, `dom`, `month` and `dow`, and for `periodic_snapshot` and ' +
   '`replication` also `begin` and `end`; a field the system reported no value for ' +
   'is null. `previous_schedule` is null where the read before the call failed or ' +
-  'listed no such task, and ALSO where the task stored no schedule at all — ' +
-  '`previously_unscheduled` is true for that last case, which is how a ' +
-  'replication task that runs after its periodic snapshot task is stored, false ' +
-  'where the read found the task and it stored something other than null, and ' +
-  'null where the read failed or found no such task. `lookup` says what that read did: ' +
+  'listed no such task, where the task stored no schedule at all, and where it ' +
+  'stored something this tool could not read as a schedule — ' +
+  '`previously_unscheduled` is true for the stored null, which is how a ' +
+  'replication task that runs after its periodic snapshot task is stored; false ' +
+  'where the read found the task and it stored anything else, including the ' +
+  'unreadable case, so `FOUND` beside a null `previous_schedule` and a false ' +
+  '`previously_unscheduled` is a schedule this tool could not read; and null ' +
+  'where the read failed or found no such task. `lookup` says what that read did: ' +
   '`FOUND`, `NOT_FOUND` (deleted between the plan and the confirmation), or ' +
   '`UNREADABLE` with `lookup_error` naming why; THE UPDATE IS ATTEMPTED IN ALL ' +
   'THREE CASES, because what runs must be what was approved. `changed` is true ' +
