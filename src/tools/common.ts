@@ -201,6 +201,78 @@ export function errorText(reason: unknown): string {
   return textOrNull(reason) ?? NO_REASON;
 }
 
+/** The JSON-RPC code for a method the server does not have. */
+const METHOD_NOT_FOUND = -32601;
+
+/** The middleware's own name for the same thing. */
+const NO_SUCH_METHOD = 'ENOMETHOD';
+
+/**
+ * Whether a rejection is the system saying it has no such method, rather than a
+ * method it has and would not run.
+ *
+ * It recognises only the two spellings that mean exactly that — the JSON-RPC
+ * code for an absent method, and the middleware's own error name for it — in
+ * the four places the client documents an error arriving: the rejection itself,
+ * a nested `data`, and the `reason` or `message` text either carries. It
+ * deliberately does not match looser English like "not found", which is also
+ * what a system says about an id that does not exist.
+ *
+ * Here since #183, when `smb_share_create` became the second family to need it:
+ * `nvmeof_list` reports a system without the method as having no NVMe-oF, and
+ * the share create reads it as a pre-check it cannot call rather than one that
+ * refused. In both, getting it wrong costs a raised error rather than a wrong
+ * answer — an unrecognised rejection is treated as the method having run.
+ *
+ * (unconfirmed) Which of those shapes a TrueNAS lacking a method actually
+ * rejects with has not been observed against a live system — only read off the
+ * client's own error types.
+ */
+export function isMissingMethod(reason: unknown): boolean {
+  if (reason instanceof Error) return namesMissingMethod(reason.message);
+  if (typeof reason !== 'object' || reason === null) return namesMissingMethod(reason);
+  const carrier = reason as Record<string, unknown>;
+  if (carrier['code'] === METHOD_NOT_FOUND) return true;
+  if (carrier['errname'] === NO_SUCH_METHOD) return true;
+  if (namesMissingMethod(carrier['reason']) || namesMissingMethod(carrier['message'])) return true;
+  const data = carrier['data'];
+  return typeof data === 'object' && data !== null && isMissingMethod(data);
+}
+
+/** Whether some text the system sent names the absent-method error. */
+function namesMissingMethod(text: unknown): boolean {
+  return typeof text === 'string' && text.includes(NO_SUCH_METHOD);
+}
+
+/**
+ * Whether `got` holds what `wanted` names, key by key: false as soon as one key
+ * reads back as a different value, null where none does but at least one could
+ * not be read on either side, and true only where every key was read on both
+ * and agrees. A definite mismatch outranks an unreadable field — one value the
+ * system reported back as something else is already "not what was asked for".
+ *
+ * Only the keys of `wanted` are compared, so a caller passes the fields a
+ * request SENT and a field nobody asked about cannot make a call read as
+ * unconfirmed. Here since #183, when the SMB share mutations became the second
+ * family to derive `confirmed` this way after the scrub tasks (#181).
+ */
+export function agreement(
+  wanted: Record<string, string | number | boolean | null | undefined>,
+  got: Record<string, string | number | boolean | null | undefined>,
+): boolean | null {
+  let unread = false;
+  for (const key of Object.keys(wanted)) {
+    const want = wanted[key] ?? null;
+    const have = got[key] ?? null;
+    if (want === null || have === null) {
+      unread = true;
+    } else if (want !== have) {
+      return false;
+    }
+  }
+  return unread ? null : true;
+}
+
 /** `1 alert` / `2 alerts`, so a rendered reason reads as English at either count. */
 export function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? '' : 's'}`;

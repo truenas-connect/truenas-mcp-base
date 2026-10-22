@@ -2736,6 +2736,36 @@ quotes exactly what will be sent. If a later ticket wants scrub schedules in
 words, that is the moment to promote the rendering deliberately, not to add a
 second one here.
 
+### A path belongs to the dataset whose mountpoint it sits under (#183)
+
+`smb_share_create` takes a `path` and has to name the dataset it belongs to.
+**It reads every dataset's `mountpoint` and takes the deepest one the path is,
+or lies inside — never a dataset id derived from the string.** `/mnt/<pool>/…`
+is a convention and a mountpoint is a fact, so a lookup that strips `/mnt/` and
+filters on the remainder would be guessing at the one thing the read exists to
+establish. The walk is `storage.ts`'s (`retrieve_children: true`, `properties:
+[]`), and a row whose id cannot be read is COUNTED and stated, because if it is
+the deepest mountpoint over the path the dataset named is its parent (#93). A
+directory inside a dataset is legal and is said to be one, not refused.
+
+**A middleware pre-check is a plan-time read whose REJECTION is a refusal.**
+`sharing.smb.share_precheck` answers `null`, so the only thing it can say is
+no: a rejection fails the plan with its reason, and a system with no such
+method — `isMissingMethod`, promoted from `block.ts` to `common.ts` — gets a
+plan saying the check was not run. Every other failure is read as the check
+having refused, since being wrong that way costs a plan to retry and the other
+way lets a refused share reach approval. What it validates is `(unconfirmed)`
+and the plan says so.
+
+**A name compared the way clients compare it.** SMB share names are matched
+ignoring letter case, because Windows clients do not tell them apart that way;
+whether the middleware refuses such a name is `(unconfirmed)`, so a match is
+named in the plan rather than refused (#120).
+
+`agreement` moved to `common.ts` beside it: the scrub-task and SMB-share
+mutations both derive `confirmed` as "every field sent read back the same", and
+that comparison means the same thing in both families (#86).
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

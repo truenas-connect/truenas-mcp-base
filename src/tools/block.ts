@@ -5,6 +5,7 @@ import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
 import {
   booleanOrNull,
   errorText,
+  isMissingMethod,
   numberOrNull,
   recordOrNull,
   textOrNull,
@@ -761,46 +762,6 @@ function attributePorts(rows: PortClaim[], listed: Set<number>): PortAttribution
   return { byPort, unattributed };
 }
 
-/** The JSON-RPC code for a method the server does not have. */
-const METHOD_NOT_FOUND = -32601;
-
-/** The middleware's own name for the same thing. */
-const NO_SUCH_METHOD = 'ENOMETHOD';
-
-/**
- * Whether a rejection is the system saying it has no such method, rather than a
- * method it has and would not run.
- *
- * This is the whole basis for reporting a system as having no NVMe-oF, so it
- * recognises only the two spellings that mean exactly that — the JSON-RPC code
- * for an absent method, and the middleware's own error name for it — in the
- * four places the client documents an error arriving: the rejection itself, a
- * nested `data`, and the `reason` or `message` text either carries. It
- * deliberately does not match looser English like "not found", which is also
- * what a system says about a subsystem id that does not exist.
- *
- * (unconfirmed) Which of those shapes a TrueNAS too old for NVMe-oF actually
- * rejects with has not been observed against a live system — only read off the
- * client's own error types. Getting it wrong costs a raised error rather than a
- * wrong answer: an unrecognised rejection is raised, never reported as
- * unsupported.
- */
-function isUnsupported(reason: unknown): boolean {
-  if (reason instanceof Error) return namesMissingMethod(reason.message);
-  if (typeof reason !== 'object' || reason === null) return namesMissingMethod(reason);
-  const carrier = reason as Record<string, unknown>;
-  if (carrier['code'] === METHOD_NOT_FOUND) return true;
-  if (carrier['errname'] === NO_SUCH_METHOD) return true;
-  if (namesMissingMethod(carrier['reason']) || namesMissingMethod(carrier['message'])) return true;
-  const data = carrier['data'];
-  return typeof data === 'object' && data !== null && isUnsupported(data);
-}
-
-/** Whether some text the system sent names the absent-method error. */
-function namesMissingMethod(text: unknown): boolean {
-  return typeof text === 'string' && text.includes(NO_SUCH_METHOD);
-}
-
 /** A read that produced rows, or the rejection that stopped it, kept whole. */
 interface Read<T> {
   rows: T | null;
@@ -985,7 +946,7 @@ export const nvmeofList: ReadOnlyTool = {
       // Raised rather than reported unless the system said the method is not
       // there: "this system has no NVMe-oF" is a claim about the system, and a
       // denied or dropped read is evidence for no such claim.
-      if (!isUnsupported(subsystems.reason)) throw subsystems.reason;
+      if (!isMissingMethod(subsystems.reason)) throw subsystems.reason;
       return {
         supported: false,
         unsupported_reason: errorText(subsystems.reason),

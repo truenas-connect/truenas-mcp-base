@@ -117,6 +117,8 @@ export {
   sharesList,
   shareAccess,
   shareSetEnabled,
+  smbShareCreate,
+  smbShareUpdate,
   nfsClients,
   iscsiList,
   nvmeofList,
