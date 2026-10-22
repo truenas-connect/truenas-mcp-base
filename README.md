@@ -45,7 +45,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `automated_task_set_enabled`, `snapshot_clone`, `snapshot_task_run`,
   `snapshot_set_hold`, `vm_start`, `vm_stop`, `vm_restart`, `vm_clone`,
   `service_control`, `container_start`, `container_stop`, `container_restart`,
-  `pool_scrub_task_create`, `pool_scrub_task_update` —
+  `pool_scrub_task_create`, `pool_scrub_task_update`, `share_set_enabled` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop` and `container_restart` the seven that
   start a background job,
@@ -128,6 +128,12 @@ confirmation UX, audit sinks) enters through injected interfaces.
   five cron fields and stated in the plan exactly as sent, and `threshold`
   carries no unit because none is reported. Nothing here starts a scrub now or
   deletes a scrub task.
+  `share_set_enabled` switches one SMB share or NFS export on or off, named by
+  `protocol` and `id` together as `shares_list` reports them, and is the first
+  mutating tool a `Sharing` credential reaches without full access. Disabling a
+  share cuts off the clients connected to it, which its plan says; a share on a
+  locked encrypted dataset serves nothing even when enabled, which its result
+  reports as `locked`.
   `container_list` and the three container power tools are the first family
   written against the client's `ops` layer rather than `api.call`, because every
   one of these operations changes SHAPE between TrueNAS versions and not just

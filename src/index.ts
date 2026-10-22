@@ -116,6 +116,7 @@ export {
   tasksRecentRuns,
   sharesList,
   shareAccess,
+  shareSetEnabled,
   nfsClients,
   iscsiList,
   nvmeofList,

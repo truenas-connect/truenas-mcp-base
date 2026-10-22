@@ -7,8 +7,13 @@ import {
   errorText,
   isoOrNull,
   jobMillis,
+  NONE_REPORTED,
   numberOrNull,
+  readStep,
   recordOrNull,
+  rowWithId,
+  switchOutcome,
+  switchSentence,
   textOrNull,
   watchJob,
 } from '@/tools/common';
@@ -1437,9 +1442,6 @@ function taskSchedule(row: Record<string, unknown>): (CronFields & Partial<Daily
   return { ...cronFieldsOf(cron), begin: fieldOrNull(cron.begin), end: fieldOrNull(cron.end) };
 }
 
-/** What a label the system named no value for is stated as. */
-const NONE_REPORTED = '(the system reported none)';
-
 /**
  * The schedule for the plan, in words.
  *
@@ -1730,127 +1732,6 @@ function noSuchTask(spec: TaskKind, id: number): Error {
     `No ${spec.noun} with id ${id} on this system — the kind searched was ` +
       `"${spec.kind}", whose ids come from \`${spec.listedBy}\``,
   );
-}
-
-/**
- * The row the system listed under this id, or null where it listed none that
- * did.
- *
- * The id is checked on the RESPONSE and not only asked for in the filter. An
- * unrecognised query parameter is dropped rather than refused, so a filter that
- * did not apply comes back as the whole table and looks exactly like one that
- * matched everything — and the first row of that is a different task, which is
- * the one mistake this tool must not make. The filter is still sent, for the
- * same reason `select` is sent in `tasks_recent_runs`: it bounds what crosses
- * the wire, and it is not what decides.
- */
-function rowWithId(rows: unknown, id: number): Record<string, unknown> | null {
-  if (!Array.isArray(rows)) return null;
-  for (const row of rows) {
-    const held = recordOrNull(row);
-    if (held !== null && numberOrNull(held['id']) === id) return held;
-  }
-  return null;
-}
-
-/**
- * What the plan says the call will do, given the state the task is in now.
- *
- * Three cases and not two, as `alerts_dismiss`'s is: a task whose `enabled`
- * could not be read as a boolean is neither already there nor about to move,
- * and saying either would be a claim the read did not establish.
- */
-function switchSentence(current: boolean | null, target: boolean): string {
-  if (current === null) {
-    return 'Whether it is enabled could not be read, so this may change nothing.';
-  }
-  if (current === target) {
-    return `It is already ${current ? 'enabled' : 'disabled'}, so this changes nothing and is not an error.`;
-  }
-  return `It is ${current ? 'enabled' : 'disabled'}, so this will ${target ? 'enable' : 'disable'} it.`;
-}
-
-/**
- * The params the read step actually reaches the middleware with.
- *
- * The empty options object is not padding: `api.query(method, filters)`
- * dispatches `[filters ?? [], options ?? {}]`, so the call carries two
- * positional params whether or not the caller passed the second. A plan step
- * naming only the filter would be showing the user a call one argument shorter
- * than the one that runs — which is the same defect as a plan naming only the
- * mutation, one level down.
- */
-function readParams(id: number): unknown {
-  return [[['id', '=', id]], {}];
-}
-
-/**
- * The plan's first step: the read `execute` makes before the mutation.
- *
- * One wording for both switching tools. A step that said "changes nothing" in
- * one tool and something subtly different in the other would be two accounts of
- * one call, and this is the sentence a person reads before approving.
- */
-function readStep(method: string, noun: string, id: number): PlanStep {
-  return {
-    method,
-    params: readParams(id),
-    description:
-      `Read this system's ${noun} with id ${id}, to report whether it was ` +
-      'already in the state this call moves it to. Changes nothing.',
-  };
-}
-
-/**
- * What a switching tool reports about the change it just made, given the read
- * before the call and the response to it.
- *
- * Shared by both switching tools because every field is derived the same way,
- * and derived wrongly in ways that are easy to reintroduce one copy at a time:
- * `changed` compares the two READINGS rather than the request, `confirmed` is
- * the separate fact that the response agrees with the request, and both are
- * null wherever a reading behind them is. What is NOT here is anything naming
- * the thing switched — the caller adds its own `id` and, where it has one,
- * `kind`.
- *
- * The read is caught rather than thrown for {@link scheduledTaskSetEnabled}'s
- * reason: it exists to describe the outcome, and letting it fail the call would
- * lose an approval the user has already given for a mutation that is still safe
- * to make. The update is then issued unconditionally, whatever the read said —
- * skipping it for a row the read no longer lists would be `execute` branching
- * on state read at execution time, which is what the confirmation token cannot
- * bind.
- */
-async function switchOutcome(
-  read: () => Promise<unknown>,
-  update: () => Promise<unknown>,
-  id: number,
-  enabled: boolean,
-): Promise<Record<string, unknown>> {
-  let row: Record<string, unknown> | null = null;
-  let lookupError: string | null = null;
-  try {
-    row = rowWithId(await read(), id);
-  } catch (reason) {
-    lookupError = errorText(reason);
-  }
-  const updated = await update();
-  const previous = row === null ? null : booleanOrNull(row['enabled']);
-  // The update methods answer with the updated entity, so what the response
-  // says about `enabled` is the state that actually resulted — read back
-  // through the same guard rather than echoing what was asked for.
-  const resulting = booleanOrNull(recordOrNull(updated)?.['enabled']);
-  return {
-    lookup: lookupError !== null ? 'UNREADABLE' : row === null ? 'NOT_FOUND' : 'FOUND',
-    lookup_error: lookupError,
-    previously_enabled: previous,
-    resulting_enabled: resulting,
-    // Both readings or nothing. A `changed` derived from the request rather
-    // than from the response would report a call the system did not apply as
-    // having changed something.
-    changed: previous === null || resulting === null ? null : previous !== resulting,
-    confirmed: resulting === null ? null : resulting === enabled,
-  };
 }
 
 export const scheduledTaskSetEnabled: MutatingTool = {
