@@ -90,6 +90,7 @@ export {
   poolTopology,
   scrubHistory,
   poolResilverConfig,
+  poolScrubTasksList,
   bootPoolStatus,
   listDatasets,
   quotaReport,
@@ -153,4 +154,6 @@ export {
   containerStart,
   containerStop,
   containerRestart,
+  poolScrubTaskCreate,
+  poolScrubTaskUpdate,
 } from '@/tools/index';

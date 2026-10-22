@@ -19,7 +19,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `audit_log_query`, `audit_config`, `security_config`, `system_general_config`,
   `system_ntp_status`, `ups_config`,
   `storage_pool_status`, `storage_pool_topology`, `storage_scrub_history`,
-  `pool_resilver_config`, `boot_pool_status`,
+  `pool_resilver_config`, `pool_scrub_tasks_list`, `boot_pool_status`,
   `storage_list_datasets`, `datasets_quota_report`, `dataset_permissions`,
   `system_dataset_config`,
   `disks_list`, `disks_temperature`, `apps_list`,
@@ -44,7 +44,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `scheduled_task_set_schedule`, `cloudsync_run`,
   `automated_task_set_enabled`, `snapshot_clone`, `snapshot_task_run`,
   `snapshot_set_hold`, `vm_start`, `vm_stop`, `vm_restart`, `vm_clone`,
-  `service_control`, `container_start`, `container_stop`, `container_restart` —
+  `service_control`, `container_start`, `container_stop`, `container_restart`,
+  `pool_scrub_task_create`, `pool_scrub_task_update` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop` and `container_restart` the seven that
   start a background job,
@@ -119,6 +120,14 @@ confirmation UX, audit sinks) enters through injected interfaces.
   here; and a periodic snapshot task's schedule decides which existing
   snapshots its retention owns, so its plan reports what the middleware says
   the change does to them.
+  `pool_scrub_task_create` and `pool_scrub_task_update` add a periodic scrub
+  task to a data pool, named by the pool's name, and change one's schedule,
+  threshold, description or enabled state; `pool_scrub_tasks_list` is where
+  their ids come from, and is when a pool's next scrub is arranged where
+  `storage_scrub_history` is when its last one ran. Schedules are sent as all
+  five cron fields and stated in the plan exactly as sent, and `threshold`
+  carries no unit because none is reported. Nothing here starts a scrub now or
+  deletes a scrub task.
   `container_list` and the three container power tools are the first family
   written against the client's `ops` layer rather than `api.call`, because every
   one of these operations changes SHAPE between TrueNAS versions and not just
