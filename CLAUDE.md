@@ -2772,6 +2772,24 @@ named in the plan rather than refused (#120).
 mutations both derive `confirmed` as "every field sent read back the same", and
 that comparison means the same thing in both families (#86).
 
+### A value sent as null is compared as a value, not as unread (#184)
+
+`nfs_share_update` clears an identity mapping by sending `maproot_user: null`,
+and `agreement` reads null on either side as "could not be read" — so a clear
+compared as sent could never confirm, and would report `confirmed: null` for a
+call that did exactly what was asked. **Where null is a value a tool SENDS,
+compare it through a token that is not null**: `storedMapping` reads null and
+`""` (the system may spell "none" either way) as `''`, keeps a name as itself,
+and leaves null for a value of any other shape, which is the one case that IS
+unread. The row a caller sees still reports none as null; the token exists for
+the comparison alone. A list is compared the same way, as its exact JSON
+spelling, since `agreement` takes scalars.
+
+**Which clients may mount an export is stated in words** (`accessSentence`),
+because two empty lists mean ANY client and read as nobody — #154's
+reassuring-silence direction. `plainPath` is the SMB path check, lifted out so
+both protocols refuse the same spellings.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

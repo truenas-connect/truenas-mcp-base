@@ -995,6 +995,23 @@ function aliasesPhrase(value: unknown): string {
   return `aliases ${aliases.map((alias) => `"${alias}"`).join(', ')}`;
 }
 
+/**
+ * An NFS export as a plan names it: by its path and aliases, since it has no
+ * name. Shared with `nfs_share_update`, whose plan has to make the same export
+ * recognisable.
+ */
+function identifyNfsExport(row: Record<string, unknown>): string {
+  return `${labelled('path', textOrNull(row['path']))}, ${aliasesPhrase(row['aliases'])}`;
+}
+
+/**
+ * What a plan that can switch an NFS export off says about who that cuts off.
+ * One text for `share_set_enabled` and `nfs_share_update`.
+ */
+const NFS_CONNECTED_CLIENTS =
+  'Disabling it cuts off every client that has it mounted now; `nfs_clients` reports the ' +
+  "clients connected to this system's NFS server.";
+
 const SHARE_SWITCH_KINDS: readonly ShareSwitchKind[] = [
   {
     protocol: 'SMB',
@@ -1017,10 +1034,8 @@ const SHARE_SWITCH_KINDS: readonly ShareSwitchKind[] = [
       firstValueFrom(ctx.system.client.api.query('sharing.nfs.query', [['id', '=', id]])),
     update: (ctx, id, enabled) =>
       firstValueFrom(ctx.system.client.api.call('sharing.nfs.update', [id, { enabled }])),
-    identify: (row) => `${labelled('path', textOrNull(row['path']))}, ${aliasesPhrase(row['aliases'])}`,
-    connectedClients:
-      'Disabling it cuts off every client that has it mounted now; `nfs_clients` reports the ' +
-      "clients connected to this system's NFS server.",
+    identify: identifyNfsExport,
+    connectedClients: NFS_CONNECTED_CLIENTS,
   },
 ];
 
@@ -1269,6 +1284,29 @@ const OPTIONS_REFUSED =
   "the share's preset options and its audit settings are out of this tool's scope";
 
 /**
+ * A share path, refused unless it is absolute and written plainly. Shared by
+ * the SMB and NFS mutations, which both check it against dataset mountpoints.
+ *
+ * The dataset check compares the path to mountpoints as a string, so only a
+ * path spelled one way per directory may reach it: a `..` segment would let
+ * `/mnt/tank/../../etc` read as inside `tank`, and an empty one would read
+ * `/mnt/tank//projects` as a directory inside `tank` when it is the mountpoint
+ * of `tank/projects`. Refused rather than normalised, so what is sent is what
+ * was compared — and what `confirmed` compares the stored path against.
+ */
+function plainPath(path: unknown): string {
+  if (typeof path !== 'string' || !path.startsWith('/')) {
+    throw new Error('"path" must be an absolute path, such as "/mnt/tank/projects"');
+  }
+  if (path.slice(1).split('/').some((segment) => segment === '' || segment === '.' || segment === '..')) {
+    throw new Error(
+      '"path" must be written plainly: no empty, "." or ".." segment and no trailing slash',
+    );
+  }
+  return path;
+}
+
+/**
  * The basic settings, each validated where it was passed and left out where it
  * was not, in the order the schema lists them — so the record this returns is
  * exactly what is sent, and is what the plan states. Strict on every type: a
@@ -1289,22 +1327,7 @@ function parseSmbFields(args: Record<string, unknown>): SmbShareFields {
         '"path" may not be "EXTERNAL": that is the EXTERNAL_SHARE preset, which this tool does not create',
       );
     }
-    if (typeof path !== 'string' || !path.startsWith('/')) {
-      throw new Error('"path" must be an absolute path, such as "/mnt/tank/projects"');
-    }
-    // The dataset check compares the path to mountpoints as a string, so only
-    // a path spelled one way per directory may reach it: a `..` segment would
-    // let `/mnt/tank/../../etc` read as inside `tank`, and an empty one would
-    // read `/mnt/tank//projects` as a directory inside `tank` when it is the
-    // mountpoint of `tank/projects`. Refused rather than normalised, so what is
-    // sent is what was compared — and what `confirmed` compares the stored
-    // path against.
-    if (path.slice(1).split('/').some((segment) => segment === '' || segment === '.' || segment === '..')) {
-      throw new Error(
-        '"path" must be written plainly: no empty, "." or ".." segment and no trailing slash',
-      );
-    }
-    fields.path = path;
+    fields.path = plainPath(path);
   }
   const comment = args['comment'];
   if (comment !== undefined) {
@@ -1912,6 +1935,732 @@ export const smbShareUpdate: MutatingTool = {
       changes,
       changed: same === null ? null : !same,
       confirmed: after === null ? null : agreement(requested, after),
+    };
+  },
+};
+
+/**
+ * `nfs_share_create` and `nfs_share_update`: exporting one path on this system
+ * over NFS, and changing an existing export's access settings.
+ *
+ * TWO TOOLS AND NOT ONE, for the reason the SMB pair is two (#183): a create
+ * names the dataset the path belongs to and every export already overlapping
+ * it; an update names each value beside the one it replaces.
+ *
+ * WHO MAY MOUNT IT IS STATED IN WORDS, NEVER LEFT TO THE LISTS. An empty
+ * `networks` beside an empty `hosts` is an export any client that can reach the
+ * system may mount — the NFS convention and how TrueNAS presents it, though
+ * (unconfirmed) from the client's types — and an empty list reads as "nobody"
+ * to an approver who does not know that. The reassuring misreading is the
+ * costly one (#154), so the plan says it outright.
+ *
+ * SO IS THE IDENTITY MAPPING. `maproot_user: root` turns root squashing off and
+ * `mapall_user` replaces every client's identity; passing the field names
+ * through would leave the approver to know what each one does.
+ *
+ * `aliases` AND `expose_snapshots` ARE REFUSED BY NAME, as the SMB tools refuse
+ * `options` and `audit`: out of scope, and an argument silently dropped reads
+ * as applied.
+ *
+ * EXPORTS OF THE SAME, A PARENT OR A CHILD PATH ARE NAMED, NOT REFUSED: whether
+ * the middleware refuses an overlap is (unconfirmed), and naming it lets the
+ * approver see it either way. Plan-time only and not a step, since `execute`
+ * does not make that read (#119) — the SMB name clash's position.
+ *
+ * THE ROLE IS `Role.Sharing`, with `share_set_enabled`'s caveat: that the
+ * sharing-admin role grants `sharing.nfs.create` and `sharing.nfs.update` is
+ * read from the middleware's role definitions and is (unconfirmed) against a
+ * live system's `privilege.roles`.
+ */
+
+/** The security flavours the API accepts for an export. */
+const NFS_SECURITY = ['SYS', 'KRB5', 'KRB5I', 'KRB5P'] as const;
+type NfsSecurity = (typeof NFS_SECURITY)[number];
+
+/**
+ * The settings both tools send. Every one is optional on update. A mapping
+ * field sent as null clears that mapping.
+ */
+type NfsShareFields = {
+  path?: string;
+  comment?: string;
+  networks?: string[];
+  hosts?: string[];
+  ro?: boolean;
+  maproot_user?: string | null;
+  maproot_group?: string | null;
+  mapall_user?: string | null;
+  mapall_group?: string | null;
+  security?: NfsSecurity[];
+  enabled?: boolean;
+};
+
+/** The order the plan states the fields in, which is the schema's. */
+const NFS_SHARE_FIELDS = [
+  'path',
+  'comment',
+  'networks',
+  'hosts',
+  'ro',
+  'maproot_user',
+  'maproot_group',
+  'mapall_user',
+  'mapall_group',
+  'security',
+  'enabled',
+] as const;
+
+/** The identity-mapping fields: each a user or group name, or null for none. */
+const NFS_MAP_FIELDS = ['maproot_user', 'maproot_group', 'mapall_user', 'mapall_group'] as const;
+type NfsMapField = (typeof NFS_MAP_FIELDS)[number];
+
+function isMapField(key: string): key is NfsMapField {
+  return (NFS_MAP_FIELDS as readonly string[]).includes(key);
+}
+
+/** Why `aliases` and `expose_snapshots` are refused, worded once for both tools. */
+const NFS_REFUSED = "an export's aliases and its snapshot directory are out of this tool's scope";
+
+/** A list of non-empty strings, refused whole if one entry is anything else. */
+function nameList(key: string, value: unknown): string[] {
+  if (!Array.isArray(value) || !value.every((entry) => typeof entry === 'string' && entry.length > 0)) {
+    throw new Error(`"${key}" must be a list of non-empty strings`);
+  }
+  return value as string[];
+}
+
+/**
+ * The export settings, each validated where it was passed and left out where it
+ * was not, in the schema's order — so the record is exactly what is sent and is
+ * what the plan states. Strict on every type, as the SMB fields are: a coerced
+ * `"false"` would serve read-write an export the caller asked to be read-only.
+ */
+function parseNfsFields(args: Record<string, unknown>): NfsShareFields {
+  const fields: NfsShareFields = {};
+  if (args['path'] !== undefined) fields.path = plainPath(args['path']);
+  const comment = args['comment'];
+  if (comment !== undefined) {
+    // An empty comment is allowed: it is how an update clears one.
+    if (typeof comment !== 'string') throw new Error('"comment" must be a string');
+    fields.comment = comment;
+  }
+  if (args['networks'] !== undefined) fields.networks = nameList('networks', args['networks']);
+  if (args['hosts'] !== undefined) fields.hosts = nameList('hosts', args['hosts']);
+  const ro = args['ro'];
+  if (ro !== undefined) {
+    if (typeof ro !== 'boolean') throw new Error('"ro" must be a boolean');
+    fields.ro = ro;
+  }
+  for (const key of NFS_MAP_FIELDS) {
+    const value = args[key];
+    if (value === undefined) continue;
+    // Null is how a mapping is cleared; an empty name is refused rather than
+    // read as null, so a caller who meant one is not told the other happened.
+    if (value !== null && textOrNull(value) === null) {
+      throw new Error(`"${key}" must be a non-empty name, or null for no mapping`);
+    }
+    fields[key] = value as string | null;
+  }
+  const security = args['security'];
+  if (security !== undefined) {
+    if (
+      !Array.isArray(security) ||
+      !security.every((flavour) => (NFS_SECURITY as readonly unknown[]).includes(flavour))
+    ) {
+      throw new Error(`"security" must be a list of ${NFS_SECURITY.join(', ')}`);
+    }
+    fields.security = security as NfsSecurity[];
+  }
+  const enabled = args['enabled'];
+  if (enabled !== undefined) {
+    if (typeof enabled !== 'boolean') throw new Error('"enabled" must be a boolean');
+    fields.enabled = enabled;
+  }
+  return fields;
+}
+
+/** What `nfs_share_create` was asked to do. */
+type NfsCreate = NfsShareFields & { path: string };
+
+function parseNfsCreate(args: Record<string, unknown>): NfsCreate {
+  refuseArgs(args, ['aliases', 'expose_snapshots'], NFS_REFUSED);
+  if (args['path'] === undefined) throw new Error('"path" is required');
+  return parseNfsFields(args) as NfsCreate;
+}
+
+/** What `nfs_share_update` was asked to do. */
+interface NfsUpdate {
+  id: number;
+  fields: NfsShareFields;
+}
+
+function parseNfsUpdate(args: Record<string, unknown>): NfsUpdate {
+  refuseArgs(args, ['aliases', 'expose_snapshots'], NFS_REFUSED);
+  const id = args['id'];
+  if (typeof id !== 'number' || !Number.isInteger(id)) {
+    throw new Error('"id" is required and must be a whole number');
+  }
+  const fields = parseNfsFields(args);
+  if (Object.keys(fields).length === 0) {
+    throw new Error(`Nothing to change: pass at least one of ${NFS_SHARE_FIELDS.join(', ')}`);
+  }
+  return { id, fields };
+}
+
+/**
+ * An NFS export as these tools report it, field by field. `networks` and
+ * `hosts` are read whole or not at all, as `share_access` reads them — a list
+ * reported in part is a different restriction. A mapping field is null where
+ * the export has no such mapping, and also where its value could not be read.
+ */
+interface NfsShareRow {
+  id: number | null;
+  path: string | null;
+  comment: string | null;
+  networks: string[] | null;
+  hosts: string[] | null;
+  ro: boolean | null;
+  maproot_user: string | null;
+  maproot_group: string | null;
+  mapall_user: string | null;
+  mapall_group: string | null;
+  security: string[] | null;
+  enabled: boolean | null;
+  locked: boolean | null;
+}
+
+function nfsShareRow(row: Record<string, unknown>): NfsShareRow {
+  const comment = row['comment'];
+  return {
+    id: numberOrNull(row['id']),
+    path: textOrNull(row['path']),
+    comment: typeof comment === 'string' ? comment : null,
+    networks: restrictionList(row['networks']),
+    hosts: restrictionList(row['hosts']),
+    ro: booleanOrNull(row['ro']),
+    maproot_user: textOrNull(row['maproot_user']),
+    maproot_group: textOrNull(row['maproot_group']),
+    mapall_user: textOrNull(row['mapall_user']),
+    mapall_group: textOrNull(row['mapall_group']),
+    security: strictTextList(row['security']),
+    enabled: booleanOrNull(row['enabled']),
+    locked: booleanOrNull(row['locked']),
+  };
+}
+
+/**
+ * A mapping field as stored: the name, `''` where the export has none — which
+ * the system may spell as null or as an empty string — and null where the value
+ * could not be read. The row reports the first two cases alike; comparing a
+ * cleared mapping needs them apart, or clearing one could never be confirmed.
+ */
+function storedMapping(value: unknown): string | null {
+  if (value === null || value === '') return '';
+  return typeof value === 'string' ? value : null;
+}
+
+/**
+ * The fields a request sent, as {@link agreement} compares them: a list by its
+ * exact spelling, a mapping as {@link storedMapping} reads it.
+ */
+function nfsComparable(
+  raw: Record<string, unknown>,
+  keys: readonly string[],
+): Record<string, string | number | boolean | null> {
+  const row = nfsShareRow(raw);
+  return Object.fromEntries(
+    keys.map((key) => {
+      if (isMapField(key)) return [key, storedMapping(raw[key])];
+      const value = row[key as keyof NfsShareRow];
+      return [key, Array.isArray(value) ? JSON.stringify(value) : value];
+    }),
+  );
+}
+
+/** What a request sent, in the terms {@link nfsComparable} reads a row in. */
+function nfsSent(fields: NfsShareFields): Record<string, string | boolean | null> {
+  return Object.fromEntries(
+    Object.entries(fields).map(([key, value]) => [
+      key,
+      value === null ? '' : Array.isArray(value) ? JSON.stringify(value) : (value as string | boolean),
+    ]),
+  );
+}
+
+/** One field as the export holds it now, as a plan states it. */
+function storedValue(raw: Record<string, unknown>, key: string): string {
+  if (isMapField(key)) {
+    const mapping = storedMapping(raw[key]);
+    return mapping === '' ? 'null' : mapping === null ? NONE_REPORTED : JSON.stringify(mapping);
+  }
+  const value = nfsShareRow(raw)[key as keyof NfsShareRow];
+  return value === null ? NONE_REPORTED : JSON.stringify(value);
+}
+
+/**
+ * Which clients may mount the export, in words.
+ *
+ * TWO EMPTY LISTS ARE STATED AS UNRESTRICTED, because that is what they are and
+ * an empty list reads as "nobody" (#154). A list that could not be read leaves
+ * the answer unestablished, and is said so rather than read as either.
+ * `assumed` is a create that did not send one of the lists, whose stored value
+ * is then the system's default.
+ */
+function accessSentence(networks: string[] | null, hosts: string[] | null, assumed: boolean): string {
+  if (networks === null || hosts === null) {
+    return (
+      " Which clients may mount it is not established: the export's current `networks` or " +
+      '`hosts` could not be read, and an unread list is not evidence of either answer.'
+    );
+  }
+  const defaulted = assumed
+    ? ' A list not sent is created empty as far as this tool knows, which is (unconfirmed).'
+    : '';
+  if (networks.length === 0 && hosts.length === 0) {
+    return (
+      ' NEITHER `networks` NOR `hosts` RESTRICTS IT, SO ANY CLIENT THAT CAN REACH THIS SYSTEM MAY ' +
+      'MOUNT IT: an empty list means unrestricted, not nobody — the NFS convention and how ' +
+      `TrueNAS presents it, (unconfirmed) from the API's own types.${defaulted}`
+    );
+  }
+  const listed = (list: string[]) => (list.length === 0 ? 'none' : list.map((entry) => `"${entry}"`).join(', '));
+  return ` Only clients these name may mount it — networks ${listed(networks)}; hosts ${listed(hosts)}.${defaulted}`;
+}
+
+/**
+ * The identity mapping in words, given each field as {@link storedMapping}
+ * reads it. Empty where no mapping is set and none was unreadable.
+ */
+function mappingSentence(map: Record<NfsMapField, string | null>): string {
+  const named = (key: NfsMapField) => map[key] !== null && map[key] !== '';
+  const identity = (user: NfsMapField, group: NfsMapField) =>
+    [named(user) ? `user "${map[user]}"` : null, named(group) ? `group "${map[group]}"` : null]
+      .filter((part) => part !== null)
+      .join(' and ');
+  const parts: string[] = [];
+  if (named('mapall_user') || named('mapall_group')) {
+    parts.push(
+      `EVERY REQUEST over this export, from any client user including root, is treated as ` +
+        `${identity('mapall_user', 'mapall_group')}` +
+        `${map.mapall_user === 'root' ? ', so every client user acts as root on this system here' : ''}.`,
+    );
+  }
+  if (map.maproot_user === 'root') {
+    parts.push(
+      'Root on a client stays root on this system for this export' +
+        `${named('maproot_group') ? `, with group "${map.maproot_group}"` : ''}: ROOT SQUASHING IS OFF.`,
+    );
+  } else if (named('maproot_user') || named('maproot_group')) {
+    parts.push(`Requests from root on a client are treated as ${identity('maproot_user', 'maproot_group')}.`);
+  }
+  const unread = NFS_MAP_FIELDS.filter((key) => map[key] === null);
+  if (unread.length > 0) {
+    parts.push(`The current ${unread.join(', ')} could not be read, so the mapping stated here may be incomplete.`);
+  }
+  return parts.length === 0 ? '' : ` ${parts.join(' ')}`;
+}
+
+/**
+ * What the plan says about exports already covering the path, its parents or a
+ * directory inside it.
+ *
+ * Plan-time only and not a step (#119); its failure is stated rather than
+ * failing the plan (#154). An export whose path could not be read is COUNTED,
+ * by #93's direction: leaving it out moves the sentence towards "nothing else
+ * exports this", which is the claim that makes an overlap look absent.
+ * `exceptId` is the export an update is moving, which trivially overlaps itself.
+ */
+async function overlapSentence(ctx: ToolContext, path: string, exceptId: number | null): Promise<string> {
+  let rows: unknown;
+  try {
+    rows = await firstValueFrom(ctx.system.client.api.query('sharing.nfs.query'));
+  } catch (reason) {
+    return (
+      ' Whether another NFS export already covers this path could not be read ' +
+      `(sharing.nfs.query failed: ${errorText(reason)}).`
+    );
+  }
+  if (!Array.isArray(rows)) {
+    return (
+      ' Whether another NFS export already covers this path could not be read ' +
+      '(sharing.nfs.query did not answer with a list).'
+    );
+  }
+  const overlaps: string[] = [];
+  let unread = 0;
+  for (const row of rows) {
+    const held = recordOrNull(row);
+    const id = numberOrNull(held?.['id']);
+    if (exceptId !== null && id === exceptId) continue;
+    const other = textOrNull(held?.['path']);
+    if (other === null || !other.startsWith('/')) {
+      unread += 1;
+      continue;
+    }
+    const mount = trimmedPath(other);
+    const relation =
+      mount === path
+        ? 'the same path'
+        : path.startsWith(mount === '/' ? '/' : `${mount}/`)
+          ? 'a parent of this path'
+          : mount.startsWith(`${path}/`)
+            ? 'inside this path'
+            : null;
+    if (relation !== null) overlaps.push(`id ${id ?? NONE_REPORTED}, "${other}" (${relation})`);
+  }
+  const unreadText =
+    unread > 0 ? ` ${plural(unread, 'other NFS export')} reported no path this tool could compare.` : '';
+  if (overlaps.length === 0) {
+    return ` No other NFS export on this system exports this path, a parent of it or a directory inside it.${unreadText}`;
+  }
+  return (
+    ` ${plural(overlaps.length, 'other NFS export')} already ${overlaps.length === 1 ? 'covers' : 'cover'} ` +
+    `an overlapping path: ${overlaps.join('; ')}. Whether the system refuses an overlapping export is ` +
+    `(unconfirmed).${unreadText}`
+  );
+}
+
+/** What both plans say about the path becoming mountable. */
+function nfsExposureSentence(path: string): string {
+  return (
+    ` Path "${path}" becomes mountable over NFS by the clients stated here, and what each request ` +
+    "may then do is decided by the dataset's ACL, after any mapping; `share_access` reports both " +
+    "once the export exists. This tool does not ask for any change to the dataset's ACL or " +
+    'permissions; whether the system changes them on its own is (unconfirmed).'
+  );
+}
+
+function readNfsShare(ctx: ToolContext, id: number): Promise<unknown> {
+  return firstValueFrom(ctx.system.client.api.query('sharing.nfs.query', [['id', '=', id]]));
+}
+
+/** The JSON schema for each export setting, shared by both tools. */
+const NFS_FIELD_SCHEMA = {
+  comment: { type: 'string', description: 'A description of the export; "" clears it on update.' },
+  networks: {
+    type: 'array',
+    items: { type: 'string' },
+    description:
+      'Networks, in CIDR form, whose clients may mount the export. Empty together with an empty ' +
+      '`hosts` means ANY client may.',
+  },
+  hosts: {
+    type: 'array',
+    items: { type: 'string' },
+    description:
+      'Host names or addresses that may mount the export. Empty together with an empty ' +
+      '`networks` means ANY client may.',
+  },
+  ro: { type: 'boolean', description: 'true serves the export read-only.' },
+  maproot_user: {
+    oneOf: [{ type: 'string' }, { type: 'null' }],
+    description: 'The user a client\'s root is treated as; "root" turns root squashing off. null for none.',
+  },
+  maproot_group: {
+    oneOf: [{ type: 'string' }, { type: 'null' }],
+    description: "The group a client's root is treated as. null for none.",
+  },
+  mapall_user: {
+    oneOf: [{ type: 'string' }, { type: 'null' }],
+    description: 'The user EVERY request is treated as, root included. null for none.',
+  },
+  mapall_group: {
+    oneOf: [{ type: 'string' }, { type: 'null' }],
+    description: 'The group every request is treated as. null for none.',
+  },
+  security: {
+    type: 'array',
+    items: { type: 'string', enum: [...NFS_SECURITY] },
+    description: 'The security flavours the export accepts.',
+  },
+  enabled: { type: 'boolean', description: 'Whether the export is switched on.' },
+} as const;
+
+const NFS_ROW_FIELDS =
+  '`id`, which is what `nfs_share_update` and `share_set_enabled` take; `path`; ' +
+  '`comment`, `""` where the export has none; `networks` and `hosts`, where TWO EMPTY ' +
+  'LISTS MEAN ANY CLIENT MAY MOUNT IT, NOT NOBODY, and null is a list this tool could ' +
+  'not read whole, which is not evidence of either; `ro`; `maproot_user`, ' +
+  '`maproot_group`, `mapall_user` and `mapall_group`, each null where no such mapping ' +
+  'is set AND where its value could not be read; `security`; `enabled`; and `locked`, ' +
+  'true where the dataset is locked by encryption and the export serves nothing until ' +
+  'it is unlocked. Every other field is null where the response stated no value this ' +
+  'tool could read.';
+
+const NFS_CREATE_GUIDANCE =
+  '`requested` is exactly what was sent. `share` is the created export read back off ' +
+  'the response the create itself answered with — never copied from the request — or ' +
+  `null where that response was not a record. Its fields are ${NFS_ROW_FIELDS} ` +
+  '`confirmed` is whether `share` holds every value sent: true is the system reporting ' +
+  'back what was asked for; FALSE IS NOT A SUCCESS — the call did not reject and at ' +
+  'least one value was stored as something else, a list compared exactly as spelled ' +
+  'and in order; and null is a response in which some value sent could not be read ' +
+  'back and none read back as different. A null `share` means nothing here establishes ' +
+  'that an export was created, and is not evidence that none was — `shares_list` shows ' +
+  'what the system now holds.';
+
+export const nfsShareCreate: MutatingTool = {
+  name: 'nfs_share_create',
+  description:
+    'Creates one NFS export on this TrueNAS system, of a path that belongs to one of ' +
+    'its datasets. Two-phase: called without a confirmation_token it returns a plan for ' +
+    'user approval; called with one it creates the export. `path` is required; ' +
+    '`comment`, `networks`, `hosts`, `ro`, the four mapping fields, `security` and ' +
+    '`enabled` are optional, and the system decides any that are not passed. `aliases` ' +
+    "and `expose_snapshots` are refused. `path` must be a dataset's mountpoint or a " +
+    'directory inside one, and the plan names which dataset and which of the two; a ' +
+    'path that is neither fails the plan, naming it. That check is made when the plan is ' +
+    'made and not again. THE PLAN SAYS IN WORDS WHICH CLIENTS MAY MOUNT THE EXPORT — an ' +
+    'empty `networks` beside an empty `hosts` is ANY CLIENT THAT CAN REACH THE SYSTEM, ' +
+    'not nobody — AND WHAT IDENTITY MAPPING APPLIES: `maproot_user` "root" turns root ' +
+    'squashing off, and `mapall_user` replaces the identity of every request. THE PLAN ' +
+    'NAMES EVERY EXPORT ALREADY COVERING THE SAME PATH, A PARENT OF IT OR A DIRECTORY ' +
+    'INSIDE IT; whether the system refuses an overlap is (unconfirmed). AN EXPORT IS AN ' +
+    "EXPOSURE: what a mounting client may do is decided by the dataset's ACL after any " +
+    'mapping, and `share_access` reports both. This tool does not ask for any change to ' +
+    "the dataset's ACL or permissions, and whether the system changes them on its own is " +
+    '(unconfirmed). It does not start the NFS service, which `service_control` does. ' +
+    '`destructiveness` is `reversible`, but NO TOOL IN THIS CATALOG DELETES AN NFS ' +
+    'EXPORT: undoing this means switching it off with `share_set_enabled`, or deleting it ' +
+    'outside this catalog. ' +
+    NFS_CREATE_GUIDANCE,
+  resultGuidance: NFS_CREATE_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      path: {
+        type: 'string',
+        description:
+          "The absolute path to export: a dataset's mountpoint, as `storage_list_datasets` " +
+          'reports it, or a directory inside one.',
+      },
+      ...NFS_FIELD_SCHEMA,
+    },
+    required: ['path'],
+  },
+  requiredRole: Role.Sharing,
+  mutating: true,
+  // Additive: the export is a new row and nothing existing is removed. What it
+  // exposes is stated in the plan rather than recorded here.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    return parseNfsCreate(rawArgs);
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const fields = parseNfsCreate(rawArgs);
+    const owner = await datasetOfPath(ctx, fields.path);
+    const overlap = await overlapSentence(ctx, fields.path, null);
+    // A mapping not sent is a mapping this create does not set.
+    const map = Object.fromEntries(NFS_MAP_FIELDS.map((key) => [key, fields[key] ?? ''])) as Record<
+      NfsMapField,
+      string
+    >;
+    const unsent = NFS_SHARE_FIELDS.filter((key) => key !== 'path' && fields[key] === undefined);
+    const defaults =
+      unsent.length === 0
+        ? ''
+        : ` Not sent, and so left to the system's defaults, which are not read here: ${unsent.join(', ')}.`;
+    return [
+      {
+        method: 'sharing.nfs.create',
+        params: [fields],
+        description:
+          `Create an NFS export, ${Object.entries(fields)
+            .map(([key, value]) => `${key} ${JSON.stringify(value)}`)
+            .join(', ')}. ${pathSentence(fields.path, owner)}${overlap}` +
+          accessSentence(
+            fields.networks ?? [],
+            fields.hosts ?? [],
+            fields.networks === undefined || fields.hosts === undefined,
+          ) +
+          `${mappingSentence(map)}${nfsExposureSentence(fields.path)}${defaults}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const fields = parseNfsCreate(rawArgs);
+    // The path check is the plan's and is not made again here, as
+    // `smb_share_create`'s is not.
+    const created: unknown = await firstValueFrom(
+      ctx.system.client.api.call('sharing.nfs.create', [fields]),
+    );
+    const held = recordOrNull(created);
+    return {
+      requested: fields,
+      share: held === null ? null : nfsShareRow(held),
+      confirmed: held === null ? null : agreement(nfsSent(fields), nfsComparable(held, Object.keys(fields))),
+    };
+  },
+};
+
+const NFS_UPDATE_GUIDANCE =
+  '`requested` is exactly what was sent. `previous` is the export as read immediately ' +
+  'before the call, and `resulting` is the export read back off the response the update ' +
+  'itself answered with — never copied from the request. Both carry the fields ' +
+  '`nfs_share_create` reports; `previous` is null where that read failed or listed no ' +
+  'such export, and `resulting` is null where the response was not a record. `changes` ' +
+  'names each field that was SENT, as `requested`, `before` (off `previous`) and `after` ' +
+  '(off `resulting`), and `before` or `after` is null wherever the reading behind it is — ' +
+  'or, for a mapping field, where no mapping is set. `lookup` says what the read did: ' +
+  '`FOUND`, `NOT_FOUND` (deleted between the plan and the confirmation), or `UNREADABLE` ' +
+  'with `lookup_error` naming why; THE UPDATE IS ATTEMPTED IN ALL THREE CASES, because ' +
+  'what runs must be what was approved. `changed` is true where the export before and ' +
+  'after differ in one of the sent fields and false where they agree in all, WHICH IS ' +
+  'TWO OUTCOMES AND NOT ONE: the export already held those values, or the call did not ' +
+  'apply. `confirmed` is what tells those apart, and `changed` must not be read without ' +
+  'it. `confirmed` is whether `resulting` holds every value sent: true is the system ' +
+  'reporting back what was asked for; FALSE IS NOT A SUCCESS — the call did not reject ' +
+  'and at least one value was stored as something else, a list compared exactly as ' +
+  'spelled and in order; null is a response in which some value sent could not be read ' +
+  'back and none read back as different. Both are null wherever a reading they need is ' +
+  'missing.';
+
+export const nfsShareUpdate: MutatingTool = {
+  name: 'nfs_share_update',
+  description:
+    "Changes one existing NFS export's settings on this TrueNAS system: its `path`, " +
+    '`comment`, `networks`, `hosts`, `ro`, the four mapping fields, `security` or ' +
+    '`enabled`. Two-phase: called without a confirmation_token it returns a plan for user ' +
+    "approval; called with one it sends the change. `id` is the export's id as " +
+    '`shares_list` reports it for protocol `NFS`; PLANNING AGAINST AN id NO NFS EXPORT ' +
+    "HAS FAILS, naming it — an SMB share's id is a different table and is never taken " +
+    'here. ONLY THE FIELDS PASSED ARE SENT, and at least one is required; a mapping field ' +
+    'passed as null clears that mapping. `aliases` and `expose_snapshots` are refused. A ' +
+    "new `path` is checked as `nfs_share_create` checks one — a dataset's mountpoint or a " +
+    'directory inside one — and the plan names its dataset and every other export ' +
+    'covering an overlapping path. THE PLAN STATES EACH VALUE SENT BESIDE THE ONE THE ' +
+    'EXPORT HOLDS NOW, so the call that undoes it is in the plan, AND SAYS IN WORDS WHICH ' +
+    'CLIENTS MAY MOUNT THE EXPORT AFTERWARDS — an empty `networks` beside an empty ' +
+    '`hosts` is ANY CLIENT, not nobody — AND WHAT IDENTITY MAPPING WILL APPLY. Changing ' +
+    '`path` means clients mounting the old path no longer find it; `enabled: false` cuts ' +
+    'off every client with it mounted, which `nfs_clients` reports. SENDING AN EXPORT A ' +
+    'VALUE IT ALREADY HOLDS IS NOT AN ERROR. This tool cannot create or delete an export; ' +
+    '`nfs_share_create` creates one, and `share_set_enabled` switches one on or off alone. ' +
+    NFS_UPDATE_GUIDANCE,
+  resultGuidance: NFS_UPDATE_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'integer',
+        description:
+          "The NFS export's `id`, as `shares_list` reports it for protocol `NFS` on the " +
+          'system being targeted. An SMB share with the same id is a different share.',
+      },
+      path: {
+        type: 'string',
+        description: "A new absolute path: a dataset's mountpoint, or a directory inside one.",
+      },
+      ...NFS_FIELD_SCHEMA,
+    },
+    required: ['id'],
+  },
+  requiredRole: Role.Sharing,
+  mutating: true,
+  // Every field it sends can be sent back, and the plan states the value each
+  // held. What a new path or a narrower restriction does to clients that have
+  // it mounted is stated in the plan rather than recorded here.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const { id, fields } = parseNfsUpdate(rawArgs);
+    return { id, ...fields };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const { id, fields } = parseNfsUpdate(rawArgs);
+    const row = rowWithId(await readNfsShare(ctx, id), id);
+    if (row === null) {
+      throw new Error(
+        `No NFS export with id ${id} on this system — ids come from \`shares_list\`, where an ` +
+          'SMB share and an NFS export can carry the same id',
+      );
+    }
+    const share = nfsShareRow(row);
+    const notes: string[] = [];
+    if (fields.path !== undefined && fields.path !== share.path) {
+      const owner = await datasetOfPath(ctx, fields.path);
+      notes.push(
+        ` This stops exporting ${share.path === null ? NONE_REPORTED : `"${share.path}"`}, and ` +
+          `clients that mount that path will no longer find it. ${pathSentence(fields.path, owner)}` +
+          `${await overlapSentence(ctx, fields.path, id)}${nfsExposureSentence(fields.path)}`,
+      );
+    }
+    notes.push(
+      accessSentence(fields.networks ?? share.networks, fields.hosts ?? share.hosts, false),
+    );
+    const map = Object.fromEntries(
+      NFS_MAP_FIELDS.map((key) => [
+        key,
+        fields[key] !== undefined ? (fields[key] ?? '') : storedMapping(row[key]),
+      ]),
+    ) as Record<NfsMapField, string | null>;
+    notes.push(mappingSentence(map));
+    if (fields.enabled === false && share.enabled !== false) {
+      notes.push(` ${NFS_CONNECTED_CLIENTS}`);
+    }
+    const already =
+      agreement(nfsSent(fields), nfsComparable(row, Object.keys(fields))) === true
+        ? ' The export already holds every value this sends, which is not an error.'
+        : '';
+    const changes = Object.entries(fields)
+      .map(([key, value]) => `${key} ${JSON.stringify(value)} (now ${storedValue(row, key)})`)
+      .join('; ');
+    return [
+      readStep('sharing.nfs.query', 'NFS export', id),
+      {
+        method: 'sharing.nfs.update',
+        params: [id, fields],
+        description:
+          `Change the NFS export with ${identifyNfsExport(row)} (id ${id}): ${changes}. ` +
+          `Only these fields are sent.${notes.join('')}${already}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const { id, fields } = parseNfsUpdate(rawArgs);
+    let previous: Record<string, unknown> | null = null;
+    let lookupError: string | null = null;
+    try {
+      previous = rowWithId(await readNfsShare(ctx, id), id);
+    } catch (reason) {
+      lookupError = errorText(reason);
+    }
+    // Issued whatever the read said: skipping it for an export the read no
+    // longer lists would be `execute` branching on state the confirmation
+    // token cannot bind.
+    const updated: unknown = await firstValueFrom(
+      ctx.system.client.api.call('sharing.nfs.update', [id, fields]),
+    );
+    const resulting = recordOrNull(updated);
+    const keys = Object.keys(fields);
+    const before = previous === null ? null : nfsShareRow(previous);
+    const after = resulting === null ? null : nfsShareRow(resulting);
+    const changes = Object.fromEntries(
+      Object.entries(fields).map(([key, value]) => [
+        key,
+        {
+          requested: value,
+          before: before?.[key as keyof NfsShareRow] ?? null,
+          after: after?.[key as keyof NfsShareRow] ?? null,
+        },
+      ]),
+    );
+    // `changed` compares the two READINGS on the fields that were sent, never
+    // the request: a response still holding the old value is a call that did
+    // not apply, not one that changed nothing.
+    const same =
+      previous === null || resulting === null
+        ? null
+        : agreement(nfsComparable(previous, keys), nfsComparable(resulting, keys));
+    return {
+      id,
+      requested: fields,
+      lookup: lookupError !== null ? 'UNREADABLE' : previous === null ? 'NOT_FOUND' : 'FOUND',
+      lookup_error: lookupError,
+      previous: before,
+      resulting: after,
+      changes,
+      changed: same === null ? null : !same,
+      confirmed: resulting === null ? null : agreement(nfsSent(fields), nfsComparable(resulting, keys)),
     };
   },
 };
