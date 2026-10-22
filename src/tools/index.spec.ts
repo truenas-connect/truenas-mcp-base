@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the eighty-eight sketch tools', () => {
+  it('registers the eighty-nine sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -93,7 +93,14 @@ describe('createDefaultCatalog', () => {
       'iscsi_target_update',
       'nvmeof_subsystem_create',
       'nvmeof_subsystem_update',
+      'user_create',
     ]);
+  });
+
+  it('advertises user_create to a full-access credential only', () => {
+    expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain('user_create');
+    expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain('user_create');
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain('user_create');
   });
 
   it('advertises the SMB, NFS, iSCSI target and NVMe-oF subsystem mutations to a sharing credential, and not to a read-only one', () => {

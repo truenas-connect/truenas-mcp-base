@@ -1,13 +1,23 @@
 import { firstValueFrom } from 'rxjs';
 import type { QueryEntity } from '@truenas/api-client';
 import { Role } from '@/interfaces';
-import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
 import {
+  ApiSurface,
+  MutatingTool,
+  PlanStep,
+  ReadOnlyTool,
+  SystemHandle,
+  ToolContext,
+} from '@/catalog/tool';
+import {
+  agreement,
   booleanOrNull,
   effectiveLimit,
   errorText,
   numberOrNull,
+  plural,
   recordOrNull,
+  refuseArgs,
   strictTextList,
   textOrNull,
 } from '@/tools/common';
@@ -33,6 +43,11 @@ import {
  * live join state, and it is the tool; `directoryservices.config` is where the
  * domain and the bind method are read from, and it is reported rather than
  * fatal for the reason `readConfig` gives.
+ *
+ * `user_create` is the family's one mutation, and it reads the same three
+ * namespaces from the other side: `group.query` to resolve the groups it is
+ * given by name, `privilege.query` to refuse any of them that holds a
+ * privilege, and `user.query` for an account already under the username.
  *
  * All three payloads are ones where over-returning is a hazard rather than a
  * cost. The account record holds `unixhash`, `smbhash`, `sshpubkey` and
@@ -620,6 +635,623 @@ export const privilegesList: ReadOnlyTool = {
         local_groups: privilegeGroups(privilege.local_groups),
         ds_groups: privilegeGroups(privilege.ds_groups),
       })),
+    };
+  },
+};
+
+/** Why every password route is refused, worded once. */
+const PASSWORD_REFUSED =
+  'the account is always created with password login disabled and no password. A password ' +
+  'is a secret, tool arguments are recorded verbatim in the audit trail, and setting one is ' +
+  'not something this catalog does';
+
+/** Why the remaining `user.create` arguments are refused. */
+const USER_SCOPE_REFUSED = "out of this tool's scope";
+
+/**
+ * What `user_create` was asked to do, with groups still by NAME. Built in a
+ * fixed key order and only from what was passed, so it is what `normalizeArgs`
+ * returns and what the confirmation token binds.
+ *
+ * `smb` is not here: the only value it accepts is `false`, which is sent
+ * whether or not it was passed, so the two spellings normalize to one.
+ * `home_create` is kept only where it is `true`, for the same reason.
+ */
+interface UserCreateArgs {
+  username: string;
+  full_name: string;
+  email?: string;
+  group: string;
+  groups: string[];
+  home?: string;
+  home_create?: true;
+  shell?: string;
+  sshpubkey?: string;
+}
+
+/** A non-empty string argument, or the error naming it. */
+function requiredText(args: Record<string, unknown>, key: string): string {
+  const value = args[key];
+  if (value === undefined) throw new Error(`"${key}" is required`);
+  if (textOrNull(value) === null) throw new Error(`"${key}" must be a non-empty string`);
+  return value as string;
+}
+
+/** The auxiliary group names: none where omitted, each named once. */
+function groupNames(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((name) => textOrNull(name) === null)) {
+    throw new Error('"groups" must be a list of group names');
+  }
+  const names = value as string[];
+  const repeated = names.find((name, index) => names.indexOf(name) !== index);
+  if (repeated !== undefined) throw new Error(`"groups" names "${repeated}" more than once`);
+  return names;
+}
+
+function parseUserCreate(args: Record<string, unknown>): UserCreateArgs {
+  refuseArgs(
+    args,
+    ['password', 'random_password', 'password_disabled', 'ssh_password_enabled'],
+    PASSWORD_REFUSED,
+  );
+  refuseArgs(
+    args,
+    [
+      'sudo_commands',
+      'sudo_commands_nopasswd',
+      'uid',
+      'userns_idmap',
+      'group_create',
+      'home_mode',
+      'locked',
+    ],
+    USER_SCOPE_REFUSED,
+  );
+  const smb = args['smb'];
+  if (smb !== undefined) {
+    if (typeof smb !== 'boolean') throw new Error('"smb" must be a boolean');
+    if (smb) {
+      throw new Error(
+        '"smb" may only be false: SMB authenticates with a password hash, and this tool ' +
+          'creates the account with password login disabled and no password',
+      );
+    }
+  }
+  const parsed: UserCreateArgs = {
+    username: requiredText(args, 'username'),
+    full_name: requiredText(args, 'full_name'),
+    group: '',
+    groups: [],
+  };
+  if (args['email'] !== undefined) parsed.email = requiredText(args, 'email');
+  parsed.group = requiredText(args, 'group');
+  parsed.groups = groupNames(args['groups']);
+  if (parsed.groups.includes(parsed.group)) {
+    throw new Error(
+      `"${parsed.group}" is named as the primary group and again in "groups": name it once, as "group"`,
+    );
+  }
+  const home = args['home'];
+  if (home !== undefined) {
+    if (typeof home !== 'string' || !home.startsWith('/')) {
+      throw new Error('"home" must be an absolute path, such as "/mnt/tank/homes"');
+    }
+    parsed.home = home;
+  }
+  const homeCreate = args['home_create'];
+  if (homeCreate !== undefined) {
+    if (typeof homeCreate !== 'boolean') throw new Error('"home_create" must be a boolean');
+    if (homeCreate) {
+      if (parsed.home === undefined) {
+        throw new Error('"home_create" needs "home", the directory the home directory is made in');
+      }
+      parsed.home_create = true;
+    }
+  }
+  if (args['shell'] !== undefined) parsed.shell = requiredText(args, 'shell');
+  if (args['sshpubkey'] !== undefined) parsed.sshpubkey = requiredText(args, 'sshpubkey');
+  return parsed;
+}
+
+/** A group an account is to be put in, resolved from its name. */
+interface MemberGroup {
+  name: string;
+  id: number;
+  gid: number;
+}
+
+/** How a plan names a group: by name, and by both numbers it was resolved to. */
+function groupText(group: MemberGroup): string {
+  return `"${group.name}" (id ${group.id}, gid ${group.gid})`;
+}
+
+/**
+ * Every group named, resolved by name to the ids `user.create` takes, or the
+ * error naming the first that cannot be.
+ *
+ * Matched on the RESPONSE, by name, and never on the row count: an
+ * unrecognised filter is dropped rather than refused, and the first row of a
+ * filter that did not apply is a different group (#121, #153). A read that
+ * failed fails the create rather than being stated (#185): an approver would
+ * otherwise be shown a number they cannot check.
+ *
+ * Refused as well as unresolved:
+ * - a group that is not LOCAL, because this tool creates a local account in
+ *   local groups, and a directory group's membership is the directory's;
+ * - a group carrying sudo commands, read here because they are a group's own
+ *   field and not a privilege — membership in such a group is administrative
+ *   authority exactly as a privilege is, and `sudo_commands` is refused as an
+ *   argument for that reason. A list that is present and unreadable is refused
+ *   too, since it cannot be ruled out; an absent one is a version that does not
+ *   report it.
+ */
+async function resolveGroups(ctx: ToolContext, names: string[]): Promise<MemberGroup[]> {
+  let rows: unknown;
+  try {
+    rows = await firstValueFrom(ctx.system.client.api.query('group.query', [['name', 'in', names]]));
+  } catch (reason) {
+    throw new Error(
+      `The groups named could not be read (group.query failed: ${errorText(reason)}), so no ` +
+        'account is created in them',
+    );
+  }
+  if (!Array.isArray(rows)) {
+    throw new Error(
+      'The groups named could not be read (group.query did not answer with a list), so no ' +
+        'account is created in them',
+    );
+  }
+  const records = rows.map((row) => recordOrNull(row));
+  return names.map((name) => {
+    const matches = records.filter(
+      (row): row is Record<string, unknown> => row !== null && textOrNull(row['name']) === name,
+    );
+    if (matches.length === 0) {
+      throw new Error(
+        `No group named "${name}" on this system — \`users_list\` reports every group by name, ` +
+          'and this tool creates none',
+      );
+    }
+    if (matches.length > 1) {
+      throw new Error(`${matches.length} groups are named "${name}", so which one is meant cannot be told`);
+    }
+    const [row] = matches;
+    const id = numberOrNull(row['id']);
+    const gid = numberOrNull(row['gid']);
+    if (id === null || gid === null) {
+      throw new Error(`Group "${name}" is listed with no id or gid this tool could read, so no account is put in it`);
+    }
+    if (row['local'] !== true) {
+      throw new Error(
+        `Group "${name}" is not reported as a local group, and this tool puts a local account ` +
+          'in local groups only',
+      );
+    }
+    for (const key of ['sudo_commands', 'sudo_commands_nopasswd']) {
+      if (row[key] === undefined) continue;
+      const commands = strictTextList(row[key]);
+      if (commands === null) {
+        throw new Error(
+          `Group "${name}"'s ${key} could not be read, so whether membership grants sudo cannot ` +
+            'be ruled out, and no account is put in it',
+        );
+      }
+      if (commands.length > 0) {
+        throw new Error(
+          `Group "${name}" grants sudo commands (${key}), which makes membership administrative ` +
+            'authority, and this tool puts no account in such a group',
+        );
+      }
+    }
+    return { name, id, gid };
+  });
+}
+
+/**
+ * Refuses the create if any group named holds a privilege — option 1 of the
+ * ticket's privileged-group decision.
+ *
+ * A privilege is granted to a group and never to an account (`privileges_list`),
+ * so an account put in a privileged group holds that privilege's roles from the
+ * moment it exists. Refusing names the group and the privilege, and is
+ * checkable by the caller from `privileges_list`; allowing it with the roles
+ * stated would leave the catalog creating new administrators on an approval.
+ *
+ * Only `local_groups` is read: every group this tool accepts is local, and a
+ * local group is granted a privilege there and nowhere else. An entry is matched
+ * on its `gid` OR its `id`, either agreeing with the group's — matching on more
+ * refuses more, which is the direction to be wrong in here. Anything that stops
+ * the answer being read — the read failing, a privilege that is not a record, a
+ * `local_groups` that is not a list, an entry with neither number readable —
+ * refuses too, because a privilege that could not be ruled out has not been.
+ */
+async function refusePrivilegedGroups(ctx: ToolContext, groups: MemberGroup[]): Promise<void> {
+  const where = '`privileges_list` reports which groups hold which roles';
+  let rows: unknown;
+  try {
+    rows = await firstValueFrom(ctx.system.client.api.query('privilege.query'));
+  } catch (reason) {
+    throw new Error(
+      `Which groups hold a privilege could not be read (privilege.query failed: ` +
+        `${errorText(reason)}), so no account is created — ${where}`,
+    );
+  }
+  if (!Array.isArray(rows)) {
+    throw new Error(
+      'Which groups hold a privilege could not be read (privilege.query did not answer with a ' +
+        `list), so no account is created — ${where}`,
+    );
+  }
+  for (const row of rows) {
+    const privilege = recordOrNull(row);
+    const label =
+      textOrNull(privilege?.['name']) ?? `with id ${numberOrNull(privilege?.['id']) ?? 'unread'}`;
+    const entries = privilege?.['local_groups'];
+    if (privilege === null || !Array.isArray(entries)) {
+      throw new Error(
+        `Privilege "${label}" could not be read as granting to any list of local groups, so ` +
+          `whether it covers a group named cannot be ruled out, and no account is created — ${where}`,
+      );
+    }
+    for (const entry of entries) {
+      const held = recordOrNull(entry);
+      const gid = numberOrNull(held?.['gid']);
+      const id = numberOrNull(held?.['id']);
+      if (gid === null && id === null) {
+        throw new Error(
+          `Privilege "${label}" names a local group this tool could not read, so it may be a ` +
+            `group named here, and no account is created — ${where}`,
+        );
+      }
+      const match = groups.find((group) => group.gid === gid || group.id === id);
+      if (match !== undefined) {
+        throw new Error(
+          `Group "${match.name}" holds privilege "${label}", so an account in it would hold ` +
+            "that privilege's administrative roles, and this tool puts no account in a " +
+            `privileged group — ${where}`,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * What the plan says about an account already answering to the username.
+ *
+ * An exact match fails the plan, naming it. Plan-time only and not a step,
+ * since `execute` does not make this read (#119), and a failed read is stated
+ * rather than failing the plan (#154): the middleware is where a duplicate is
+ * finally refused.
+ */
+async function usernameSentence(ctx: ToolContext, username: string): Promise<string> {
+  let rows: unknown;
+  try {
+    rows = await firstValueFrom(ctx.system.client.api.query('user.query', [['username', '=', username]]));
+  } catch (reason) {
+    return (
+      ` Whether an account named "${username}" already exists could not be read ` +
+      `(user.query failed: ${errorText(reason)}).`
+    );
+  }
+  if (!Array.isArray(rows)) {
+    return (
+      ` Whether an account named "${username}" already exists could not be read ` +
+      '(user.query did not answer with a list).'
+    );
+  }
+  const clash = rows
+    .map((row) => recordOrNull(row))
+    .find((row) => row !== null && textOrNull(row['username']) === username);
+  if (clash !== undefined && clash !== null) {
+    throw new Error(
+      `An account named "${username}" already exists on this system (id ` +
+        `${numberOrNull(clash['id']) ?? 'unread'}, uid ${numberOrNull(clash['uid']) ?? 'unread'}) — ` +
+        '`users_list` reports it',
+    );
+  }
+  return ` No account named "${username}" exists on this system now.`;
+}
+
+/** How the account can be logged in to, which is the question a password-less account raises. */
+function loginSentence(sshpubkey: string | undefined): string {
+  const unset = 'Setting a password is not something this catalog does.';
+  if (sshpubkey !== undefined) {
+    return (
+      ' The account has NO PASSWORD and cannot log in with one. It can log in over SSH with ' +
+      'the public key given, where the SSH service is running and admits it — which is not ' +
+      `read here. ${unset}`
+    );
+  }
+  return (
+    ' The account has NO PASSWORD AND NO SSH KEY, so NOBODY CAN LOG IN TO IT until one is set ' +
+    `outside this catalog. That is the ordinary outcome of this tool, not a failure. ${unset}`
+  );
+}
+
+/** What the plan says about the home directory. */
+function homeSentence(parsed: UserCreateArgs): string {
+  if (parsed.home === undefined) return '';
+  if (parsed.home_create === true) {
+    return (
+      ` A home directory for the account is CREATED in "${parsed.home}", on whatever dataset ` +
+      'that path is in; whether the system names it after the user inside that path is ' +
+      '(unconfirmed), so the path actually used is read back into the result.'
+    );
+  }
+  return (
+    ` Home directory "${parsed.home}" is recorded for the account; nothing is created there ` +
+    'and whether it exists is not checked here.'
+  );
+}
+
+/** The optional settings a create did NOT send, which the system then decides. */
+function userDefaultsSentence(parsed: UserCreateArgs): string {
+  const unsent = (['email', 'home', 'shell'] as const).filter((key) => parsed[key] === undefined);
+  if (unsent.length === 0) return '';
+  return ` Not sent, and so left to the system's defaults, which are not read here: ${unsent.join(', ')}.`;
+}
+
+/** Exactly what `user.create` is sent, in one fixed order. */
+function userCreateRequest(parsed: UserCreateArgs, primary: MemberGroup, auxiliary: MemberGroup[]) {
+  return {
+    username: parsed.username,
+    full_name: parsed.full_name,
+    ...(parsed.email === undefined ? {} : { email: parsed.email }),
+    group: primary.id,
+    groups: auxiliary.map((group) => group.id),
+    group_create: false,
+    password_disabled: true,
+    // Sent rather than left out because whether the middleware's own default
+    // is SMB on — which it would then refuse beside a disabled password — is
+    // read from the TrueNAS implementation and not from this surface.
+    smb: false,
+    ...(parsed.home === undefined ? {} : { home: parsed.home }),
+    ...(parsed.home_create === undefined ? {} : { home_create: parsed.home_create }),
+    ...(parsed.shell === undefined ? {} : { shell: parsed.shell }),
+    ...(parsed.sshpubkey === undefined ? {} : { sshpubkey: parsed.sshpubkey }),
+  };
+}
+
+/** Every name the create resolves, the primary group first. */
+function allGroupNames(parsed: UserCreateArgs): string[] {
+  return [parsed.group, ...parsed.groups];
+}
+
+/**
+ * The membership list off the response, all of it or none: a list one id
+ * shorter says the account is in one fewer group, which understates what it
+ * may do (#93).
+ */
+function idList(value: unknown): number[] | null {
+  if (!Array.isArray(value)) return null;
+  const ids: number[] = [];
+  for (const entry of value) {
+    const id = numberOrNull(entry);
+    if (id === null) return null;
+    ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * The created account, field by field. NAMED, NEVER TRIMMED: the response
+ * carries `unixhash` and `smbhash`, which are password hashes, and `password`,
+ * which is where a generated password would be returned — none of which may
+ * reach a result, since results are recorded verbatim in the audit trail.
+ */
+interface CreatedUser {
+  id: number | null;
+  uid: number | null;
+  username: string | null;
+  full_name: string | null;
+  email: string | null;
+  primary_group: number | null;
+  groups: number[] | null;
+  home: string | null;
+  shell: string | null;
+  password_disabled: boolean | null;
+  smb: boolean | null;
+  locked: boolean | null;
+}
+
+function createdUser(row: Record<string, unknown>): CreatedUser {
+  return {
+    id: numberOrNull(row['id']),
+    uid: numberOrNull(row['uid']),
+    username: textOrNull(row['username']),
+    full_name: textOrNull(row['full_name']),
+    email: textOrNull(row['email']),
+    primary_group: numberOrNull(recordOrNull(row['group'])?.['id']),
+    groups: idList(row['groups']),
+    home: textOrNull(row['home']),
+    shell: textOrNull(row['shell']),
+    password_disabled: booleanOrNull(row['password_disabled']),
+    smb: booleanOrNull(row['smb']),
+    locked: booleanOrNull(row['locked']),
+  };
+}
+
+/** A membership list as one comparable value, independent of order. */
+function membershipToken(ids: number[] | null): string | null {
+  return ids === null ? null : JSON.stringify([...ids].sort((a, b) => a - b));
+}
+
+const USER_CREATE_GUIDANCE =
+  '`requested` is exactly what was sent, with the groups as the ids they ' +
+  'resolved to when the call was made. `user` is the created account read back ' +
+  'off the response the create itself answered with — never copied from the ' +
+  'request — or null where that response was not a record. Its fields are `id`, ' +
+  "the middleware's record id; `uid`, the POSIX user id; `username`; " +
+  '`full_name`; `email`; `primary_group`, the record id of the group it owns new ' +
+  'files as; `groups`, the record ids of its other groups, null where the list ' +
+  'was absent or any entry of it could not be read; `home`, which is the path ' +
+  'the system actually stored and may differ from the one sent where a home ' +
+  'directory was created; `shell`; `password_disabled`; `smb`; and `locked`. ' +
+  'Each is null where the response stated no value this tool could read. NO ' +
+  'PASSWORD HASH, GENERATED PASSWORD OR SSH KEY IS RETURNED. `confirmed` is ' +
+  'whether `user` holds the username, full name, primary group, other groups, ' +
+  'disabled password and SMB setting that were sent: true is the system reporting ' +
+  'back what was asked for; FALSE IS NOT A SUCCESS — the call did not reject and ' +
+  'at least one of those was stored as something else; and null is a response in ' +
+  'which one could not be read back and none read back as different. A null ' +
+  '`user` means nothing here establishes that an account was created, and is ' +
+  'not evidence that none was — `users_list` shows what the system now holds.';
+
+export const userCreate: MutatingTool = {
+  name: 'user_create',
+  description:
+    'Creates one local user account on this TrueNAS system, with NO PASSWORD, in ' +
+    'groups that already exist. Two-phase: called without a confirmation_token it ' +
+    'returns a plan for user approval; called with one it creates the account. ' +
+    '`username`, `full_name` and `group`, the primary group, are required; ' +
+    '`groups`, `email`, `home` with `home_create`, `shell` and `sshpubkey` are ' +
+    'optional. Groups are named, as `users_list` reports them, and resolved to the ' +
+    'ids the system holds them under; a name no local group has fails the plan, ' +
+    'naming it, and this tool creates no group. THE ACCOUNT IS ALWAYS CREATED WITH ' +
+    'PASSWORD LOGIN DISABLED: `password` and `random_password` are refused, because ' +
+    'a password is a secret and tool arguments and results are recorded verbatim ' +
+    'in the audit trail. With no `sshpubkey` NOBODY CAN LOG IN TO THE ACCOUNT ' +
+    'until a password or key is set outside this catalog, and the plan says so. ' +
+    '`smb` accepts only false and false is always sent, since SMB authenticates ' +
+    'with a password hash. A GROUP THAT HOLDS A PRIVILEGE IS REFUSED, naming the ' +
+    'group and the privilege, as is a group granting sudo commands: membership in ' +
+    'either is administrative authority, and `privileges_list` is where which ' +
+    'groups hold which roles is read. Both checks are made when the plan is made ' +
+    'and again when the account is created, and nothing is created if either ' +
+    'fails then. `sudo_commands`, `uid` and `group_create` are refused. A username ' +
+    'an existing account already has fails the plan, naming it. ' +
+    '`destructiveness` is `reversible`, but NO TOOL IN THIS CATALOG DELETES OR ' +
+    'DISABLES A USER: undoing this means deleting the account outside this ' +
+    'catalog. ' +
+    USER_CREATE_GUIDANCE,
+  resultGuidance: USER_CREATE_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      username: { type: 'string', description: 'The login name of the new account.' },
+      full_name: { type: 'string', description: "The account holder's full name." },
+      group: {
+        type: 'string',
+        description:
+          'The name of the existing local group the account owns new files as, as ' +
+          '`users_list` reports it.',
+      },
+      groups: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Optional; names of further existing local groups the account is a member of.',
+      },
+      email: { type: 'string', description: 'Optional; the account holder\'s email address.' },
+      home: {
+        type: 'string',
+        description: 'Optional; the absolute path recorded as the home directory, or made in with `home_create`.',
+      },
+      home_create: {
+        type: 'boolean',
+        description: 'Optional, and only with `home`; true creates a home directory for the account in that path.',
+      },
+      shell: { type: 'string', description: 'Optional; the login shell, e.g. "/usr/bin/bash".' },
+      smb: {
+        type: 'boolean',
+        enum: [false],
+        description: 'Optional, and only false, which is what is sent either way.',
+      },
+      sshpubkey: {
+        type: 'string',
+        description: 'Optional; an SSH PUBLIC key the account may log in with. Never a private key.',
+      },
+    },
+    required: ['username', 'full_name', 'group'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // Additive: the account is a new row and nothing existing is removed. What it
+  // can do is stated in the plan rather than recorded here.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    return { ...parseUserCreate(rawArgs) };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const parsed = parseUserCreate(rawArgs);
+    const names = allGroupNames(parsed);
+    const [primary, ...auxiliary] = await resolveGroups(ctx, names);
+    await refusePrivilegedGroups(ctx, [primary, ...auxiliary]);
+    const clash = await usernameSentence(ctx, parsed.username);
+    const memberships =
+      auxiliary.length === 0
+        ? 'and in no other group'
+        : `and also in ${plural(auxiliary.length, 'group')} ${auxiliary.map(groupText).join(', ')}`;
+    return [
+      {
+        method: 'group.query',
+        params: [[['name', 'in', names]], {}],
+        description:
+          `Look up ${plural(names.length, 'group')} by name, to send the ids the system holds ` +
+          `them under — ${[primary, ...auxiliary].map(groupText).join(', ')} when this plan was ` +
+          'made. Changes nothing. If any of them is not listed, not local, or grants sudo ' +
+          'commands when this runs, nothing is created.',
+      },
+      {
+        method: 'privilege.query',
+        params: [[], {}],
+        description:
+          'Read every privilege, to refuse the create if a group named above holds one — ' +
+          'none did when this plan was made. Changes nothing. If one does when this runs, ' +
+          'nothing is created.',
+      },
+      {
+        method: 'user.create',
+        params: [userCreateRequest(parsed, primary, auxiliary)],
+        description:
+          `Create local user "${parsed.username}", full name ${JSON.stringify(parsed.full_name)}` +
+          `${parsed.email === undefined ? '' : `, email ${JSON.stringify(parsed.email)}`}, with ` +
+          `primary group ${groupText(primary)} ${memberships}. Password login is disabled ` +
+          '(password_disabled true) and SMB access is off (smb false); no group is created ' +
+          `(group_create false).${loginSentence(parsed.sshpubkey)}${homeSentence(parsed)}` +
+          `${parsed.shell === undefined ? '' : ` Login shell ${JSON.stringify(parsed.shell)}.`}` +
+          `${userDefaultsSentence(parsed)} No group named holds a privilege or grants sudo ` +
+          `commands.${clash}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const parsed = parseUserCreate(rawArgs);
+    // Read again rather than taken from the plan: the confirmation token binds
+    // the arguments and not the plan, and the arguments are NAMES. A group gone,
+    // or privileged since, fails here, before anything is created (#181).
+    const [primary, ...auxiliary] = await resolveGroups(ctx, allGroupNames(parsed));
+    await refusePrivilegedGroups(ctx, [primary, ...auxiliary]);
+    const requested = userCreateRequest(parsed, primary, auxiliary);
+    const created: unknown = await firstValueFrom(
+      ctx.system.client.api.call('user.create', [requested]),
+    );
+    const held = recordOrNull(created);
+    const user = held === null ? null : createdUser(held);
+    return {
+      requested,
+      user,
+      confirmed:
+        user === null
+          ? null
+          : agreement(
+              {
+                username: requested.username,
+                full_name: requested.full_name,
+                primary_group: requested.group,
+                groups: membershipToken(requested.groups),
+                password_disabled: true,
+                smb: false,
+              },
+              {
+                username: user.username,
+                full_name: user.full_name,
+                primary_group: user.primary_group,
+                groups: membershipToken(user.groups),
+                password_disabled: user.password_disabled,
+                smb: user.smb,
+              },
+            ),
     };
   },
 };

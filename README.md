@@ -48,7 +48,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `pool_scrub_task_create`, `pool_scrub_task_update`, `share_set_enabled`,
   `smb_share_create`, `smb_share_update`, `nfs_share_create`,
   `nfs_share_update`, `iscsi_target_create`, `iscsi_target_update`,
-  `nvmeof_subsystem_create`, `nvmeof_subsystem_update` —
+  `nvmeof_subsystem_create`, `nvmeof_subsystem_update`, `user_create` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop` and `container_restart` the seven that
   start a background job,
@@ -173,6 +173,15 @@ confirmation UX, audit sinks) enters through injected interfaces.
   in words where any host reaching a published port may connect, and on a
   system without NVMe-oF both plans fail saying so. Nothing here deletes an
   NVMe-oF subsystem.
+  `user_create` makes one local account with password login disabled and no
+  password, in a primary group and any further groups that already exist,
+  named and resolved to ids. It takes no password, sudo commands, uid or group
+  creation, and SMB is always off for the account, since SMB authenticates with
+  a password hash. A group that holds a privilege — read from
+  `privileges_list`'s source — or that grants sudo commands is refused, at plan
+  time and again when the account is created, because membership in either is
+  administrative authority. Without an SSH key nobody can log in to the new
+  account, which its plan says. Nothing here deletes or disables a user.
   `container_list` and the three container power tools are the first family
   written against the client's `ops` layer rather than `api.call`, because every
   one of these operations changes SHAPE between TrueNAS versions and not just
