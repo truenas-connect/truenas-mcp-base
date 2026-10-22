@@ -130,6 +130,7 @@ export {
   nvmeofSubsystemUpdate,
   fcList,
   usersList,
+  userCreate,
   directoryServicesStatus,
   privilegesList,
   networkInterfaces,

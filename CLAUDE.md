@@ -2832,6 +2832,42 @@ state, so the create plan does not predict it and the result reads it back —
 `subnqn` is refused rather than read as "derive", so omitting the field is the
 only way to ask for that.
 
+### A tool that creates a principal refuses to hand it authority (#187)
+
+`user_create` makes an account, and an account's authority comes from its
+GROUPS: a privilege is granted to a group and never to a user
+(`privileges_list`), and a group can carry sudo commands of its own. So the
+ticket's decision — refuse a privileged group, or allow it and state the roles
+— was taken as **refuse**, and widened to sudo for the same reason:
+`sudo_commands` is refused as an argument, and a group carrying them would hand
+the account the same thing by another route. The refusal names the group and
+the privilege. **That is the whole of the check, and it is narrower than "no
+administrator":** a group whose authority comes from the operating system
+rather than from a privilege or a sudo list — `root`, gid 0, if the system
+lists it as local — is not refused, and nothing here reads `builtin`.
+
+**Every way the answer can fail to be read refuses too** — a failed
+`privilege.query`, a privilege whose `local_groups` is not a list, an entry
+with neither `gid` nor `id` readable, a group's sudo list present and
+unreadable. That is the reverse of #154's supporting reads, and on purpose:
+there an unread fact costs a sentence, here it costs an unnoticed admin. An
+entry matches on `gid` OR `id`, since matching more refuses more. Only
+`local_groups` is read because only local groups are accepted.
+
+**The check is a STEP and runs again in `execute`**, with the group lookup
+(#181). A group that becomes privileged between plan and approval fails the
+create before anything is sent; that is a refusal, not a branch to another
+call, so `execute` stays a function of the arguments.
+
+**The primary group is a required argument**, where the ticket listed only
+`groups`. `group_create` is refused, and the middleware will not create an
+account with neither a `group` nor `group_create` — read from the TrueNAS
+implementation, not this surface. `smb: false` is SENT rather than left out
+for the same kind of reason: the middleware's own default is SMB on, and it
+refuses SMB beside a disabled password (also read from the implementation).
+Neither is left to be discovered as a rejection at `execute`. Neither has been
+checked against a live system.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
