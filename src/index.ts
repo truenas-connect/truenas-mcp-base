@@ -126,6 +126,8 @@ export {
   iscsiTargetCreate,
   iscsiTargetUpdate,
   nvmeofList,
+  nvmeofSubsystemCreate,
+  nvmeofSubsystemUpdate,
   fcList,
   usersList,
   directoryServicesStatus,

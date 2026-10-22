@@ -47,7 +47,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `service_control`, `container_start`, `container_stop`, `container_restart`,
   `pool_scrub_task_create`, `pool_scrub_task_update`, `share_set_enabled`,
   `smb_share_create`, `smb_share_update`, `nfs_share_create`,
-  `nfs_share_update`, `iscsi_target_create`, `iscsi_target_update` —
+  `nfs_share_update`, `iscsi_target_create`, `iscsi_target_update`,
+  `nvmeof_subsystem_create`, `nvmeof_subsystem_update` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop` and `container_restart` the seven that
   start a background job,
@@ -163,6 +164,15 @@ confirmation UX, audit sinks) enters through injected interfaces.
   tag and user only, never its secrets; `auth` is matched on the credential's
   tag rather than its id. Both plans say who may connect — a null initiator is
   any initiator, `NONE` is no CHAP. Nothing here deletes an iSCSI target.
+  `nvmeof_subsystem_create` makes one NVMe-oF subsystem and
+  `nvmeof_subsystem_update` changes an existing one's name, NQN or whether it
+  admits any host. Neither touches a subsystem's tuning fields, and neither adds
+  a namespace, allows a host or publishes on a port, so a created subsystem
+  serves nothing — which its plan says. Where no NQN is given the system derives
+  one, and the result reports it read back rather than predicted. Both plans say
+  in words where any host reaching a published port may connect, and on a
+  system without NVMe-oF both plans fail saying so. Nothing here deletes an
+  NVMe-oF subsystem.
   `container_list` and the three container power tools are the first family
   written against the client's `ops` layer rather than `api.call`, because every
   one of these operations changes SHAPE between TrueNAS versions and not just
