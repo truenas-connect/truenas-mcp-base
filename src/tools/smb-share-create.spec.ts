@@ -110,9 +110,18 @@ describe('smb_share_create', () => {
       reject({ ...args, path: 7 }, /"path" must be an absolute path/);
     });
 
-    it('refuses a path with a "." or ".." segment, which would escape the dataset it reads as inside', () => {
-      for (const path of ['/mnt/tank/../../etc', '/mnt/tank/../other/data', '/mnt/tank/./projects', '/mnt/tank/..']) {
-        reject({ ...args, path }, /"path" may not contain a "." or ".." segment/);
+    it('refuses a path not written plainly, which would be compared to the wrong mountpoint', () => {
+      for (const path of [
+        '/mnt/tank/../../etc',
+        '/mnt/tank/../other/data',
+        '/mnt/tank/./projects',
+        '/mnt/tank/..',
+        '/mnt/tank//projects',
+        '/mnt//tank/projects',
+        '/mnt/tank/projects/',
+        '/',
+      ]) {
+        reject({ ...args, path }, /"path" must be written plainly: no empty, "." or ".." segment and no trailing slash/);
       }
       // A dot inside a name is an ordinary directory name.
       expect(smbShareCreate.normalizeArgs?.({ ...args, path: '/mnt/tank/projects/.hidden..x' })).toMatchObject({
@@ -157,8 +166,11 @@ describe('smb_share_create', () => {
     it("names the dataset whose mountpoint the path is", async () => {
       const [step] = await smbShareCreate.plan(system().ctx, args);
       expect(step.description).toContain('Path "/mnt/tank/projects" is the mountpoint of dataset "tank/projects".');
-      // A trailing slash names the same directory.
-      const [slashed] = await smbShareCreate.plan(system().ctx, { ...args, path: '/mnt/tank/projects/' });
+      // A mountpoint the system reports with a trailing slash names the same directory.
+      const [slashed] = await smbShareCreate.plan(
+        system({ 'pool.dataset.query': [{ id: 'tank/projects', mountpoint: '/mnt/tank/projects/' }] }).ctx,
+        args,
+      );
       expect(slashed.description).toContain('is the mountpoint of dataset "tank/projects"');
     });
 

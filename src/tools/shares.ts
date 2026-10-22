@@ -1292,11 +1292,17 @@ function parseSmbFields(args: Record<string, unknown>): SmbShareFields {
     if (typeof path !== 'string' || !path.startsWith('/')) {
       throw new Error('"path" must be an absolute path, such as "/mnt/tank/projects"');
     }
-    // The dataset check compares the path to mountpoints as a string, so a `.`
-    // or `..` segment would let `/mnt/tank/../../etc` read as inside `tank`.
-    // Refused rather than resolved: what is sent is then what was compared.
-    if (path.split('/').some((segment) => segment === '.' || segment === '..')) {
-      throw new Error('"path" may not contain a "." or ".." segment');
+    // The dataset check compares the path to mountpoints as a string, so only
+    // a path spelled one way per directory may reach it: a `..` segment would
+    // let `/mnt/tank/../../etc` read as inside `tank`, and an empty one would
+    // read `/mnt/tank//projects` as a directory inside `tank` when it is the
+    // mountpoint of `tank/projects`. Refused rather than normalised, so what is
+    // sent is what was compared — and what `confirmed` compares the stored
+    // path against.
+    if (path.slice(1).split('/').some((segment) => segment === '' || segment === '.' || segment === '..')) {
+      throw new Error(
+        '"path" must be written plainly: no empty, "." or ".." segment and no trailing slash',
+      );
     }
     fields.path = path;
   }

@@ -94,7 +94,8 @@ describe('smb_share_update', () => {
     it('validates each setting the way the create does', () => {
       reject({ id: 3, path: 'EXTERNAL' }, /"path" may not be "EXTERNAL"/);
       reject({ id: 3, path: 'relative' }, /"path" must be an absolute path/);
-      reject({ id: 3, path: '/mnt/tank/guests/../../etc' }, /"path" may not contain a "." or ".." segment/);
+      reject({ id: 3, path: '/mnt/tank/guests/../../etc' }, /"path" must be written plainly/);
+      reject({ id: 3, path: '/mnt/tank//public' }, /"path" must be written plainly/);
       reject({ id: 3, name: '' }, /"name" must be a non-empty string/);
       reject({ id: 3, enabled: 'false' }, /"enabled" must be a boolean/);
     });
