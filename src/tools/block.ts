@@ -210,7 +210,8 @@ interface Listen {
 
 /**
  * One portal: the set of addresses the iSCSI service accepts connections on,
- * under the tag a target's portal group names it by.
+ * under its id — which is what a target's portal group names it by — and its
+ * tag.
  *
  * `listen` is null where the portal reported no list at all and an empty list
  * where it reported one naming nothing — a portal listening nowhere, which is a

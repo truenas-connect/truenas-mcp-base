@@ -1523,10 +1523,12 @@ targets and sessions worth reporting.
 carries the subsystems published through it — reduced to `subsystem_id` and
 `subsystem` (#100), never forwarded, and the NQN deliberately not repeated
 because it is reported once on the subsystem itself. iSCSI has the same
-relationship in a target's own `groups[].portal` and **this catalog does not
+relationship in a target's own `groups[].portal` and **`iscsi_list` does not
 read it**: `portal` sits beside `initiator` and `auth`, which are the initiator
 allowlist and the CHAP credential, and reading the group was out of #138's
-scope. So `iscsi_list` reports the portals and states outright that it does not
+scope. (`iscsi_target_create` and `iscsi_target_update` write `groups` and
+report them back since #185; the listing still does not.) So `iscsi_list`
+reports the portals and states outright that it does not
 say which portal serves which target. **A tool reporting two lists a caller
 would expect to be joined has to say it did not join them** — side by side is
 what an implied join looks like from the outside.
