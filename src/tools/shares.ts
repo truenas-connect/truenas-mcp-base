@@ -1292,6 +1292,12 @@ function parseSmbFields(args: Record<string, unknown>): SmbShareFields {
     if (typeof path !== 'string' || !path.startsWith('/')) {
       throw new Error('"path" must be an absolute path, such as "/mnt/tank/projects"');
     }
+    // The dataset check compares the path to mountpoints as a string, so a `.`
+    // or `..` segment would let `/mnt/tank/../../etc` read as inside `tank`.
+    // Refused rather than resolved: what is sent is then what was compared.
+    if (path.split('/').some((segment) => segment === '.' || segment === '..')) {
+      throw new Error('"path" may not contain a "." or ".." segment');
+    }
     fields.path = path;
   }
   const comment = args['comment'];

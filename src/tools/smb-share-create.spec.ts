@@ -110,6 +110,16 @@ describe('smb_share_create', () => {
       reject({ ...args, path: 7 }, /"path" must be an absolute path/);
     });
 
+    it('refuses a path with a "." or ".." segment, which would escape the dataset it reads as inside', () => {
+      for (const path of ['/mnt/tank/../../etc', '/mnt/tank/../other/data', '/mnt/tank/./projects', '/mnt/tank/..']) {
+        reject({ ...args, path }, /"path" may not contain a "." or ".." segment/);
+      }
+      // A dot inside a name is an ordinary directory name.
+      expect(smbShareCreate.normalizeArgs?.({ ...args, path: '/mnt/tank/projects/.hidden..x' })).toMatchObject({
+        path: '/mnt/tank/projects/.hidden..x',
+      });
+    });
+
     it('refuses EXTERNAL, which belongs to a preset this tool does not create', () => {
       reject({ ...args, path: 'EXTERNAL' }, /"path" may not be "EXTERNAL"/);
     });
