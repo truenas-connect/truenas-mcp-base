@@ -70,8 +70,8 @@ const finishedJob = (extra: Record<string, unknown> = {}): Record<string, unknow
 /** The query method each version's mapping dials. */
 const QUERY: Record<OpsVersion, string> = {
   'v25.10.0': 'virt.instance.query',
-  'v26.0.0': 'container.query',
   'v27.0.0': 'container.query',
+  'v28.0.0': 'container.query',
 };
 
 /** A row of the kind the named version's query answers with. */
@@ -105,7 +105,7 @@ describe('container_list', () => {
   });
 
   it('reaches container.query on the newer versions, from the same tool', async () => {
-    const { ctx, query } = opsSystem('v26.0.0', listing('v26.0.0'));
+    const { ctx, query } = opsSystem('v27.0.0', listing('v27.0.0'));
     await containerList.handler(ctx, {});
     expect(query.mock.calls).toEqual([['container.query']]);
   });
@@ -132,9 +132,9 @@ describe('container_list', () => {
   });
 
   it('reports the fields TrueNAS 26 populates, which are the other ones', async () => {
-    const { ctx } = opsSystem('v26.0.0', listing('v26.0.0'));
+    const { ctx } = opsSystem('v27.0.0', listing('v27.0.0'));
     expect(await containerList.handler(ctx, {})).toEqual({
-      api_version: 'v26.0.0',
+      api_version: 'v27.0.0',
       containers: [
         {
           id: '7',
@@ -150,10 +150,10 @@ describe('container_list', () => {
     });
   });
 
-  it('answers the same way on v27 as on v26', async () => {
-    const { ctx } = opsSystem('v27.0.0', listing('v27.0.0'));
+  it('answers the same way on v28 as on v27', async () => {
+    const { ctx } = opsSystem('v28.0.0', listing('v28.0.0'));
     expect(await containerList.handler(ctx, {})).toMatchObject({
-      api_version: 'v27.0.0',
+      api_version: 'v28.0.0',
       containers: [{ id: '7', description: 'the web container', cpu: null }],
     });
   });
@@ -191,9 +191,9 @@ describe('container_list', () => {
   });
 
   it('reports an empty list as itself', async () => {
-    const { ctx } = opsSystem('v26.0.0', { 'container.query': { emits: [[]] } });
+    const { ctx } = opsSystem('v27.0.0', { 'container.query': { emits: [[]] } });
     expect(await containerList.handler(ctx, {})).toEqual({
-      api_version: 'v26.0.0',
+      api_version: 'v27.0.0',
       containers: [],
     });
   });
@@ -202,7 +202,7 @@ describe('container_list', () => {
     // Nothing in this file guards the list shape, because the mapping `map`s the
     // payload before anything here sees it — so a payload that is not a list
     // fails there rather than reaching a tool that could report it as empty.
-    const { ctx } = opsSystem('v26.0.0', { 'container.query': { emits: [{ oops: true }] } });
+    const { ctx } = opsSystem('v27.0.0', { 'container.query': { emits: [{ oops: true }] } });
     await expect(containerList.handler(ctx, {})).rejects.toThrow('is not a function');
   });
 
@@ -210,7 +210,7 @@ describe('container_list', () => {
     // `status` is never null, and this is why: the client's state mapping is
     // total over strings and throws on anything else, so the failure is the
     // read's rather than one row's.
-    const { ctx } = opsSystem('v26.0.0', {
+    const { ctx } = opsSystem('v27.0.0', {
       'container.query': { emits: [[containerRow({ status: { state: 42 } })]] },
     });
     await expect(containerList.handler(ctx, {})).rejects.toThrow('toUpperCase is not a function');
@@ -241,7 +241,7 @@ describe('container_list', () => {
   });
 
   it('nulls a description the newer versions did not report', async () => {
-    const { ctx } = opsSystem('v26.0.0', {
+    const { ctx } = opsSystem('v27.0.0', {
       'container.query': { emits: [[containerRow({ description: undefined })]] },
     });
     expect(await containerList.handler(ctx, {})).toMatchObject({
@@ -250,14 +250,14 @@ describe('container_list', () => {
   });
 
   it('lets a failed read fail the tool, since an unread list is not an empty one', async () => {
-    const { ctx } = opsSystem('v26.0.0', {
+    const { ctx } = opsSystem('v27.0.0', {
       'container.query': { fails: new Error('middleware is down') },
     });
     await expect(containerList.handler(ctx, {})).rejects.toThrow('middleware is down');
   });
 
   it('reports a null api_version where the version could not be read', async () => {
-    const { ctx } = opsSystemWithoutVersion('v26.0.0', listing('v26.0.0'));
+    const { ctx } = opsSystemWithoutVersion('v27.0.0', listing('v27.0.0'));
     expect(await containerList.handler(ctx, {})).toMatchObject({ api_version: null });
   });
 
@@ -343,7 +343,7 @@ describe('the container power tools', () => {
   });
 
   it.each(tools)('fails the plan naming the id where no container has it', async (tool) => {
-    const { ctx } = opsSystem('v26.0.0', { 'container.query': { emits: [[]] } });
+    const { ctx } = opsSystem('v27.0.0', { 'container.query': { emits: [[]] } });
     await expect(tool.plan(ctx, { id: '7', force: false })).rejects.toThrow(
       'No container with id `7` on this system',
     );
@@ -353,7 +353,7 @@ describe('the container power tools', () => {
     // The query takes no filter at all, so the whole list comes back and finding
     // the row is this file's own work — taking the first would name a different
     // container.
-    const { ctx } = opsSystem('v26.0.0', {
+    const { ctx } = opsSystem('v27.0.0', {
       'container.query': { emits: [[containerRow({ id: 9, name: 'other' })]] },
     });
     await expect(tool.plan(ctx, { id: '7', force: false })).rejects.toThrow(
@@ -362,7 +362,7 @@ describe('the container power tools', () => {
   });
 
   it.each(tools)('names the read once and says when it runs again', async (tool) => {
-    const { ctx } = opsSystem('v26.0.0', listing('v26.0.0'));
+    const { ctx } = opsSystem('v27.0.0', listing('v27.0.0'));
     const [read] = await tool.plan(ctx, { id: '7', force: false });
     expect(read.method).toBe('ops.containerQuery');
     expect(read.params).toEqual([]);
@@ -372,7 +372,7 @@ describe('the container power tools', () => {
   });
 
   it.each(tools)('names both middleware methods the read can reach', async (tool) => {
-    const { ctx } = opsSystem('v26.0.0', listing('v26.0.0'));
+    const { ctx } = opsSystem('v27.0.0', listing('v27.0.0'));
     const [read] = await tool.plan(ctx, { id: '7', force: false });
     expect(read.description).toContain('`virt.instance.query` filtered to containers');
     expect(read.description).toContain('`container.query` on 26 and later');
@@ -391,7 +391,7 @@ describe('the container power tools', () => {
   });
 
   it.each(tools)('rejects arguments it cannot read before making any call', async (tool) => {
-    const { ctx, query } = opsSystem('v26.0.0', listing('v26.0.0'));
+    const { ctx, query } = opsSystem('v27.0.0', listing('v27.0.0'));
     await expect(tool.plan(ctx, { id: 7, force: false })).rejects.toThrow('"id" is required');
     expect(query).not.toHaveBeenCalled();
   });
@@ -423,7 +423,7 @@ describe('container_start', () => {
   });
 
   it('says so where the container reported no name', async () => {
-    const { ctx } = opsSystem('v26.0.0', {
+    const { ctx } = opsSystem('v27.0.0', {
       'container.query': { emits: [[containerRow({ name: '' })]] },
     });
     const steps = await containerStart.plan(ctx, { id: '7' });
@@ -464,7 +464,7 @@ describe('container_start', () => {
     // WHAT OPTION 2 BUYS (2/3). That this emits `null` and never a job record is
     // the real mapping's behaviour — `container.start` piped through `map(() =>
     // null)` — and it is the fact the `SYNCHRONOUS` dispatch exists for.
-    const { ctx, call, job } = opsSystem('v26.0.0', {
+    const { ctx, call, job } = opsSystem('v27.0.0', {
       'container.query': [
         { emits: [[containerRow({ status: { state: 'STOPPED' } })]] },
         { emits: [[containerRow()]] },
@@ -679,7 +679,7 @@ describe('container_stop', () => {
   });
 
   it('states that a named timeout is not sent on the newer versions', async () => {
-    const { ctx } = opsSystem('v26.0.0', listing('v26.0.0'));
+    const { ctx } = opsSystem('v27.0.0', listing('v27.0.0'));
     const steps = await containerStop.plan(ctx, { id: '7', force: false, timeout: 10 });
     expect(steps[1].description).toContain('A timeout of 10 was named');
     expect(steps[1].description).toContain('THE API DECLARES NO UNIT FOR THAT NUMBER');
@@ -699,7 +699,7 @@ describe('container_stop', () => {
     // WHAT OPTION 2 BUYS (3/3). Both halves of this are the real mapping's:
     // `force` is written into `force_after_timeout` as well, and `timeout` never
     // reaches the wire. A faked `ops` would have asserted neither.
-    const { ctx, job } = opsSystem('v26.0.0', {
+    const { ctx, job } = opsSystem('v27.0.0', {
       'container.query': { emits: [[containerRow()]] },
       'container.stop': { emits: [finishedJob()] },
     });
@@ -710,7 +710,7 @@ describe('container_stop', () => {
   });
 
   it('reports the job, the two readings and what was asked for', async () => {
-    const { ctx } = opsSystem('v26.0.0', {
+    const { ctx } = opsSystem('v27.0.0', {
       'container.query': [
         { emits: [[containerRow()]] },
         { emits: [[containerRow({ status: { state: 'STOPPED' } })]] },
@@ -719,7 +719,7 @@ describe('container_stop', () => {
     });
     expect(await containerStop.execute(ctx, { id: '7', force: false })).toEqual({
       container_id: '7',
-      api_version: 'v26.0.0',
+      api_version: 'v27.0.0',
       previous_lookup: 'FOUND',
       previous_read_error: null,
       previously_status: 'RUNNING',
@@ -741,7 +741,7 @@ describe('container_stop', () => {
   });
 
   it('does not read a terminal-looking state as a success where nothing ended', async () => {
-    const { ctx } = opsSystem('v26.0.0', {
+    const { ctx } = opsSystem('v27.0.0', {
       'container.query': { emits: [[containerRow()]] },
       'container.stop': { emits: [finishedJob()], completes: false },
     });
@@ -757,7 +757,7 @@ describe('container_stop', () => {
   });
 
   it('reports a job that ended in a state this catalog does not count as success', async () => {
-    const { ctx } = opsSystem('v26.0.0', {
+    const { ctx } = opsSystem('v27.0.0', {
       'container.query': { emits: [[containerRow()]] },
       'container.stop': { emits: [finishedJob({ state: 'FAILED', error: 'container is busy' })] },
     });
@@ -829,7 +829,7 @@ describe('container_restart', () => {
   });
 
   it('states the composition rather than reading as a stop then a start', async () => {
-    const { ctx } = opsSystem('v26.0.0', listing('v26.0.0'));
+    const { ctx } = opsSystem('v27.0.0', listing('v27.0.0'));
     const steps = await containerRestart.plan(ctx, { id: '7', force: false });
     expect(steps[1].method).toBe('ops.containerRestart');
     expect(steps[1].description).toContain(
@@ -854,7 +854,7 @@ describe('container_restart', () => {
   });
 
   it('is a stop job and then a synchronous start on 26', async () => {
-    const { ctx, job, call } = opsSystem('v26.0.0', {
+    const { ctx, job, call } = opsSystem('v27.0.0', {
       'container.query': { emits: [[containerRow()]] },
       'container.stop': { emits: [runningJob(), finishedJob()] },
       'container.start': { emits: [null] },
@@ -876,7 +876,7 @@ describe('container_restart', () => {
   });
 
   it('starts the container even where the stop job ended in a failed state', async () => {
-    const { ctx, call } = opsSystem('v26.0.0', {
+    const { ctx, call } = opsSystem('v27.0.0', {
       'container.query': { emits: [[containerRow()]] },
       'container.stop': { emits: [finishedJob({ state: 'FAILED', error: 'would not stop' })] },
       'container.start': { emits: [null] },
@@ -900,7 +900,7 @@ describe('container_restart', () => {
       'container.start': { emits: [null] },
     };
     vi.useFakeTimers();
-    const restarting = containerRestart.execute(opsSystem('v26.0.0', answers).ctx, {
+    const restarting = containerRestart.execute(opsSystem('v27.0.0', answers).ctx, {
       id: '7',
       force: false,
     });
@@ -912,7 +912,7 @@ describe('container_restart', () => {
       operation_ended: false,
     });
 
-    const stopping = containerStop.execute(opsSystem('v26.0.0', answers).ctx, {
+    const stopping = containerStop.execute(opsSystem('v27.0.0', answers).ctx, {
       id: '7',
       force: false,
     });
@@ -930,7 +930,7 @@ describe('container_restart', () => {
     // completion and `api.call` is a `defer`, so a watch that unsubscribed here
     // would leave `container.start` NEVER SENT — a restart silently degraded
     // into a stop, reported as an operation that was still going.
-    const { ctx, call } = opsSystem('v26.0.0', {
+    const { ctx, call } = opsSystem('v27.0.0', {
       'container.query': { emits: [[containerRow()]] },
       'container.stop': { emits: [runningJob(), finishedJob()], delayMs: 60_000 },
       'container.start': { emits: [null] },
@@ -962,7 +962,7 @@ describe('container_restart', () => {
   });
 
   it('reports a restart that left the container running as changed false', async () => {
-    const { ctx } = opsSystem('v26.0.0', {
+    const { ctx } = opsSystem('v27.0.0', {
       'container.query': { emits: [[containerRow()]] },
       'container.stop': { emits: [finishedJob()] },
       'container.start': { emits: [null] },

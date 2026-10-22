@@ -701,9 +701,13 @@ credential-boundary regression.** The client's own types state why: middleware
 honours `select` on its CURRENT api version, and a client talking to a newer
 appliance over an older one gets the version-adaptation step filling in every
 non-required field's default — so a projected row comes back PADDED. Measured by
-the client's authors on a 27.0.0 appliance: over `/api/v26.0.0`, 25 of 44 query
-methods returned unrequested fields; over `/api/v27.0.0`, none did. The client's
-`MAX_SUPPORTED_VERSION` lags on purpose. An `app.query` row's `config` holds
+the client's authors before 9.0.0 renumbered the versions (#176), so in today's
+names: on a 28.0.0 appliance, over `/api/v27.0.0`, 25 of 44 query methods
+returned unrequested fields; over `/api/v28.0.0`, none did. 9.0.0 still says so
+in its own types — a projected row is `Pick`, meaning "at least". The client's
+`MAX_SUPPORTED_VERSION` is the newest version it has a client for, not the
+newest a system runs, so an appliance ahead of it is spoken to over an older
+path and padded. An `app.query` row's `config` holds
 install-time values that routinely include an API key or a claim token, and
 padding can put it back on the wire. `select` is a bandwidth measure and the
 allowlist is the boundary; the second is not optional because the first is
