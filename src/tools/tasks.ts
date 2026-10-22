@@ -2054,14 +2054,24 @@ interface ScheduleChange {
  * The `schedule` argument as it will be sent, or the error naming what is wrong
  * with it.
  *
- * Built field by field rather than spread, so a key the caller added that is
- * not one of the seven never reaches the middleware — the allowlist rule, run
- * in the other direction.
+ * A key that is not one of the seven is REFUSED rather than dropped, which is
+ * what the schema's `additionalProperties: false` advertises. Dropping it would
+ * be quiet in the worst place: a window misspelled `start`/`stop` would vanish,
+ * and the plan would then say no window was sent — true of the call, and not
+ * what the caller asked for.
  */
 function parseSentSchedule(spec: TaskKind, raw: unknown): SentSchedule {
   const given = recordOrNull(raw);
   if (given === null) {
     throw new Error('"schedule" is required and must be an object');
+  }
+  const unknown = Object.keys(given).filter(
+    (key) => !(CRON_FIELD_NAMES as readonly string[]).includes(key) && key !== 'begin' && key !== 'end',
+  );
+  if (unknown.length > 0) {
+    throw new Error(
+      `"schedule" takes only ${CRON_FIELD_NAMES.join(', ')}, begin and end — not ${unknown.join(', ')}`,
+    );
   }
   const fields: Partial<Record<(typeof CRON_FIELD_NAMES)[number], string>> = {};
   for (const name of CRON_FIELD_NAMES) {
@@ -2169,20 +2179,26 @@ function sameFields(
 /**
  * What the plan says about the schedule the task has now.
  *
- * Three readings and not two. A replication task storing `null` is a task with
- * no schedule of its own, which is a different answer from a schedule this tool
- * could not read — and the one where this call changes what triggers the task,
- * not only when. The UI's reading of that null is stated as the UI's.
+ * Three readings and not two. A task storing `null` is a task with no schedule
+ * of its own, which is a different answer from a schedule this tool could not
+ * read — and the same answer `previously_unscheduled` gives in the result, on
+ * every kind, so the plan and the result cannot disagree about it. Only
+ * replication declares the null, and only there does it mean something more:
+ * that this call changes what triggers the task, not only when. The UI's
+ * reading of that is stated as the UI's.
  */
 function currentScheduleSentence(spec: TaskKind, row: Record<string, unknown>): string {
-  if (spec.kind === 'replication' && isExplicitNull(row['schedule'])) {
-    return (
-      'It has no schedule of its own now (its `schedule` is null), which TrueNAS presents ' +
-      'as running after its periodic snapshot task (unconfirmed from this catalog), so ' +
-      'setting one changes what triggers it and not only when it runs.'
-    );
+  if (!isExplicitNull(row['schedule'])) {
+    return `Its schedule now is ${scheduleWordsOf(spec.cronFieldsListedBy, row)}.`;
   }
-  return `Its schedule now is ${scheduleWordsOf(spec.cronFieldsListedBy, row)}.`;
+  if (spec.kind !== 'replication') {
+    return 'It has no schedule of its own now (its `schedule` is null).';
+  }
+  return (
+    'It has no schedule of its own now (its `schedule` is null), which TrueNAS presents ' +
+    'as running after its periodic snapshot task (unconfirmed from this catalog), so ' +
+    'setting one changes what triggers it and not only when it runs.'
+  );
 }
 
 /**

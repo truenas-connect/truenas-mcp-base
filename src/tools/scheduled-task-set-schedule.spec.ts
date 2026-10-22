@@ -206,15 +206,23 @@ describe('scheduled_task_set_schedule', () => {
     expect(scheduledTaskSetSchedule.description.endsWith(guidance)).toBe(true);
   });
 
-  it('normalizes args: keeps the three, and only the schedule fields it sends', () => {
+  it('normalizes args: keeps the three and drops unknown top-level keys', () => {
     expect(
-      scheduledTaskSetSchedule.normalizeArgs?.({
-        kind: 'cron',
-        id: 3,
-        schedule: { ...AT_THREE, timezone: 'UTC' },
-        extra: 1,
-      }),
+      scheduledTaskSetSchedule.normalizeArgs?.({ kind: 'cron', id: 3, schedule: AT_THREE, extra: 1 }),
     ).toEqual({ kind: 'cron', id: 3, schedule: AT_THREE });
+  });
+
+  it('refuses a schedule key it does not send, rather than dropping it', () => {
+    // The schema advertises `additionalProperties: false`. A window misspelled
+    // `start`/`stop` silently dropped would leave the plan saying no window was
+    // sent — true of the call, and not what the caller asked for.
+    expect(() =>
+      scheduledTaskSetSchedule.normalizeArgs?.({
+        kind: 'periodic_snapshot',
+        id: 3,
+        schedule: { ...AT_THREE, start: '09:00', stop: '17:00' },
+      }),
+    ).toThrow('"schedule" takes only minute, hour, dom, month, dow, begin and end — not start, stop');
   });
 
   describe('argument validation', () => {
@@ -503,9 +511,23 @@ describe('scheduled_task_set_schedule', () => {
       expect(result).toMatchObject({ previously_unscheduled: true, changed: null, confirmed: null });
     });
 
-    it('is a stored null only on that kind: elsewhere it is a schedule not rendered', async () => {
+    it('is a stored null on any kind, and changes the trigger only on replication', async () => {
+      // The plan and `previously_unscheduled` have to read a stored null the
+      // same way on every kind, or they disagree about one task.
+      const nullRow = { ...cloudSync.row, schedule: null };
+      const ctx = system(cloudSync, [nullRow]).ctx;
+      const text = await mutationText(ctx, toThree(cloudSync));
+      expect(text).toContain('It has no schedule of its own now (its `schedule` is null).');
+      expect(text).not.toContain('triggers');
+      expect(await scheduledTaskSetSchedule.execute(ctx, toThree(cloudSync))).toMatchObject({
+        previously_unscheduled: true,
+        changed: true,
+      });
+    });
+
+    it('states a stored schedule it cannot read as not rendered, not as absent', async () => {
       const text = await mutationText(
-        system(cloudSync, [{ ...cloudSync.row, schedule: null }]).ctx,
+        system(cloudSync, [{ ...cloudSync.row, schedule: 'nightly' }]).ctx,
         toThree(cloudSync),
       );
       expect(text).toContain(
