@@ -238,7 +238,12 @@ Where the line falls, since "shared" is not the same as "generic":
 - **What belongs there says the same thing for every family** — a type
   narrowing, the wording of a stated absence, the `Date` bound. Since #166 it is
   also `watchJob`, which is behaviour rather than a narrowing: the test is that
-  every family does the same thing, not that the thing is small.
+  every family does the same thing, not that the thing is small. Since #182 it
+  also holds the switching tools' shared half — `rowWithId`, `switchSentence`,
+  `readStep`, `switchOutcome` and `NONE_REPORTED` — moved out of `tasks.ts`
+  when `share_set_enabled` became the first switching tool in a second family.
+  A tool that moves one row's `enabled` through an `(id, { enabled })` update
+  answering with the row reads through those, and adds only its own naming.
 - **What does not is anything whose meaning is a family's own**: a limit's
   default, a state vocabulary, a field name. `effectiveLimit` is shared and
   takes its two bounds as arguments precisely because the bounding is common

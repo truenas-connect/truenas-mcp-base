@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the seventy-nine sketch tools', () => {
+  it('registers the eighty sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -84,7 +84,19 @@ describe('createDefaultCatalog', () => {
       'container_restart',
       'pool_scrub_task_create',
       'pool_scrub_task_update',
+      'share_set_enabled',
     ]);
+  });
+
+  it('advertises share_set_enabled to a sharing credential, and not to a read-only one', () => {
+    // The first mutating tool at the `Sharing` tier: a sharing-admin credential
+    // reaches it without being given full access.
+    expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).toContain(
+      'share_set_enabled',
+    );
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(
+      'share_set_enabled',
+    );
   });
 
   it('advertises pool_scrub_tasks_list to a read-only credential, and not the two scrub task mutations', () => {

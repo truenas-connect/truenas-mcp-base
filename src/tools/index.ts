@@ -34,7 +34,7 @@ import {
 } from '@/tools/reporting';
 import { securityConfig } from '@/tools/security';
 import { serviceControl, servicesStatus } from '@/tools/services';
-import { shareAccess, sharesList } from '@/tools/shares';
+import { shareAccess, shareSetEnabled, sharesList } from '@/tools/shares';
 import {
   createSnapshot,
   snapshotClone,
@@ -153,6 +153,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(containerRestart);
   catalog.register(poolScrubTaskCreate);
   catalog.register(poolScrubTaskUpdate);
+  catalog.register(shareSetEnabled);
   return catalog;
 }
 
@@ -214,6 +215,7 @@ export {
   serviceControl,
   servicesStatus,
   shareAccess,
+  shareSetEnabled,
   sharesList,
   snapshotClone,
   snapshotSetHold,

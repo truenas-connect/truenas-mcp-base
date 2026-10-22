@@ -1,7 +1,19 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
-import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
-import { errorText, numberOrNull, textOrNull } from '@/tools/common';
+import { MutatingTool, PlanStep, ReadOnlyTool, SystemHandle, ToolContext } from '@/catalog/tool';
+import {
+  booleanOrNull,
+  errorText,
+  NONE_REPORTED,
+  numberOrNull,
+  readStep,
+  recordOrNull,
+  rowWithId,
+  strictTextList,
+  switchOutcome,
+  switchSentence,
+  textOrNull,
+} from '@/tools/common';
 
 /**
  * Shares family: what the system offers to the network, and where from.
@@ -888,6 +900,286 @@ export const shareAccess: ReadOnlyTool = {
       // is exactly the thing it could not see. Dropping this would present a
       // half-searched answer as the unique one.
       failures,
+    };
+  },
+};
+
+/**
+ * `share_set_enabled`: switching one SMB share or one NFS export on or off.
+ *
+ * ONE TOOL WITH A DISCRIMINATOR, NOT TWO, on #121's test: `sharing.smb.update`
+ * and `sharing.nfs.update` are the same call — `(id, { enabled })` in, the
+ * updated share out — so two tools would be two copies of one `plan`/`execute`
+ * pair differing in a method name. The switching half that every such tool
+ * shares (the read step, the per-table id check, the outcome) is `common.ts`'s.
+ *
+ * `protocol` IS REQUIRED, and that is a safety property. SMB shares and NFS
+ * exports are separate tables, so id 3 names a different share under each, and
+ * `shares_list` already says a share is identified by the two together.
+ *
+ * THE PLAN NAMES THE SHARE IN HUMAN TERMS, because an approver who typed the
+ * wrong id can only refuse what they can recognise (#126): an SMB share by its
+ * name and path, an NFS export — which has no name — by its path and aliases.
+ *
+ * DISABLING CUTS OFF WHOEVER IS CONNECTED NOW, and the plan says so. What it
+ * can point at differs by protocol: `nfs_clients` reports who has an NFS export
+ * mounted, and nothing in this catalog lists SMB sessions, which the plan states
+ * rather than letting the silence read as nobody connected.
+ *
+ * `locked` IS REPORTED BESIDE THE OUTCOME, read off the update's response. A
+ * share on a locked encrypted dataset can be switched on and still serve
+ * nothing, and a result saying only `enabled: true` would read as reachable.
+ *
+ * THE ROLE IS `Role.Sharing`, the first mutating tool at that tier. That
+ * TrueNAS's sharing-admin role grants `sharing.smb.update` and
+ * `sharing.nfs.update` is the middleware's role definitions as read from its
+ * source — `SHARING_ADMIN` includes the SMB and NFS write roles those methods
+ * require — and is (unconfirmed) against a live system's `privilege.roles`.
+ */
+
+/** One protocol this tool switches a share of, and everything that differs by it. */
+interface ShareSwitchKind {
+  protocol: Protocol;
+  /** What a share of this protocol is called in a plan or a failure. */
+  noun: string;
+  readMethod: 'sharing.smb.query' | 'sharing.nfs.query';
+  updateMethod: 'sharing.smb.update' | 'sharing.nfs.update';
+  /**
+   * Whatever the query answered with for this id, unread. The filter is
+   * bandwidth and not the control: {@link rowWithId} checks the id on the
+   * response. Written inline per protocol because a filter hoisted to a `const`
+   * widens out of the filter tuple (#153).
+   */
+  read(ctx: ToolContext, id: number): Promise<unknown>;
+  update(ctx: ToolContext, id: number, enabled: boolean): Promise<unknown>;
+  /** The share as the plan names it, beside the id. */
+  identify(row: Record<string, unknown>): string;
+  /** What the plan says about who disabling it cuts off. */
+  connectedClients: string;
+}
+
+/** A label stated as the system spelled it, or as reported absent. */
+function labelled(name: string, value: string | null): string {
+  return `${name} ${value === null ? NONE_REPORTED : `"${value}"`}`;
+}
+
+/**
+ * An NFS export's aliases as the plan states them. An empty list is an export
+ * with none, and is said so; a list that could not be read is stated as absent
+ * rather than as empty, which would be a claim the read did not make.
+ */
+function aliasesPhrase(value: unknown): string {
+  const aliases = strictTextList(value);
+  if (aliases === null) return `aliases ${NONE_REPORTED}`;
+  if (aliases.length === 0) return 'no aliases';
+  return `aliases ${aliases.map((alias) => `"${alias}"`).join(', ')}`;
+}
+
+const SHARE_SWITCH_KINDS: readonly ShareSwitchKind[] = [
+  {
+    protocol: 'SMB',
+    noun: 'SMB share',
+    readMethod: 'sharing.smb.query',
+    updateMethod: 'sharing.smb.update',
+    read: (ctx, id) =>
+      firstValueFrom(ctx.system.client.api.query('sharing.smb.query', [['id', '=', id]])),
+    update: (ctx, id, enabled) =>
+      firstValueFrom(ctx.system.client.api.call('sharing.smb.update', [id, { enabled }])),
+    identify: (row) =>
+      `${labelled('name', textOrNull(row['name']))}, ${labelled('path', textOrNull(row['path']))}`,
+    connectedClients:
+      'Disabling it cuts off every client connected to it now. This catalog has no listing of ' +
+      'SMB sessions, so whether anyone is connected is NOT established here.',
+  },
+  {
+    protocol: 'NFS',
+    noun: 'NFS export',
+    readMethod: 'sharing.nfs.query',
+    updateMethod: 'sharing.nfs.update',
+    read: (ctx, id) =>
+      firstValueFrom(ctx.system.client.api.query('sharing.nfs.query', [['id', '=', id]])),
+    update: (ctx, id, enabled) =>
+      firstValueFrom(ctx.system.client.api.call('sharing.nfs.update', [id, { enabled }])),
+    identify: (row) => `${labelled('path', textOrNull(row['path']))}, ${aliasesPhrase(row['aliases'])}`,
+    connectedClients:
+      'Disabling it cuts off every client that has it mounted now; `nfs_clients` reports the ' +
+      "clients connected to this system's NFS server.",
+  },
+];
+
+/** The caller's arguments, or the error naming what is wrong with them. */
+function parseShareSwitch(args: Record<string, unknown>): {
+  kind: ShareSwitchKind;
+  id: number;
+  enabled: boolean;
+} {
+  // The protocol first, because one read loosely would act on the other
+  // table's id — and it is the argument a caller is most likely to have wrong.
+  const protocol = args['protocol'];
+  const kind = SHARE_SWITCH_KINDS.find((one) => one.protocol === protocol);
+  if (kind === undefined) {
+    throw new Error('"protocol" is required and must be "SMB" or "NFS"');
+  }
+  // Strict on both for `scheduled_task_set_enabled`'s reason: a coerced
+  // `"false"` would switch ON a share the caller asked to switch off, and `3.5`
+  // is no share's primary key.
+  const id = args['id'];
+  if (typeof id !== 'number' || !Number.isInteger(id)) {
+    throw new Error('"id" is required and must be a whole number');
+  }
+  const enabled = args['enabled'];
+  if (typeof enabled !== 'boolean') {
+    throw new Error('"enabled" is required and must be a boolean');
+  }
+  return { kind, id, enabled };
+}
+
+/** What the plan says about the share's dataset being locked, where it is. */
+function lockedSentence(row: Record<string, unknown>): string {
+  return booleanOrNull(row['locked']) === true
+    ? ' THE DATASET IT SHARES IS LOCKED, so it serves nothing until that dataset is unlocked, ' +
+        'whichever way it is switched.'
+    : '';
+}
+
+export const shareSetEnabled: MutatingTool = {
+  name: 'share_set_enabled',
+  description:
+    'Turns one SMB share or one NFS export on this TrueNAS system on or off, ' +
+    'and changes nothing else about it. Two-phase: called without a ' +
+    'confirmation_token it returns a plan for user approval; called with one it ' +
+    'switches the share. THE SHARE IS NAMED BY `protocol` AND `id` TOGETHER, ' +
+    'AND `id` ALONE IS NEVER ENOUGH: SMB shares and NFS exports are separate ' +
+    'tables, so id 3 can name a different share under each. Both come from ' +
+    '`shares_list`, which reports `protocol` and `id` on every share. ' +
+    '`enabled` is the state to move the share to, true or false, and is ' +
+    'required: there is no toggle, because a toggle acts on a state read after ' +
+    'the plan was approved. ONLY THE `enabled` FIELD IS SENT. The path, name, ' +
+    'access rules and every other setting are left exactly as they are; this ' +
+    'tool cannot change them, cannot create or delete a share, and does not ' +
+    'start or stop the SMB or NFS service, which `service_control` does. iSCSI ' +
+    'targets and NVMe-oF subsystems are not shares in this sense and are not ' +
+    'covered. THE PLAN NAMES THE SHARE IN HUMAN TERMS — an SMB share by its ' +
+    'name and path, an NFS export, which has no name, by its path and aliases — ' +
+    'beside the protocol and the id, so that what is approved is recognisable. ' +
+    'DISABLING A SHARE CUTS OFF THE CLIENTS CONNECTED TO IT NOW, and the plan ' +
+    'says so: for NFS, `nfs_clients` reports who is connected; for SMB this ' +
+    'catalog has no session listing, and the plan says that rather than ' +
+    'implying nobody is connected. PLANNING AGAINST AN id NO SHARE OF THAT ' +
+    'PROTOCOL HAS FAILS, naming the id, the protocol searched and `shares_list` ' +
+    '— so an approved plan is always a plan about a share that existed when it ' +
+    'was made, and a failure here is very often the wrong `protocol` rather ' +
+    'than a missing share. SWITCHING A SHARE TO THE STATE IT IS ALREADY IN IS ' +
+    'NOT AN ERROR, and the result says which of the two happened. ' +
+    '`requested_enabled` is what was asked for. `previously_enabled` is the ' +
+    "share's state as read immediately before the call. `resulting_enabled` is " +
+    'the state read back off the response the update itself answered with, ' +
+    'which is the updated share. `changed` is true where those two disagree and ' +
+    'false where they are the same, WHICH IS TWO OUTCOMES AND NOT ONE: either ' +
+    'the share was already in the requested state, or the call did not apply ' +
+    'and left it in the other one. `confirmed` is what tells those two apart, ' +
+    'and `changed` must not be read without it. ALL THREE OF ' +
+    '`previously_enabled`, `resulting_enabled` AND `changed` ARE NULL WHERE THE ' +
+    'STATE BEHIND THEM COULD NOT BE ESTABLISHED, WHICH IS NOT "NOTHING ' +
+    'CHANGED", and `changed` is null whenever either of the other two is. ' +
+    '`confirmed` is whether `resulting_enabled` is what was requested: true is ' +
+    'the system reporting back the state that was asked for, FALSE IS THE ' +
+    'SYSTEM REPORTING THE OTHER STATE AND IS NOT A SUCCESS — the call did not ' +
+    'reject and the share is not in the requested state — and null is a ' +
+    'response that stated no `enabled` this tool could read, under which ' +
+    'nothing here establishes what the share is now set to. `lookup` says what ' +
+    'the read before the call did: `FOUND` is a read that named this share, ' +
+    '`NOT_FOUND` a read that completed and listed no share of that protocol ' +
+    'with that id (it was deleted between the plan and the confirmation), and ' +
+    '`UNREADABLE` a read that failed, with `lookup_error` naming why. IT HAS ' +
+    'THREE VALUES AND `previously_enabled` HAS FOUR CAUSES FOR ITS NULL: the ' +
+    'two above, and ALSO `FOUND` where the share stated no `enabled` this tool ' +
+    'could read as a boolean. So `lookup` alone does not tell them apart, and ' +
+    '`FOUND` beside a null `previously_enabled` is that fourth case. THE UPDATE ' +
+    'IS ATTEMPTED IN ALL THREE CASES, because what runs must be what was ' +
+    'approved. `locked` is read off the same response: true is a share whose ' +
+    'dataset is locked by encryption, WHICH SERVES NOTHING EVEN WHEN ENABLED ' +
+    'until the dataset is unlocked, so `resulting_enabled: true` beside it is ' +
+    'not a share anyone can reach; false is the system reporting it unlocked; ' +
+    'null is a response that stated neither, which is not evidence that it is ' +
+    'unlocked. This tool is the exact inverse of itself with `enabled` flipped.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      protocol: {
+        type: 'string',
+        enum: SHARE_SWITCH_KINDS.map((kind) => kind.protocol),
+        description:
+          'Which protocol the id names a share of, as `shares_list` reports it. ' +
+          'Required: an SMB share and an NFS export can carry the same id.',
+      },
+      id: {
+        type: 'integer',
+        description:
+          "The share's `id` as `shares_list` reports it, on the system being " +
+          'targeted. It is unique only within its protocol.',
+      },
+      enabled: {
+        type: 'boolean',
+        description:
+          'The state to move the share to: true switches it on, false switches ' +
+          'it off. Required — this is not a toggle.',
+      },
+    },
+    required: ['protocol', 'id', 'enabled'],
+  },
+  requiredRole: Role.Sharing,
+  mutating: true,
+  // A boolean on one row, and the inverse call puts it back. The clients it
+  // cuts off reconnect on their own terms once it is back on, which is a cost
+  // the plan states rather than a destruction this tool authors.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const { kind, id, enabled } = parseShareSwitch(rawArgs);
+    return { protocol: kind.protocol, id, enabled };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const { kind, id, enabled } = parseShareSwitch(rawArgs);
+    const row = rowWithId(await kind.read(ctx, id), id);
+    if (row === null) {
+      throw new Error(
+        `No ${kind.noun} with id ${id} on this system — the protocol searched was ` +
+          `"${kind.protocol}", and the ids this tool takes come from \`shares_list\``,
+      );
+    }
+    const current = booleanOrNull(row['enabled']);
+    // Only where the call can actually switch it off: a share already read as
+    // disabled has nobody connected to cut off.
+    const cutsOff = !enabled && current !== false ? ` ${kind.connectedClients}` : '';
+    return [
+      readStep(kind.readMethod, kind.noun, id),
+      {
+        method: kind.updateMethod,
+        params: [id, { enabled }],
+        description:
+          `${enabled ? 'Enable' : 'Disable'} the ${kind.noun} with ${kind.identify(row)} ` +
+          `(id ${id}). Only the enabled flag is sent. ${switchSentence(current, enabled)}` +
+          `${cutsOff}${lockedSentence(row)}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const { kind, id, enabled } = parseShareSwitch(rawArgs);
+    // The response is kept for `locked` as well as handed to the shared
+    // outcome, so the two are read off the one answer rather than two calls.
+    let updated: unknown = null;
+    const outcome = await switchOutcome(
+      () => kind.read(ctx, id),
+      async () => (updated = await kind.update(ctx, id, enabled)),
+      id,
+      enabled,
+    );
+    return {
+      protocol: kind.protocol,
+      id,
+      requested_enabled: enabled,
+      ...outcome,
+      locked: booleanOrNull(recordOrNull(updated)?.['locked']),
     };
   },
 };
