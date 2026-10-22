@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the eighty-two sketch tools', () => {
+  it('registers the eighty-four sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -87,13 +87,15 @@ describe('createDefaultCatalog', () => {
       'share_set_enabled',
       'smb_share_create',
       'smb_share_update',
+      'nfs_share_create',
+      'nfs_share_update',
     ]);
   });
 
-  it('advertises the SMB share mutations to a sharing credential, and not to a read-only one', () => {
+  it('advertises the SMB and NFS share mutations to a sharing credential, and not to a read-only one', () => {
     const sharing = createDefaultCatalog().list(Role.Sharing).map((t) => t.name);
     const readOnly = createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name);
-    for (const name of ['smb_share_create', 'smb_share_update']) {
+    for (const name of ['smb_share_create', 'smb_share_update', 'nfs_share_create', 'nfs_share_update']) {
       expect(sharing).toContain(name);
       expect(readOnly).not.toContain(name);
     }

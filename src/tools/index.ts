@@ -35,6 +35,8 @@ import {
 import { securityConfig } from '@/tools/security';
 import { serviceControl, servicesStatus } from '@/tools/services';
 import {
+  nfsShareCreate,
+  nfsShareUpdate,
   shareAccess,
   shareSetEnabled,
   sharesList,
@@ -162,6 +164,8 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(shareSetEnabled);
   catalog.register(smbShareCreate);
   catalog.register(smbShareUpdate);
+  catalog.register(nfsShareCreate);
+  catalog.register(nfsShareUpdate);
   return catalog;
 }
 
@@ -200,6 +204,8 @@ export {
   networkConfig,
   networkInterfaces,
   nfsClients,
+  nfsShareCreate,
+  nfsShareUpdate,
   nvmeofList,
   poolResilverConfig,
   poolScrubTaskCreate,

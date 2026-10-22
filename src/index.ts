@@ -119,6 +119,8 @@ export {
   shareSetEnabled,
   smbShareCreate,
   smbShareUpdate,
+  nfsShareCreate,
+  nfsShareUpdate,
   nfsClients,
   iscsiList,
   nvmeofList,

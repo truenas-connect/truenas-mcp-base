@@ -46,7 +46,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `snapshot_set_hold`, `vm_start`, `vm_stop`, `vm_restart`, `vm_clone`,
   `service_control`, `container_start`, `container_stop`, `container_restart`,
   `pool_scrub_task_create`, `pool_scrub_task_update`, `share_set_enabled`,
-  `smb_share_create`, `smb_share_update` —
+  `smb_share_create`, `smb_share_update`, `nfs_share_create`,
+  `nfs_share_update` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop` and `container_restart` the seven that
   start a background job,
@@ -144,6 +145,15 @@ confirmation UX, audit sinks) enters through injected interfaces.
   answering to the name in any letter case, and what the system's own pre-check
   said; the update plan states each value beside the one it replaces. Nothing
   here deletes an SMB share.
+  `nfs_share_create` exports a dataset's mountpoint or a directory inside one
+  over NFS, and `nfs_share_update` changes an existing export's path, comment,
+  networks, hosts, read-only, identity mapping, security or enabled setting.
+  Neither touches an export's aliases or snapshot directory, and neither asks
+  for any change to the dataset's ACL. Both plans say in words which clients
+  may mount the export — an empty `networks` beside an empty `hosts` is any
+  client, not nobody — and what identity mapping applies; the create plan also
+  names the dataset and every export already covering the same, a parent or a
+  child path. Nothing here deletes an NFS export.
   `container_list` and the three container power tools are the first family
   written against the client's `ops` layer rather than `api.call`, because every
   one of these operations changes SHAPE between TrueNAS versions and not just
