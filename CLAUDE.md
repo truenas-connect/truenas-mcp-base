@@ -2841,8 +2841,10 @@ ticket's decision — refuse a privileged group, or allow it and state the roles
 — was taken as **refuse**, and widened to sudo for the same reason:
 `sudo_commands` is refused as an argument, and a group carrying them would hand
 the account the same thing by another route. The refusal names the group and
-the privilege, and an approver is never shown a plan that creates an
-administrator.
+the privilege. **That is the whole of the check, and it is narrower than "no
+administrator":** a group whose authority comes from the operating system
+rather than from a privilege or a sudo list — `root`, gid 0, if the system
+lists it as local — is not refused, and nothing here reads `builtin`.
 
 **Every way the answer can fail to be read refuses too** — a failed
 `privilege.query`, a privilege whose `local_groups` is not a list, an entry
