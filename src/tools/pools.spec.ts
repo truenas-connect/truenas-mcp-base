@@ -882,6 +882,9 @@ describe('pool_scrub_tasks_list', () => {
   it('says what an empty list means, and puts no unit on threshold', () => {
     const guidance = poolScrubTasksList.resultGuidance ?? '';
     expect(guidance).toContain('A POOL WITH NO ROW HERE IS NOT SCRUBBED ON A SCHEDULE BY ANY TASK');
+    // A kept row whose pool could not be read may be any pool's, so the
+    // finding above is qualified rather than stated flat.
+    expect(guidance).toContain('UNLESS A ROW WITH A NULL `pool_id` AND `pool_name` IS PRESENT');
     expect(guidance).toContain('NO UNIT IS REPORTED FOR IT AND IT IS NOT TO BE CONVERTED');
     expect(poolScrubTasksList.description.endsWith(guidance)).toBe(true);
   });

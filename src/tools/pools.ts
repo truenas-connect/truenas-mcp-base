@@ -622,7 +622,10 @@ const SCRUB_LIST_GUIDANCE =
   'returns: a read that failed, or that answered with anything other than a list, ' +
   'is an error. A POOL WITH NO ROW HERE IS NOT SCRUBBED ON A SCHEDULE BY ANY TASK, ' +
   'and a pool whose every row is `enabled: false` is not either; that is the ' +
-  'finding, not a gap. A pool can carry more than one task. (unconfirmed) TrueNAS ' +
+  'finding, not a gap — UNLESS A ROW WITH A NULL `pool_id` AND `pool_name` IS ' +
+  'PRESENT, which is a task whose pool could not be read and may be that pool\'s, ' +
+  'so the finding is then not established for any pool. A pool can carry more ' +
+  'than one task. (unconfirmed) TrueNAS ' +
   'uses `threshold` to skip a scheduled scrub when the pool was scrubbed recently ' +
   'enough, so a schedule firing does not by itself mean a scrub ran — ' +
   '`storage_scrub_history` reports when the last one actually did.';
