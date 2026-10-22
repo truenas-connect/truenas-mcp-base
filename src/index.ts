@@ -139,6 +139,7 @@ export {
   alertsDismiss,
   alertsRestore,
   scheduledTaskSetEnabled,
+  scheduledTaskSetSchedule,
   cloudsyncRun,
   automatedTaskSetEnabled,
   snapshotClone,

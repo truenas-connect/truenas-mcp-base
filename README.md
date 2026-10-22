@@ -40,7 +40,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `system_health_report`, `fleet_compliance_report`, `fleet_health_rollup`.
   Mutating family, all of them two-phase plan/confirm and all
   `destructiveness: 'reversible'`: `snapshots_create`, `alerts_dismiss`,
-  `alerts_restore`, `scheduled_task_set_enabled`, `cloudsync_run`,
+  `alerts_restore`, `scheduled_task_set_enabled`,
+  `scheduled_task_set_schedule`, `cloudsync_run`,
   `automated_task_set_enabled`, `snapshot_clone`, `snapshot_task_run`,
   `snapshot_set_hold`, `vm_start`, `vm_stop`, `vm_restart`, `vm_clone`,
   `service_control`, `container_start`, `container_stop`, `container_restart` —
@@ -111,6 +112,13 @@ confirmation UX, audit sinks) enters through injected interfaces.
   on or off between them and neither covers the other's kinds: the first takes
   the six that run on a schedule, and the second the init/shutdown scripts,
   which run at a point in the system's lifecycle instead.
+  `scheduled_task_set_schedule` changes when one of those six runs and sends
+  nothing but the schedule — all five cron fields at once, never a partial
+  one. Two consequences reach past "when": giving a replication task with no
+  schedule of its own one changes what triggers it, and is not undoable from
+  here; and a periodic snapshot task's schedule decides which existing
+  snapshots its retention owns, so its plan reports what the middleware says
+  the change does to them.
   `container_list` and the three container power tools are the first family
   written against the client's `ops` layer rather than `api.call`, because every
   one of these operations changes SHAPE between TrueNAS versions and not just

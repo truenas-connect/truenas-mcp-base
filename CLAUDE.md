@@ -2679,6 +2679,36 @@ Two mechanical facts that make it work, both checked rather than assumed:
 - **It is a separate file from `fake-systems.ts`**, which every tool spec
   imports. Nothing about this seam belongs in a blast radius that wide.
 
+### A whole value is sent, and the half that cannot be is stated (#180)
+
+`scheduled_task_set_schedule` requires all five cron fields and sends them
+together, because whether the middleware merges a partial `schedule` with the
+stored one or fills the gaps with defaults is not readable from here — and
+either way a caller who said "2am" and sent only `hour` gets a schedule nobody
+showed them. **Where an update takes a nested record, send the whole record or
+refuse the call**; a partial one asks the middleware to make up the rest.
+
+The daily window is the half that cannot be closed that way. Four kinds must not
+be sent one, and the two that have one may reasonably leave it alone, so `begin`
+and `end` are optional — and where they are omitted the plan names the stored
+window and says outright that whether it survives is `(unconfirmed)`, rather
+than asserting either answer (#154: the reassuring guess is the costly one).
+
+**A replication schedule is never set back to null.** Null is how a task that
+runs after its periodic snapshot task is stored, so setting it is a change of
+TRIGGER rather than of time — a different operation that would need its own
+plan, under a name that does not say it. The tool requires `schedule`, so giving
+an unscheduled task one is one-way from this catalog, and the description says
+so.
+
+**A supporting read can be the MIDDLEWARE's own account of an effect.**
+`pool.snapshottask.update_will_change_retention_for` is what the webui asks
+before the same edit, and the plan reports what it answered — counted per
+dataset and all-or-nothing under #93, because a shorter count reads as "fewer
+snapshots affected". It is plan-time only and therefore not a step (#119), and
+its failure does not fail the plan (#154). What it does NOT say is what happens
+to each snapshot it names, and the plan says that too.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

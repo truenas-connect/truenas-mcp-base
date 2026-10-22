@@ -57,13 +57,14 @@ import {
   cloudsyncRun,
   cloudsyncTasksList,
   scheduledTaskSetEnabled,
+  scheduledTaskSetSchedule,
   snapshotTaskRun,
   snapshotTasksList,
   tasksRecentRuns,
 } from '@/tools/tasks';
 import { vmClone, vmDevices, vmLogs, vmRestart, vmsList, vmStart, vmStop } from '@/tools/vms';
 
-/** The sketch's catalog: fifty-eight read-only tools plus seventeen mutating tools. */
+/** The sketch's catalog: fifty-eight read-only tools plus eighteen mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -128,6 +129,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(alertsDismiss);
   catalog.register(alertsRestore);
   catalog.register(scheduledTaskSetEnabled);
+  catalog.register(scheduledTaskSetSchedule);
   catalog.register(cloudsyncRun);
   catalog.register(automatedTaskSetEnabled);
   catalog.register(snapshotClone);
@@ -193,6 +195,7 @@ export {
   reportingSpaceTrends,
   reportingUtilisation,
   scheduledTaskSetEnabled,
+  scheduledTaskSetSchedule,
   scrubHistory,
   securityConfig,
   serviceControl,
