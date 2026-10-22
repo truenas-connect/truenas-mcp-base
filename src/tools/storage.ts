@@ -1215,7 +1215,8 @@ export const datasetSetQuota: MutatingTool = {
     '`refquota` are filesystem properties, and a dataset whose type could not be read is ' +
     'planned with a sentence saying the call may be rejected. A LIMIT BELOW THE USAGE IT ' +
     'CAPS FAILS THE PLAN, naming both, because ZFS refuses one (read from the OpenZFS ' +
-    'implementation, not from this API surface). A LIMIT EXACTLY AT THAT USAGE IS ACCEPTED ' +
+    'implementation, not from this API surface); where that usage could not be read, the ' +
+    'plan says instead that the call may be rejected. A LIMIT EXACTLY AT THAT USAGE IS ACCEPTED ' +
     'AND THE PLAN SAYS WRITES WILL THEN FAIL — that is how a quota stops a runaway writer. ' +
     "ZFS also refuses a `quota` below the dataset's reservation, and a `refquota` below its " +
     'refreservation, neither of which this tool reads; the call is then rejected. The ' +
