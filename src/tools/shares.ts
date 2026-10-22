@@ -2320,10 +2320,24 @@ async function overlapSentence(ctx: ToolContext, path: string, exceptId: number 
   );
 }
 
+/**
+ * What both plans say about an export that will be disabled, ahead of who may
+ * mount it: the access and exposure sentences describe who could reach it, and
+ * a disabled export is reached by nobody until it is switched on. Empty where
+ * it will be enabled or the plan does not know, which the default list states.
+ */
+function disabledSentence(enabled: boolean | null): string {
+  return enabled === false
+    ? ' THE EXPORT WILL BE DISABLED, so no client can mount it until it is switched on; who may ' +
+        'mount it is stated below for when it is.'
+    : '';
+}
+
 /** What both plans say about the path becoming mountable. */
-function nfsExposureSentence(path: string): string {
+function nfsExposureSentence(path: string, enabled: boolean | null): string {
+  const when = enabled === false ? ', once the export is switched on,' : '';
   return (
-    ` Path "${path}" becomes mountable over NFS by the clients stated here, and what each request ` +
+    ` Path "${path}" becomes mountable over NFS${when} by the clients stated here, and what each request ` +
     "may then do is decided by the dataset's ACL, after any mapping; `share_access` reports both " +
     "once the export exists. This tool does not ask for any change to the dataset's ACL or " +
     'permissions; whether the system changes them on its own is (unconfirmed).'
@@ -2468,12 +2482,13 @@ export const nfsShareCreate: MutatingTool = {
           `Create an NFS export, ${Object.entries(fields)
             .map(([key, value]) => `${key} ${JSON.stringify(value)}`)
             .join(', ')}. ${pathSentence(fields.path, owner)}${overlap}` +
+          disabledSentence(fields.enabled ?? null) +
           accessSentence(
             fields.networks ?? [],
             fields.hosts ?? [],
             fields.networks === undefined || fields.hosts === undefined,
           ) +
-          `${mappingSentence(map)}${nfsExposureSentence(fields.path)}${defaults}`,
+          `${mappingSentence(map)}${nfsExposureSentence(fields.path, fields.enabled ?? null)}${defaults}`,
       },
     ];
   },
@@ -2575,15 +2590,17 @@ export const nfsShareUpdate: MutatingTool = {
       );
     }
     const share = nfsShareRow(row);
+    const enabled = fields.enabled ?? share.enabled;
     const notes: string[] = [];
     if (fields.path !== undefined && fields.path !== share.path) {
       const owner = await datasetOfPath(ctx, fields.path);
       notes.push(
         ` This stops exporting ${share.path === null ? NONE_REPORTED : `"${share.path}"`}, and ` +
           `clients that mount that path will no longer find it. ${pathSentence(fields.path, owner)}` +
-          `${await overlapSentence(ctx, fields.path, id)}${nfsExposureSentence(fields.path)}`,
+          `${await overlapSentence(ctx, fields.path, id)}${nfsExposureSentence(fields.path, enabled)}`,
       );
     }
+    notes.push(disabledSentence(enabled));
     notes.push(
       accessSentence(fields.networks ?? share.networks, fields.hosts ?? share.hosts, false),
     );

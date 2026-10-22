@@ -147,6 +147,21 @@ describe('nfs_share_update', () => {
       expect(opened.description).not.toContain('A list not sent');
     });
 
+    it('says an export that will be disabled serves no client, whether sent or already so', async () => {
+      const [, sent] = await nfsShareUpdate.plan(system().ctx, { id: 3, enabled: false, networks: [] });
+      const [, stored] = await nfsShareUpdate.plan(system(undefined, [{ ...share, enabled: false }]).ctx, {
+        id: 3,
+        path: '/mnt/tank/k8s',
+      });
+      for (const update of [sent, stored]) {
+        expect(update.description).toContain('THE EXPORT WILL BE DISABLED, so no client can mount it until it is switched on');
+      }
+      expect(stored.description).toContain('becomes mountable over NFS, once the export is switched on, by the clients');
+      const [, on] = await nfsShareUpdate.plan(system().ctx, { id: 3, path: '/mnt/tank/k8s' });
+      expect(on.description).not.toContain('WILL BE DISABLED');
+      expect(on.description).toContain('becomes mountable over NFS by the clients stated here');
+    });
+
     it('says who may mount it is not established where a list it keeps could not be read', async () => {
       const [, update] = await nfsShareUpdate.plan(system(undefined, [{ ...share, hosts: [7] }]).ctx, { id: 3, networks: [] });
       expect(update.description).toContain('Which clients may mount it is not established');

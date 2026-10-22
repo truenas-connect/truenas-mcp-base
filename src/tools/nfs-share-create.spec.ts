@@ -186,6 +186,22 @@ describe('nfs_share_create', () => {
       );
     });
 
+    it('says a disabled export serves no client, and who may mount it once switched on', async () => {
+      const [off] = await nfsShareCreate.plan(system().ctx, { path: '/mnt/tank/vms', enabled: false });
+      expect(off.description).toContain(
+        'THE EXPORT WILL BE DISABLED, so no client can mount it until it is switched on; who may mount it ' +
+          'is stated below for when it is. NEITHER `networks` NOR `hosts` RESTRICTS IT',
+      );
+      expect(off.description).toContain(
+        'Path "/mnt/tank/vms" becomes mountable over NFS, once the export is switched on, by the clients stated here',
+      );
+      for (const enabled of [true, undefined]) {
+        const [on] = await nfsShareCreate.plan(system().ctx, { path: '/mnt/tank/vms', enabled });
+        expect(on.description).not.toContain('WILL BE DISABLED');
+        expect(on.description).toContain('becomes mountable over NFS by the clients stated here');
+      }
+    });
+
     it('names the clients a restricted export admits, an empty list as none', async () => {
       const [step] = await nfsShareCreate.plan(system().ctx, args);
       expect(step.description).toContain('Only clients these name may mount it — networks "10.0.0.0/24"; hosts none.');
