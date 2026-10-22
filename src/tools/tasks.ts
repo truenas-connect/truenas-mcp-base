@@ -62,6 +62,12 @@ import {
  * reports and names it in that listing's terms. What is not `cloudsync_run` is
  * the plan, because a periodic snapshot run also applies retention, and the
  * retention it applies is the system's rather than the task's.
+ *
+ * `scheduled_task_set_schedule` is the fifth, and it is
+ * `scheduled_task_set_enabled` with `schedule` in place of `enabled`: the same
+ * six kinds through the same update methods, which is why it is written beside
+ * that tool and reads through its kind table — and why its plan can state the
+ * current and the requested schedule in the words the listings above use.
  */
 
 /**
@@ -1396,6 +1402,18 @@ interface TaskKind {
   /** The updated entity the update method answered with, unread. */
   update(ctx: ToolContext, id: number, enabled: boolean): Promise<unknown>;
   /**
+   * Whether this kind's schedule declares a daily window — `begin` and `end` —
+   * as well as the five cron fields. True for the two whose schedule type does,
+   * `PoolSnapshotTaskCron` and `ReplicationTimeCronModel`; the other four
+   * declare the five fields alone.
+   */
+  hasWindow: boolean;
+  /**
+   * The same update method as {@link TaskKind.update}, sending `schedule`
+   * instead of `enabled`. The updated entity it answered with, unread.
+   */
+  setSchedule(ctx: ToolContext, id: number, schedule: SentSchedule): Promise<unknown>;
+  /**
    * The task in the terms its listing tool names it, label by label. A null
    * value is stated as absent rather than dropped, as `describeAlert`'s three
    * fields are: a plan that silently omits the description reads as a task
@@ -1445,14 +1463,33 @@ const NONE_REPORTED = '(the system reported none)';
  * exactly the drift `common.ts` was cut to stop, one level down.
  */
 function schedulePhrase(cronFieldsListedBy: string | null, row: Record<string, unknown>): string {
+  return `schedule ${scheduleWordsOf(cronFieldsListedBy, row)}`;
+}
+
+/**
+ * {@link schedulePhrase} without the word "schedule" in front, for a sentence
+ * that has already named it — `scheduled_task_set_schedule`'s plan states the
+ * current schedule beside the requested one, and the two have to be in the
+ * same words.
+ */
+function scheduleWordsOf(cronFieldsListedBy: string | null, row: Record<string, unknown>): string {
   const schedule = taskSchedule(row);
   const words = schedule === null ? null : describeSchedule(schedule);
-  if (words !== null) return `schedule ${words}`;
-  return `schedule ${
-    cronFieldsListedBy === null
-      ? '(not rendered in words here, and no tool in this catalog reports its cron fields)'
-      : `(not rendered in words here; \`${cronFieldsListedBy}\` reports its cron fields)`
-  }`;
+  if (words !== null) return words;
+  return cronFieldsListedBy === null
+    ? '(not rendered in words here, and no tool in this catalog reports its cron fields)'
+    : `(not rendered in words here; \`${cronFieldsListedBy}\` reports its cron fields)`;
+}
+
+/**
+ * The task's labels as its listing tool names them, each with its value or the
+ * stated absence of one — everything {@link describeTask} says except the
+ * schedule.
+ */
+function taskLabels(spec: TaskKind, row: Record<string, unknown>): string[] {
+  return spec
+    .label(row)
+    .map(([name, value]) => `${name} ${value === null ? NONE_REPORTED : `"${value}"`}`);
 }
 
 /**
@@ -1464,9 +1501,7 @@ function schedulePhrase(cronFieldsListedBy: string | null, row: Record<string, u
  * or path, and its schedule in the same English `tasks.ts` already produces.
  */
 function describeTask(spec: TaskKind, row: Record<string, unknown>, id: number): string {
-  const labelled = spec
-    .label(row)
-    .map(([name, value]) => `${name} ${value === null ? NONE_REPORTED : `"${value}"`}`);
+  const labelled = taskLabels(spec, row);
   return `the ${spec.noun} with ${[...labelled, schedulePhrase(spec.cronFieldsListedBy, row)].join(', ')} (id ${id})`;
 }
 
@@ -1493,6 +1528,9 @@ const TASK_KINDS: TaskKind[] = [
       firstValueFrom(ctx.system.client.api.query('pool.snapshottask.query', [['id', '=', id]])),
     update: (ctx, id, enabled) =>
       firstValueFrom(ctx.system.client.api.call('pool.snapshottask.update', [id, { enabled }])),
+    hasWindow: true,
+    setSchedule: (ctx, id, schedule) =>
+      firstValueFrom(ctx.system.client.api.call('pool.snapshottask.update', [id, { schedule }])),
     label: (row) => [['dataset', textOrNull(row['dataset'])]],
   },
   {
@@ -1506,6 +1544,9 @@ const TASK_KINDS: TaskKind[] = [
       firstValueFrom(ctx.system.client.api.query('cloudsync.query', [['id', '=', id]])),
     update: (ctx, id, enabled) =>
       firstValueFrom(ctx.system.client.api.call('cloudsync.update', [id, { enabled }])),
+    hasWindow: false,
+    setSchedule: (ctx, id, schedule) =>
+      firstValueFrom(ctx.system.client.api.call('cloudsync.update', [id, { schedule }])),
     label: (row) => [
       ['description', textOrNull(row['description'])],
       ['path', textOrNull(row['path'])],
@@ -1525,6 +1566,9 @@ const TASK_KINDS: TaskKind[] = [
       firstValueFrom(ctx.system.client.api.query('replication.query', [['id', '=', id]])),
     update: (ctx, id, enabled) =>
       firstValueFrom(ctx.system.client.api.call('replication.update', [id, { enabled }])),
+    hasWindow: true,
+    setSchedule: (ctx, id, schedule) =>
+      firstValueFrom(ctx.system.client.api.call('replication.update', [id, { schedule }])),
     label: (row) => [
       ['name', textOrNull(row['name'])],
       ['target dataset', textOrNull(row['target_dataset'])],
@@ -1541,6 +1585,9 @@ const TASK_KINDS: TaskKind[] = [
       firstValueFrom(ctx.system.client.api.query('cronjob.query', [['id', '=', id]])),
     update: (ctx, id, enabled) =>
       firstValueFrom(ctx.system.client.api.call('cronjob.update', [id, { enabled }])),
+    hasWindow: false,
+    setSchedule: (ctx, id, schedule) =>
+      firstValueFrom(ctx.system.client.api.call('cronjob.update', [id, { schedule }])),
     // The `command` is deliberately NOT among these. `automated_tasks_list`
     // passes it through and says so, but it is whatever the operator typed and
     // can hold a password someone inlined — and a plan is shown to a person and
@@ -1562,6 +1609,9 @@ const TASK_KINDS: TaskKind[] = [
       firstValueFrom(ctx.system.client.api.query('rsynctask.query', [['id', '=', id]])),
     update: (ctx, id, enabled) =>
       firstValueFrom(ctx.system.client.api.call('rsynctask.update', [id, { enabled }])),
+    hasWindow: false,
+    setSchedule: (ctx, id, schedule) =>
+      firstValueFrom(ctx.system.client.api.call('rsynctask.update', [id, { schedule }])),
     // `desc` is the middleware's own name for this one, reported under the
     // sibling label so that one word means one thing across the six kinds — as
     // `mapRsyncTask` already does for the listing.
@@ -1582,6 +1632,9 @@ const TASK_KINDS: TaskKind[] = [
       firstValueFrom(ctx.system.client.api.query('cloud_backup.query', [['id', '=', id]])),
     update: (ctx, id, enabled) =>
       firstValueFrom(ctx.system.client.api.call('cloud_backup.update', [id, { enabled }])),
+    hasWindow: false,
+    setSchedule: (ctx, id, schedule) =>
+      firstValueFrom(ctx.system.client.api.call('cloud_backup.update', [id, { schedule }])),
     label: (row) => [
       ['description', textOrNull(row['description'])],
       ['path', textOrNull(row['path'])],
@@ -1621,15 +1674,37 @@ interface TaskSwitch {
  * is not in `common.ts` because the argument names are this family's own.
  */
 function parseIdAndEnabled(args: Record<string, unknown>): { id: number; enabled: boolean } {
-  const id = args['id'];
-  if (typeof id !== 'number' || !Number.isInteger(id)) {
-    throw new Error('"id" is required and must be a whole number');
-  }
+  const id = parseTaskId(args);
   const enabled = args['enabled'];
   if (typeof enabled !== 'boolean') {
     throw new Error('"enabled" is required and must be a boolean');
   }
   return { id, enabled };
+}
+
+/** The `id` every tool here acting on one task takes; see {@link parseIdAndEnabled}. */
+function parseTaskId(args: Record<string, unknown>): number {
+  const id = args['id'];
+  if (typeof id !== 'number' || !Number.isInteger(id)) {
+    throw new Error('"id" is required and must be a whole number');
+  }
+  return id;
+}
+
+/**
+ * The `kind` argument resolved to its definition, or the error naming the
+ * kinds there are. Shared by both tools that take one, so the refusal is worded
+ * once.
+ */
+function parseTaskKind(args: Record<string, unknown>): TaskKind {
+  const kind = args['kind'];
+  const spec = typeof kind === 'string' ? TASK_KINDS_BY_NAME.get(kind) : undefined;
+  if (spec === undefined) {
+    throw new Error(
+      `"kind" is required and must be one of ${TASK_KINDS.map((one) => one.kind).join(', ')}`,
+    );
+  }
+  return spec;
 }
 
 /**
@@ -1640,14 +1715,21 @@ function parseIdAndEnabled(args: Record<string, unknown>): { id: number; enabled
  * that the message a caller gets names the argument that is most likely wrong.
  */
 function parseSwitch(args: Record<string, unknown>): TaskSwitch {
-  const kind = args['kind'];
-  const spec = typeof kind === 'string' ? TASK_KINDS_BY_NAME.get(kind) : undefined;
-  if (spec === undefined) {
-    throw new Error(
-      `"kind" is required and must be one of ${TASK_KINDS.map((one) => one.kind).join(', ')}`,
-    );
-  }
-  return { spec, ...parseIdAndEnabled(args) };
+  return { spec: parseTaskKind(args), ...parseIdAndEnabled(args) };
+}
+
+/**
+ * The failure for an id no task of the kind asked for has. It names the kind
+ * as well as the id, because a caller that reached here with the right id and
+ * the wrong kind sees an id it can check and a kind it cannot.
+ * `assertDatasetExists` fails the same way for `snapshots_create`, with one
+ * fewer thing to get wrong.
+ */
+function noSuchTask(spec: TaskKind, id: number): Error {
+  return new Error(
+    `No ${spec.noun} with id ${id} on this system — the kind searched was ` +
+      `"${spec.kind}", whose ids come from \`${spec.listedBy}\``,
+  );
 }
 
 /**
@@ -1795,7 +1877,8 @@ export const scheduledTaskSetEnabled: MutatingTool = {
     'state read after the plan was approved. ONLY THE `enabled` FIELD IS SENT. ' +
     'The schedule, paths, retention, credentials and every other setting are ' +
     'left exactly as they are, and this tool cannot change them, cannot create ' +
-    'or delete a task, and cannot run one now. THE PLAN NAMES THE TASK IN ' +
+    'or delete a task, and cannot run one now; `scheduled_task_set_schedule` ' +
+    'is the tool that changes when a task runs. THE PLAN NAMES THE TASK IN ' +
     'HUMAN TERMS — its description or name, its dataset or path, and its ' +
     'schedule in words — beside the kind and the id, so that what is approved ' +
     'is recognisable. A cron job\'s `command` is NOT repeated in the plan, ' +
@@ -1877,16 +1960,7 @@ export const scheduledTaskSetEnabled: MutatingTool = {
   async plan(ctx, rawArgs): Promise<PlanStep[]> {
     const { spec, id, enabled } = parseSwitch(rawArgs);
     const row = rowWithId(await spec.read(ctx, id), id);
-    // The failure names the kind as well as the id, because a caller that
-    // reached here with the right id and the wrong kind sees an id it can
-    // check and a kind it cannot. `assertDatasetExists` fails the same way for
-    // `snapshots_create`, with one fewer thing to get wrong.
-    if (row === null) {
-      throw new Error(
-        `No ${spec.noun} with id ${id} on this system — the kind searched was ` +
-          `"${spec.kind}", whose ids come from \`${spec.listedBy}\``,
-      );
-    }
+    if (row === null) throw noSuchTask(spec, id);
     return [
       readStep(spec.readMethod, spec.noun, id),
       {
@@ -1910,6 +1984,522 @@ export const scheduledTaskSetEnabled: MutatingTool = {
         id,
         enabled,
       )),
+    };
+  },
+};
+
+/**
+ * `scheduled_task_set_schedule`: changing WHEN one scheduled task runs, across
+ * the same six kinds `scheduled_task_set_enabled` switches, through the same six
+ * update methods. It is that tool's `plan`/`execute` pair with `schedule` in
+ * place of `enabled`, so it reads through the same {@link TaskKind} table, the
+ * same read step and the same per-table id check — a seventh copy of any of
+ * those would be the drift `common.ts` was cut to stop.
+ *
+ * ALL FIVE CRON FIELDS ARE REQUIRED, AND NOTHING PARTIAL IS SENT. Whether the
+ * middleware merges a partial `schedule` with the stored one or fills what is
+ * missing with defaults is not established from here; either way a caller who
+ * said "2am" and sent only `hour` would get a schedule nobody showed them. The
+ * daily window is the one place that cannot be closed the same way, because
+ * the four kinds without one must not be sent one and the two with one may
+ * reasonably leave it alone — so where it is not sent, the plan says the
+ * stored window may not survive, rather than asserting either outcome.
+ *
+ * A REPLICATION TASK'S `schedule` IS NULLABLE, and null is how a task that runs
+ * after its periodic snapshot task is stored (that reading is the TrueNAS UI's,
+ * unconfirmed here). Setting a schedule on one changes what triggers it, not
+ * only when, and the plan says so. This tool does NOT set it back to null:
+ * `schedule` is required, so the change is one-way from here, and the
+ * description says so rather than offering a null that would be a different
+ * operation under the same name.
+ *
+ * A PERIODIC SNAPSHOT TASK'S SCHEDULE DECIDES WHICH SNAPSHOTS ITS RETENTION
+ * OWNS. So the plan asks the middleware's own
+ * `pool.snapshottask.update_will_change_retention_for`, which the webui calls
+ * before the same edit, and states what it answered — #154's "the effect
+ * reaches past the task named" — or that it could not be read. That read is
+ * PLAN-TIME ONLY and is not a step: `execute` does not make it, and a step is a
+ * call `execute` makes (#119), exactly as `snapshot_task_run`'s plan-time read
+ * of the task is not one.
+ */
+
+/** A schedule as this tool sends it: the five cron fields, and a window only where one was asked for. */
+interface SentSchedule {
+  minute: string;
+  hour: string;
+  dom: string;
+  month: string;
+  dow: string;
+  begin?: string;
+  end?: string;
+}
+
+/** The five cron fields, in the order a crontab line and the plan both state them. */
+const CRON_FIELD_NAMES = ['minute', 'hour', 'dom', 'month', 'dow'] as const;
+
+/** `HH:MM` on a 24-hour clock, which is the form both window-bearing kinds store. */
+const CLOCK_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** The kinds a window is accepted for, named in the refusal so a caller can see where it is. */
+const WINDOW_KINDS = TASK_KINDS.filter((spec) => spec.hasWindow).map((spec) => spec.kind);
+
+/** The caller's arguments with the kind resolved, as {@link TaskSwitch} is for the switching tool. */
+interface ScheduleChange {
+  spec: TaskKind;
+  id: number;
+  schedule: SentSchedule;
+}
+
+/**
+ * The `schedule` argument as it will be sent, or the error naming what is wrong
+ * with it.
+ *
+ * A key that is not one of the seven is REFUSED rather than dropped, which is
+ * what the schema's `additionalProperties: false` advertises. Dropping it would
+ * be quiet in the worst place: a window misspelled `start`/`stop` would vanish,
+ * and the plan would then say no window was sent — true of the call, and not
+ * what the caller asked for.
+ */
+function parseSentSchedule(spec: TaskKind, raw: unknown): SentSchedule {
+  const given = recordOrNull(raw);
+  if (given === null) {
+    throw new Error('"schedule" is required and must be an object');
+  }
+  const unknown = Object.keys(given).filter(
+    (key) => !(CRON_FIELD_NAMES as readonly string[]).includes(key) && key !== 'begin' && key !== 'end',
+  );
+  if (unknown.length > 0) {
+    throw new Error(
+      `"schedule" takes only ${CRON_FIELD_NAMES.join(', ')}, begin and end — not ${unknown.join(', ')}`,
+    );
+  }
+  const fields: Partial<Record<(typeof CRON_FIELD_NAMES)[number], string>> = {};
+  for (const name of CRON_FIELD_NAMES) {
+    const value = given[name];
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error(
+        `"schedule.${name}" is required and must be a non-empty string — all five cron ` +
+          'fields are sent together, because what the system does with a missing one is ' +
+          'not established',
+      );
+    }
+    fields[name] = value;
+  }
+  const schedule = fields as SentSchedule;
+  const { begin, end } = given;
+  if (begin === undefined && end === undefined) return schedule;
+  if (!spec.hasWindow) {
+    throw new Error(
+      `"schedule.begin" and "schedule.end" are accepted only for ${WINDOW_KINDS.join(' and ')} ` +
+        `— a ${spec.noun} has no daily window`,
+    );
+  }
+  if (
+    typeof begin !== 'string' ||
+    typeof end !== 'string' ||
+    !CLOCK_TIME.test(begin) ||
+    !CLOCK_TIME.test(end)
+  ) {
+    throw new Error('"schedule.begin" and "schedule.end" must be given together, each as HH:MM');
+  }
+  return { ...schedule, begin, end };
+}
+
+/** The caller's arguments, or the error naming what is wrong with them — kind first, as {@link parseSwitch}. */
+function parseScheduleChange(args: Record<string, unknown>): ScheduleChange {
+  const spec = parseTaskKind(args);
+  const id = parseTaskId(args);
+  return { spec, id, schedule: parseSentSchedule(spec, args['schedule']) };
+}
+
+/**
+ * A schedule in words through {@link describeSchedule}, or — where it will not
+ * render — its fields exactly as given. Only ever called on what the CALLER
+ * sent, which is theirs to see verbatim; a stored schedule that will not render
+ * goes through {@link scheduleWordsOf} and its pointer instead.
+ */
+function requestedWords(schedule: SentSchedule): string {
+  const words = describeSchedule({ ...schedule, begin: schedule.begin ?? null, end: schedule.end ?? null });
+  if (words !== null) return words;
+  const fields = [
+    ...CRON_FIELD_NAMES.map((name) => `${name} "${schedule[name]}"`),
+    ...(schedule.begin === undefined ? [] : [`begin "${schedule.begin}"`, `end "${schedule.end}"`]),
+  ];
+  return `(not rendered in words here) ${fields.join(', ')}`;
+}
+
+/**
+ * What a schedule read off a row or a response holds, for the result: the five
+ * cron fields, plus the window for the two kinds that have one — never two
+ * null fields on a kind that cannot carry them. Null where there is no record
+ * to read, which covers both an explicit null and a value that is not a
+ * schedule; {@link isExplicitNull} is what separates the two.
+ */
+function readSchedule(spec: TaskKind, value: unknown): Record<string, string | null> | null {
+  const cron = cronOf(value);
+  if (cron === null) return null;
+  return spec.hasWindow
+    ? { ...cronFieldsOf(cron), begin: fieldOrNull(cron.begin), end: fieldOrNull(cron.end) }
+    : { ...cronFieldsOf(cron) };
+}
+
+/**
+ * The fields this call sends, keyed as {@link readSchedule} keys a reading —
+ * the window only where one was sent. What `confirmed` and the plan's
+ * already-there sentence compare against, so neither compares a window nobody
+ * asked for.
+ */
+function sentFields(schedule: SentSchedule): Record<string, string> {
+  const { minute, hour, dom, month, dow, begin, end } = schedule;
+  return begin === undefined || end === undefined
+    ? { minute, hour, dom, month, dow }
+    : { minute, hour, dom, month, dow, begin, end };
+}
+
+/** Whether a schedule was stored as null outright, as a replication task's may be. */
+function isExplicitNull(value: unknown): boolean {
+  return value === null;
+}
+
+/**
+ * Whether two readings agree on every key the first names, or null where any
+ * of those keys is null in either — a field one reading could not read is not
+ * a field the two have been shown to agree or disagree on.
+ */
+function sameFields(
+  wanted: Record<string, string | null>,
+  got: Record<string, string | null>,
+): boolean | null {
+  for (const key of Object.keys(wanted)) {
+    if (wanted[key] === null || (got[key] ?? null) === null) return null;
+  }
+  return Object.keys(wanted).every((key) => wanted[key] === got[key]);
+}
+
+/**
+ * What the plan says about the schedule the task has now.
+ *
+ * Three readings and not two. A task storing `null` is a task with no schedule
+ * of its own, which is a different answer from a schedule this tool could not
+ * read — and the same answer `previously_unscheduled` gives in the result, on
+ * every kind, so the plan and the result cannot disagree about it. Only
+ * replication declares the null, and only there does it mean something more:
+ * that this call changes what triggers the task, not only when. The UI's
+ * reading of that is stated as the UI's.
+ */
+function currentScheduleSentence(spec: TaskKind, row: Record<string, unknown>): string {
+  if (!isExplicitNull(row['schedule'])) {
+    return `Its schedule now is ${scheduleWordsOf(spec.cronFieldsListedBy, row)}.`;
+  }
+  if (spec.kind !== 'replication') {
+    return 'It has no schedule of its own now (its `schedule` is null).';
+  }
+  return (
+    'It has no schedule of its own now (its `schedule` is null), which TrueNAS presents ' +
+    'as running after its periodic snapshot task (unconfirmed from this catalog), so ' +
+    'setting one changes what triggers it and not only when it runs.'
+  );
+}
+
+/**
+ * What the plan says about the daily window where the caller sent none, for the
+ * two kinds that have one; empty for the other four, and wherever one was sent.
+ *
+ * Neither outcome is asserted. The stored window surviving an update that does
+ * not name it, and its being reset to the whole day, are both plausible readings
+ * of a middleware this repository cannot read — and the reassuring one is the
+ * costly one to be wrong with (#154).
+ */
+function windowSentence(spec: TaskKind, schedule: SentSchedule, row: Record<string, unknown>): string {
+  if (!spec.hasWindow || schedule.begin !== undefined) return '';
+  const stored = readSchedule(spec, row['schedule']);
+  const begin = stored?.['begin'] ?? null;
+  const end = stored?.['end'] ?? null;
+  const now =
+    begin === null || end === null
+      ? 'its current window could not be read'
+      : begin === FULL_DAY_BEGIN && end === FULL_DAY_END
+        ? 'its current window is the whole day'
+        : `its current window is between ${begin} and ${end}`;
+  return (
+    ` No daily window is sent, and ${now}; whether the system keeps the stored window or ` +
+    'resets it to the whole day is (unconfirmed) — pass `begin` and `end` to set it.'
+  );
+}
+
+/** At most this many datasets are named in the retention sentence; the counts cover all of them. */
+const RETENTION_DATASETS_NAMED = 5;
+
+/**
+ * What `pool.snapshottask.update_will_change_retention_for` answered, as one
+ * sentence of the plan.
+ *
+ * ALL OR NOTHING, by #93's direction: a dataset or a snapshot dropped from the
+ * count moves the sentence towards "this changes nothing about retention",
+ * which is the reassuring claim. So an answer any part of which is not a record
+ * of name lists is stated as unreadable rather than counted around.
+ *
+ * A failure does not fail the plan. The read describes the change, and a plan
+ * refused because it could not be described is an approval the person never got
+ * to give for a change the middleware would have made (#154's reading of an
+ * unreadable `enabled`).
+ */
+async function retentionChangeSentence(
+  ctx: ToolContext,
+  id: number,
+  schedule: SentSchedule,
+): Promise<string> {
+  const method = '`pool.snapshottask.update_will_change_retention_for`';
+  let answer: unknown;
+  try {
+    answer = await firstValueFrom(
+      ctx.system.client.api.call('pool.snapshottask.update_will_change_retention_for', [
+        id,
+        { schedule },
+      ]),
+    );
+  } catch (reason) {
+    return (
+      ` Whether this changes the retention of existing snapshots could not be established: ` +
+      `${method} failed (${errorText(reason)}).`
+    );
+  }
+  const held = recordOrNull(answer);
+  const entries = Object.entries(held ?? {});
+  const readable = entries.every(
+    ([, names]) => Array.isArray(names) && names.every((name) => typeof name === 'string'),
+  );
+  if (held === null || !readable) {
+    return (
+      ' Whether this changes the retention of existing snapshots could not be established: ' +
+      `${method} answered with something this tool could not read.`
+    );
+  }
+  const counts = entries.map(([dataset, names]): [string, number] => [
+    dataset,
+    (names as string[]).length,
+  ]);
+  const total = counts.reduce((sum, [, count]) => sum + count, 0);
+  if (total === 0) {
+    return ` TrueNAS reports, through ${method}, that this changes the retention of no existing snapshot.`;
+  }
+  const named = counts
+    .slice(0, RETENTION_DATASETS_NAMED)
+    .map(([dataset, count]) => `${dataset} (${count})`);
+  const more = counts.length - named.length;
+  return (
+    ` TrueNAS reports, through ${method}, that this changes the retention of ${total} existing ` +
+    `snapshot${total === 1 ? '' : 's'} on ${counts.length} dataset${counts.length === 1 ? '' : 's'} — ` +
+    `${named.join(', ')}${more > 0 ? ` and ${more} more` : ''}. It names them and not what happens to ` +
+    'each: a snapshot this task stops owning may be kept indefinitely or taken over by another ' +
+    "task's retention (unconfirmed). `snapshots_list` with `report_scheduled_removal` reports " +
+    'their removal dates as they stand.'
+  );
+}
+
+/**
+ * The account of the result, delivered with it (#131) and also still carried in
+ * the description, as every tool's is until an adapter renders the field.
+ */
+const SCHEDULE_SET_GUIDANCE =
+  '`requested_schedule` is exactly what was sent. `previous_schedule` is the ' +
+  "task's schedule as read immediately before the call, and `resulting_schedule` " +
+  'is the schedule read back off the response the update itself answered with, ' +
+  'which is the updated task — never copied from the request. Each carries ' +
+  '`minute`, `hour`, `dom`, `month` and `dow`, and for `periodic_snapshot` and ' +
+  '`replication` also `begin` and `end`; a field the system reported no value for ' +
+  'is null. `previous_schedule` is null where the read before the call failed or ' +
+  'listed no such task, where the task stored no schedule at all, and where it ' +
+  'stored something this tool could not read as a schedule — ' +
+  '`previously_unscheduled` is true for the stored null, which is how a ' +
+  'replication task that runs after its periodic snapshot task is stored; false ' +
+  'where the read found the task and it stored anything else, including the ' +
+  'unreadable case, so `FOUND` beside a null `previous_schedule` and a false ' +
+  '`previously_unscheduled` is a schedule this tool could not read; and null ' +
+  'where the read failed or found no such task. `lookup` says what that read did: ' +
+  '`FOUND`, `NOT_FOUND` (deleted between the plan and the confirmation), or ' +
+  '`UNREADABLE` with `lookup_error` naming why; THE UPDATE IS ATTEMPTED IN ALL ' +
+  'THREE CASES, because what runs must be what was approved. `changed` is true ' +
+  'where the two readings differ in any field and false where every field is the ' +
+  'same, WHICH IS TWO OUTCOMES AND NOT ONE: the task already had that schedule, or ' +
+  'the call did not apply. `confirmed` is what tells those apart, and `changed` ' +
+  'must not be read without it. `changed` is null wherever either reading is ' +
+  'missing or has a null in a field it compares — except that a task that stored ' +
+  'no schedule and now reports a full one is `changed: true`. `confirmed` is ' +
+  'whether `resulting_schedule` holds every field that was sent, compared as the ' +
+  'strings were spelled: true is the system reporting back the schedule asked ' +
+  'for; FALSE IS NOT A SUCCESS — the call did not reject and the stored schedule ' +
+  'is not the one requested, which includes a response storing no schedule at ' +
+  'all; null is a response that stated no schedule this tool could read in full, ' +
+  'under which nothing here establishes what the task is now set to. A system ' +
+  'that stored an equivalent schedule under a different spelling (`00` for `0`, ' +
+  'say) reads as `false`; whether any does is not established. Where no window was ' +
+  'sent, `confirmed` does not compare one, and `resulting_schedule` is where to ' +
+  'see which window the task ended up with.';
+
+export const scheduledTaskSetSchedule: MutatingTool = {
+  name: 'scheduled_task_set_schedule',
+  description:
+    'Changes when one scheduled task on this TrueNAS system runs, and changes ' +
+    'nothing else about it. Two-phase: called without a confirmation_token it ' +
+    'returns a plan for user approval; called with one it sends the new ' +
+    'schedule. THE TASK IS NAMED BY `kind` AND `id` TOGETHER, AND `id` ALONE IS ' +
+    'NEVER ENOUGH: task ids are per-table integers, so id 3 exists under every ' +
+    'kind and means a different task under each. `kind` is one of ' +
+    '`periodic_snapshot`, whose ids come from `snapshot_tasks_list`; ' +
+    '`cloud_sync`, from `cloudsync_tasks_list`; `replication`, from ' +
+    '`replication_status`; `cron`, from the `cron_jobs` section of ' +
+    '`automated_tasks_list`; `rsync`, from its `rsync_tasks` section; and ' +
+    '`cloud_backup`, from its `cloud_backup_tasks` section — the same six ' +
+    '`scheduled_task_set_enabled` takes. Init/shutdown scripts have no schedule ' +
+    'and are not covered. `schedule` takes ALL FIVE cron fields — `minute`, ' +
+    '`hour`, `dom`, `month`, `dow`, as cron spells them — and refuses a schedule ' +
+    'missing any of them, because what the system would do with a missing field ' +
+    'is not established. `begin` and `end`, the daily window as `HH:MM`, are ' +
+    'accepted for `periodic_snapshot` and `replication` only, and only together. ' +
+    'WHERE A WINDOW-BEARING TASK IS SENT NO WINDOW, WHETHER IT KEEPS ITS STORED ONE ' +
+    'OR IS RESET TO THE WHOLE DAY IS NOT ESTABLISHED, and the plan says so. ONLY ' +
+    'THE `schedule` FIELD IS SENT: enabled state, retention, naming schema, ' +
+    'transfer mode, paths, a cron job\'s command and every other setting are left ' +
+    'as they are; this tool cannot create or delete a task, cannot run one now, ' +
+    'and cannot switch one on or off — `scheduled_task_set_enabled` does that. THE ' +
+    'PLAN STATES THE CURRENT SCHEDULE AND THE REQUESTED ONE IN THE SAME WORDS the ' +
+    'listing tools use, beside the task in human terms. A cron job\'s `command` is ' +
+    'NOT repeated in the plan or the result. A REPLICATION TASK WITH NO SCHEDULE OF ' +
+    'ITS OWN runs after its periodic snapshot task (the TrueNAS UI\'s reading, ' +
+    'unconfirmed here), so giving it one changes what triggers it, and the plan ' +
+    'says so; THIS TOOL CANNOT SET A SCHEDULE BACK TO NONE, so that change is not ' +
+    'undoable from this catalog. FOR A PERIODIC SNAPSHOT TASK THE SCHEDULE DECIDES ' +
+    'WHICH EXISTING SNAPSHOTS ITS RETENTION OWNS, so the plan reports what ' +
+    '`pool.snapshottask.update_will_change_retention_for` says the change does to ' +
+    'them — snapshots this task stops owning can be kept indefinitely or fall to ' +
+    "another task's retention — or that it could not be read, which does not fail " +
+    'the plan. PLANNING AGAINST AN id NO TASK OF THAT KIND HAS FAILS, naming the ' +
+    'id, the kind searched and the tool that lists it, and a failure here is very ' +
+    'often the wrong `kind` rather than a missing task. SENDING A TASK THE SCHEDULE ' +
+    'IT ALREADY HAS IS NOT AN ERROR. ' +
+    SCHEDULE_SET_GUIDANCE,
+  resultGuidance: SCHEDULE_SET_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      kind: {
+        type: 'string',
+        enum: TASK_KINDS.map((spec) => spec.kind),
+        description:
+          'Which kind of scheduled task the id names. `periodic_snapshot` ' +
+          '(ids from `snapshot_tasks_list`), `cloud_sync` (from ' +
+          '`cloudsync_tasks_list`), `replication` (from `replication_status`), ' +
+          '`cron`, `rsync` and `cloud_backup` (from the matching sections of ' +
+          '`automated_tasks_list`). Required: an id alone names a different ' +
+          'task under every kind.',
+      },
+      id: {
+        type: 'integer',
+        description:
+          "The task's `id` as its listing tool reports it, on the system being " +
+          'targeted. It is unique only within its own kind.',
+      },
+      schedule: {
+        type: 'object',
+        description:
+          'The new schedule. All five cron fields are required and are sent ' +
+          'together. `begin` and `end` are the daily window, accepted for ' +
+          '`periodic_snapshot` and `replication` only, and only as a pair.',
+        properties: {
+          minute: { type: 'string', description: 'Cron minute field, e.g. "0" or "*/15".' },
+          hour: { type: 'string', description: 'Cron hour field, e.g. "2" or "*".' },
+          dom: { type: 'string', description: 'Cron day-of-month field, e.g. "*" or "1".' },
+          month: { type: 'string', description: 'Cron month field, e.g. "*".' },
+          dow: {
+            type: 'string',
+            description: 'Cron day-of-week field, e.g. "*" or "mon"; 0 and 7 are both Sunday.',
+          },
+          begin: {
+            type: 'string',
+            description: 'Start of the daily window, HH:MM. periodic_snapshot and replication only.',
+          },
+          end: {
+            type: 'string',
+            description: 'End of the daily window, HH:MM. periodic_snapshot and replication only.',
+          },
+        },
+        required: [...CRON_FIELD_NAMES],
+        additionalProperties: false,
+      },
+    },
+    required: ['kind', 'id', 'schedule'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const { spec, id, schedule } = parseScheduleChange(rawArgs);
+    return { kind: spec.kind, id, schedule };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const { spec, id, schedule } = parseScheduleChange(rawArgs);
+    const row = rowWithId(await spec.read(ctx, id), id);
+    if (row === null) throw noSuchTask(spec, id);
+    const stored = readSchedule(spec, row['schedule']);
+    const already =
+      stored !== null && sameFields(sentFields(schedule), stored) === true
+        ? ' Every field this sends already has that value on the task, which is not an error.'
+        : '';
+    const retention =
+      spec.kind === 'periodic_snapshot' ? await retentionChangeSentence(ctx, id, schedule) : '';
+    return [
+      readStep(spec.readMethod, spec.noun, id),
+      {
+        method: spec.updateMethod,
+        params: [id, { schedule }],
+        description:
+          `Change when the ${spec.noun} with ${taskLabels(spec, row).join(', ')} (id ${id}) ` +
+          `runs, to ${requestedWords(schedule)}. Only the schedule is sent. ` +
+          `${currentScheduleSentence(spec, row)}${already}${windowSentence(spec, schedule, row)}` +
+          retention,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const { spec, id, schedule } = parseScheduleChange(rawArgs);
+    let row: Record<string, unknown> | null = null;
+    let lookupError: string | null = null;
+    try {
+      row = rowWithId(await spec.read(ctx, id), id);
+    } catch (reason) {
+      lookupError = errorText(reason);
+    }
+    // Issued whatever the read said, for `switchOutcome`'s reason: skipping it
+    // would be `execute` branching on state the confirmation token cannot bind.
+    const updated = recordOrNull(await spec.setSchedule(ctx, id, schedule));
+    const previous = row === null ? null : readSchedule(spec, row['schedule']);
+    const previouslyUnscheduled = row === null ? null : isExplicitNull(row['schedule']);
+    const resulting = updated === null ? null : readSchedule(spec, updated['schedule']);
+    const resultingUnscheduled = updated !== null && isExplicitNull(updated['schedule']);
+    let changed: boolean | null = null;
+    if (previous !== null && resulting !== null) {
+      const same = sameFields(previous, resulting);
+      changed = same === null ? null : !same;
+    } else if (previouslyUnscheduled === true && resulting !== null) {
+      changed = Object.values(resulting).every((value) => value !== null) ? true : null;
+    }
+    const confirmed = resultingUnscheduled
+      ? false
+      : resulting === null
+        ? null
+        : sameFields(sentFields(schedule), resulting);
+    return {
+      kind: spec.kind,
+      id,
+      requested_schedule: schedule,
+      lookup: lookupError !== null ? 'UNREADABLE' : row === null ? 'NOT_FOUND' : 'FOUND',
+      lookup_error: lookupError,
+      previous_schedule: previous,
+      previously_unscheduled: previouslyUnscheduled,
+      resulting_schedule: resulting,
+      changed,
+      confirmed,
     };
   },
 };
