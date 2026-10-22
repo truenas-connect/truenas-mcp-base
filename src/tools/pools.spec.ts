@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { Role } from '@/interfaces';
 import { failingSystem, fakeSystem } from '@/testing/fake-systems';
-import { poolResilverConfig, poolTopology, scrubHistory } from '@/tools/index';
+import {
+  poolResilverConfig,
+  poolScrubTaskCreate,
+  poolScrubTasksList,
+  poolScrubTaskUpdate,
+  poolTopology,
+  scrubHistory,
+} from '@/tools/index';
 
 /** The shape `storage_pool_topology` returns, for the assertions below. */
 interface MappedDevice {
@@ -774,5 +781,535 @@ describe('pool_resilver_config', () => {
     );
     expect(poolResilverConfig.description).toContain('system_general_config');
     expect(poolResilverConfig.description).toContain('SPANS MIDNIGHT');
+  });
+});
+
+/** Sunday at midnight, as the TrueNAS UI's default scrub schedule is spelled. */
+const SUNDAYS = { minute: '0', hour: '0', dom: '*', month: '*', dow: '0' };
+
+/** The first of the month at 03:00, for a change. */
+const MONTHLY = { minute: '0', hour: '3', dom: '1', month: '*', dow: '*' };
+
+/** A `pool.scrub.query` row, carrying a field the allowlist must drop. */
+const scrubRow = (over: Record<string, unknown> = {}) => ({
+  id: 1,
+  pool: 7,
+  pool_name: 'tank',
+  threshold: 35,
+  description: 'weekly',
+  schedule: SUNDAYS,
+  enabled: true,
+  internal_note: 'not reported',
+  ...over,
+});
+
+/** The row as the tools report it. */
+const reported = (over: Record<string, unknown> = {}) => ({
+  id: 1,
+  pool_id: 7,
+  pool_name: 'tank',
+  enabled: true,
+  threshold: 35,
+  description: 'weekly',
+  schedule: SUNDAYS,
+  ...over,
+});
+
+const TANK = { id: 7, name: 'tank', status: 'ONLINE' };
+
+describe('pool_scrub_tasks_list', () => {
+  const list = (rows: unknown) => poolScrubTasksList.handler(fakeSystem({ ['pool.scrub.query']: rows }).ctx, {});
+
+  it('is a read-only tool', () => {
+    expect(poolScrubTasksList).toMatchObject({ mutating: false, requiredRole: Role.ReadOnly });
+  });
+
+  it('reports every task through named fields only', async () => {
+    expect(await list([scrubRow(), scrubRow({ id: 2, pool: 8, pool_name: 'fast', enabled: false })])).toEqual([
+      reported(),
+      reported({ id: 2, pool_id: 8, pool_name: 'fast', enabled: false }),
+    ]);
+  });
+
+  it('reports the five cron fields alone, whatever else the schedule carries', async () => {
+    const [row] = (await list([scrubRow({ schedule: { ...SUNDAYS, begin: '00:00' } })])) as {
+      schedule: Record<string, unknown>;
+    }[];
+    expect(row.schedule).toEqual(SUNDAYS);
+  });
+
+  it('yields [] for a system with no scrub tasks', async () => {
+    expect(await list([])).toEqual([]);
+  });
+
+  it('fails, rather than answering [], when the read is not a list', async () => {
+    for (const bad of [undefined, null, scrubRow(), 3]) {
+      await expect(list(bad)).rejects.toThrow('pool.scrub.query did not answer with a list of scrub tasks');
+    }
+  });
+
+  it('lets a failed read fail the tool, naming what the system said', async () => {
+    const { ctx } = failingSystem({}, { ['pool.scrub.query']: new Error('connection reset') });
+    await expect(poolScrubTasksList.handler(ctx, {})).rejects.toThrow('connection reset');
+  });
+
+  it('keeps a row it cannot read as a row of nulls rather than dropping it', async () => {
+    expect(await list(['garbage'])).toEqual([
+      {
+        id: null,
+        pool_id: null,
+        pool_name: null,
+        enabled: null,
+        threshold: null,
+        description: null,
+        schedule: null,
+      },
+    ]);
+  });
+
+  it('reads an unreadable field as null and never as a default', async () => {
+    const [row] = (await list([
+      scrubRow({ enabled: 'yes', threshold: '35', description: '', schedule: { minute: 0 } }),
+    ])) as Record<string, unknown>[];
+    expect(row).toMatchObject({
+      enabled: null,
+      threshold: null,
+      description: null,
+      schedule: { minute: null, hour: null, dom: null, month: null, dow: null },
+    });
+  });
+
+  it('says what an empty list means, and puts no unit on threshold', () => {
+    const guidance = poolScrubTasksList.resultGuidance ?? '';
+    expect(guidance).toContain('A POOL WITH NO ROW HERE IS NOT SCRUBBED ON A SCHEDULE BY ANY TASK');
+    expect(guidance).toContain('NO UNIT IS REPORTED FOR IT AND IT IS NOT TO BE CONVERTED');
+    expect(poolScrubTasksList.description.endsWith(guidance)).toBe(true);
+  });
+});
+
+/**
+ * Units a description of `threshold` must not carry, because none is reported.
+ * Singular `hour` and `minute` are cron field names and `second` is an
+ * ordinal, so only their plurals count.
+ */
+const UNITS = /\b(days?|hours|minutes|seconds|weeks?)\b/i;
+
+describe('no description puts a unit on threshold', () => {
+  it.each([poolScrubTasksList, poolScrubTaskCreate, poolScrubTaskUpdate].map((tool) => [tool.name, tool]))(
+    '%s',
+    (_name, tool) => {
+      expect(tool.description).not.toMatch(UNITS);
+      // The argument's own text; the cron fields beside it say "day-of-week".
+      const schema = tool.inputSchema as { properties: { threshold?: unknown } };
+      expect(JSON.stringify(schema.properties.threshold ?? '')).not.toMatch(UNITS);
+    },
+  );
+});
+
+describe('pool_scrub_task_create', () => {
+  const args = (over: Record<string, unknown> = {}) => ({
+    pool: 'tank',
+    schedule: MONTHLY,
+    threshold: 20,
+    enabled: true,
+    ...over,
+  });
+  const created = scrubRow({ id: 4, schedule: MONTHLY, threshold: 20, description: undefined });
+  const system = (
+    responses: Record<string, unknown> = {},
+  ) =>
+    fakeSystem({
+      ['pool.query']: [TANK],
+      ['pool.scrub.query']: [],
+      ['pool.scrub.create']: created,
+      ...responses,
+    });
+
+  it('is a reversible mutating tool needing the full role', () => {
+    expect(poolScrubTaskCreate).toMatchObject({
+      mutating: true,
+      destructiveness: 'reversible',
+      requiredRole: Role.Full,
+    });
+  });
+
+  it('refuses a schedule missing any of the five cron fields in its schema', () => {
+    const schema = poolScrubTaskCreate.inputSchema as {
+      properties: { schedule: { required: string[]; additionalProperties: boolean } };
+      required: string[];
+    };
+    expect(schema.properties.schedule.required).toEqual(['minute', 'hour', 'dom', 'month', 'dow']);
+    expect(schema.properties.schedule.additionalProperties).toBe(false);
+    expect(schema.required).toEqual(['pool', 'schedule', 'threshold', 'enabled']);
+  });
+
+  it('normalizes args: keeps what is sent, and drops an omitted description and unknown keys', () => {
+    expect(poolScrubTaskCreate.normalizeArgs?.({ ...args(), extra: 1 })).toEqual(args());
+    expect(poolScrubTaskCreate.normalizeArgs?.(args({ description: 'monthly' }))).toEqual(
+      args({ description: 'monthly' }),
+    );
+  });
+
+  describe('argument validation', () => {
+    const plan = (over: Record<string, unknown>) => poolScrubTaskCreate.plan(system().ctx, args(over));
+
+    it('requires a pool name', async () => {
+      for (const bad of [undefined, '', 7]) {
+        await expect(plan({ pool: bad })).rejects.toThrow('"pool" is required and must be a pool name');
+      }
+    });
+
+    it('requires a schedule, a threshold and an enabled flag', async () => {
+      for (const field of ['schedule', 'threshold', 'enabled']) {
+        await expect(plan({ [field]: undefined })).rejects.toThrow(`"${field}" is required`);
+      }
+    });
+
+    it('refuses a schedule missing any of the five cron fields, naming it', async () => {
+      for (const field of ['minute', 'hour', 'dom', 'month', 'dow']) {
+        for (const bad of [undefined, '', 0]) {
+          await expect(plan({ schedule: { ...MONTHLY, [field]: bad } })).rejects.toThrow(
+            new RegExp(`"schedule\\.${field}" is required`),
+          );
+        }
+      }
+    });
+
+    it('refuses a schedule key it does not send, rather than dropping it', async () => {
+      await expect(plan({ schedule: { ...MONTHLY, begin: '00:00' } })).rejects.toThrow(
+        '"schedule" takes only minute, hour, dom, month, dow — not begin',
+      );
+      await expect(plan({ schedule: '0 3 1 * *' })).rejects.toThrow('"schedule" must be an object');
+    });
+
+    it('is strict about threshold, enabled and description', async () => {
+      await expect(plan({ threshold: '20' })).rejects.toThrow('"threshold" must be a number');
+      await expect(plan({ threshold: Number.NaN })).rejects.toThrow('"threshold" must be a number');
+      await expect(plan({ enabled: 'false' })).rejects.toThrow('"enabled" must be a boolean');
+      await expect(plan({ description: '' })).rejects.toThrow('"description" must be a non-empty string');
+    });
+  });
+
+  it('fails at plan time for a name pool.query does not list, naming it', async () => {
+    await expect(
+      poolScrubTaskCreate.plan(system({ ['pool.query']: [] }).ctx, args({ pool: 'boot-pool' })),
+    ).rejects.toThrow('No pool named "boot-pool" on this system');
+  });
+
+  it('matches the pool by name on the response, never by taking the first row', async () => {
+    // A filter the middleware dropped comes back as every pool.
+    const { ctx } = system({ ['pool.query']: [{ id: 3, name: 'other' }, TANK] });
+    const [, create] = await poolScrubTaskCreate.plan(ctx, args());
+    expect(create.params).toEqual([{ pool: 7, schedule: MONTHLY, threshold: 20, enabled: true }]);
+    await expect(
+      poolScrubTaskCreate.plan(system({ ['pool.query']: [{ id: 3, name: 'other' }] }).ctx, args()),
+    ).rejects.toThrow('No pool named "tank"');
+  });
+
+  it('refuses a pool listed with no id it can read', async () => {
+    await expect(
+      poolScrubTaskCreate.plan(system({ ['pool.query']: [{ name: 'tank', id: '7' }] }).ctx, args()),
+    ).rejects.toThrow('Pool "tank" is listed with no id this tool could read');
+  });
+
+  it('plans the lookup it makes and then the create, with the pool id', async () => {
+    const { ctx, query } = system();
+    const steps = await poolScrubTaskCreate.plan(ctx, args({ description: 'monthly' }));
+    expect(steps.map((step) => step.method)).toEqual(['pool.query', 'pool.scrub.create']);
+    expect(steps[0].params).toEqual([[['name', '=', 'tank']], {}]);
+    expect(query).toHaveBeenCalledWith('pool.query', [['name', '=', 'tank']]);
+    expect(steps[0].description).toContain('7 when this plan was made. Changes nothing.');
+    expect(steps[1].params).toEqual([
+      { pool: 7, schedule: MONTHLY, threshold: 20, enabled: true, description: 'monthly' },
+    ]);
+    expect(steps[1].description).toContain(
+      'Create a scrub task for pool "tank" with schedule minute "0", hour "3", dom "1", ' +
+        'month "*", dow "*", threshold 20, enabled, description "monthly".',
+    );
+  });
+
+  it('says in the plan that the pool has no scrub task, when it has none', async () => {
+    const [, create] = await poolScrubTaskCreate.plan(system().ctx, args());
+    expect(create.description).toContain('Pool "tank" has no scrub task now.');
+  });
+
+  it('names every scrub task the pool already has, and none on other pools', async () => {
+    const { ctx, query } = system({
+      // The whole table, as a dropped filter would answer.
+      ['pool.scrub.query']: [scrubRow(), scrubRow({ id: 2, enabled: false }), scrubRow({ id: 3, pool: 8 })],
+    });
+    const [, create] = await poolScrubTaskCreate.plan(ctx, args());
+    expect(query).toHaveBeenCalledWith('pool.scrub.query', [['pool', '=', 7]]);
+    expect(create.description).toContain('Pool "tank" already has 2 scrub tasks: ');
+    expect(create.description).toContain(
+      'id 1 (enabled, schedule minute "0", hour "0", dom "*", month "*", dow "0", threshold 35, description "weekly")',
+    );
+    expect(create.description).toContain('id 2 (disabled,');
+    expect(create.description).not.toContain('id 3');
+    expect(create.description).toContain('This adds another beside them, which is allowed');
+  });
+
+  it('counts a task whose pool it cannot read, rather than leaving it out', async () => {
+    const [, create] = await poolScrubTaskCreate.plan(
+      system({ ['pool.scrub.query']: [scrubRow({ pool: 'tank' })] }).ctx,
+      args(),
+    );
+    expect(create.description).toContain(
+      'has no scrub task now. 1 further task named no pool this tool could read, and may be on this one.',
+    );
+  });
+
+  it('does not fail the plan when the existing tasks cannot be read, and says so', async () => {
+    const failed = failingSystem(
+      { ['pool.query']: [TANK] },
+      { ['pool.scrub.query']: new Error('timed out') },
+    );
+    const [, create] = await poolScrubTaskCreate.plan(failed.ctx, args());
+    expect(create.description).toContain(
+      'Whether pool "tank" already has a scrub task could not be read (pool.scrub.query failed: timed out)',
+    );
+    const [, notList] = await poolScrubTaskCreate.plan(system({ ['pool.scrub.query']: 'nope' }).ctx, args());
+    expect(notList.description).toContain('pool.scrub.query did not answer with a list');
+  });
+
+  it('looks the pool up again and creates the task the plan named', async () => {
+    const { ctx, query, call } = system();
+    expect(await poolScrubTaskCreate.execute(ctx, args())).toEqual({
+      pool: 'tank',
+      pool_id: 7,
+      requested: { schedule: MONTHLY, threshold: 20, enabled: true },
+      task: reported({ id: 4, schedule: MONTHLY, threshold: 20, description: null }),
+      confirmed: true,
+    });
+    expect(query).toHaveBeenCalledWith('pool.query', [['name', '=', 'tank']]);
+    expect(call).toHaveBeenCalledWith('pool.scrub.create', [
+      { pool: 7, schedule: MONTHLY, threshold: 20, enabled: true },
+    ]);
+    // The existing-task read is plan-time only.
+    expect(query).not.toHaveBeenCalledWith('pool.scrub.query', expect.anything());
+  });
+
+  it('creates nothing when the pool is gone by the time it runs', async () => {
+    const { ctx, call } = system({ ['pool.query']: [] });
+    await expect(poolScrubTaskCreate.execute(ctx, args())).rejects.toThrow('No pool named "tank"');
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it('reads the outcome off the response: a value stored differently is not confirmed', async () => {
+    const { ctx } = system({ ['pool.scrub.create']: { ...created, enabled: false } });
+    expect(await poolScrubTaskCreate.execute(ctx, args())).toMatchObject({ confirmed: false });
+    const otherPool = system({ ['pool.scrub.create']: { ...created, pool: 8 } });
+    expect(await poolScrubTaskCreate.execute(otherPool.ctx, args())).toMatchObject({ confirmed: false });
+  });
+
+  it('establishes nothing where a value sent cannot be read back', async () => {
+    const { ctx } = system({ ['pool.scrub.create']: { ...created, threshold: undefined } });
+    expect(await poolScrubTaskCreate.execute(ctx, args())).toMatchObject({ confirmed: null });
+    const notRecord = system({ ['pool.scrub.create']: true });
+    expect(await poolScrubTaskCreate.execute(notRecord.ctx, args())).toMatchObject({
+      task: null,
+      confirmed: null,
+    });
+  });
+
+  it('compares a description only where one was sent', async () => {
+    const { ctx } = system({ ['pool.scrub.create']: { ...created, description: 'monthly' } });
+    expect(await poolScrubTaskCreate.execute(ctx, args({ description: 'monthly' }))).toMatchObject({
+      confirmed: true,
+    });
+    expect(await poolScrubTaskCreate.execute(ctx, args({ description: 'other' }))).toMatchObject({
+      confirmed: false,
+    });
+  });
+
+  it('states that no tool here deletes a scrub task', () => {
+    expect(poolScrubTaskCreate.description).toContain('NO TOOL IN THIS CATALOG DELETES A SCRUB TASK');
+    expect(poolScrubTaskCreate.description).toContain('THE PLAN NAMES EVERY SCRUB TASK THE POOL ALREADY HAS');
+    expect(poolScrubTaskCreate.resultGuidance).toContain('FALSE IS NOT A SUCCESS');
+  });
+});
+
+describe('pool_scrub_task_update', () => {
+  const updated = scrubRow({ schedule: MONTHLY });
+  const system = (rows: unknown = [scrubRow()], answer: unknown = updated) =>
+    fakeSystem({ ['pool.scrub.query']: rows, ['pool.scrub.update']: answer });
+  const toMonthly = (over: Record<string, unknown> = {}) => ({ id: 1, schedule: MONTHLY, ...over });
+
+  it('is a reversible mutating tool needing the full role', () => {
+    expect(poolScrubTaskUpdate).toMatchObject({
+      mutating: true,
+      destructiveness: 'reversible',
+      requiredRole: Role.Full,
+    });
+    const schema = poolScrubTaskUpdate.inputSchema as {
+      properties: { schedule: { required: string[] } };
+      required: string[];
+    };
+    expect(schema.properties.schedule.required).toEqual(['minute', 'hour', 'dom', 'month', 'dow']);
+    expect(schema.required).toEqual(['id']);
+  });
+
+  it('normalizes args: sends only what was passed', () => {
+    expect(poolScrubTaskUpdate.normalizeArgs?.({ id: 1, enabled: false, extra: 1 })).toEqual({
+      id: 1,
+      enabled: false,
+    });
+  });
+
+  describe('argument validation', () => {
+    const plan = (rawArgs: Record<string, unknown>) => poolScrubTaskUpdate.plan(system().ctx, rawArgs);
+
+    it('requires a whole-number id', async () => {
+      for (const bad of [undefined, '1', 1.5]) {
+        await expect(plan(toMonthly({ id: bad }))).rejects.toThrow('"id" is required and must be a whole number');
+      }
+    });
+
+    it('requires at least one field to change', async () => {
+      await expect(plan({ id: 1 })).rejects.toThrow('Nothing to change');
+    });
+
+    it('refuses a schedule missing any of the five cron fields', async () => {
+      for (const field of ['minute', 'hour', 'dom', 'month', 'dow']) {
+        await expect(plan(toMonthly({ schedule: { ...MONTHLY, [field]: undefined } }))).rejects.toThrow(
+          new RegExp(`"schedule\\.${field}" is required`),
+        );
+      }
+    });
+
+    it('executes nothing when an argument is unreadable', async () => {
+      const { ctx, query, call } = system();
+      await expect(poolScrubTaskUpdate.execute(ctx, { id: 1, enabled: 'no' })).rejects.toThrow(
+        '"enabled" must be a boolean',
+      );
+      expect(query).not.toHaveBeenCalled();
+      expect(call).not.toHaveBeenCalled();
+    });
+  });
+
+  it('fails at plan time for an id pool.scrub.query does not return, comparing ids on the response', async () => {
+    // A dropped filter answers with the whole table; its first row is another task.
+    await expect(poolScrubTaskUpdate.plan(system([scrubRow({ id: 2 })]).ctx, toMonthly())).rejects.toThrow(
+      'No scrub task with id 1 on this system — ids come from `pool_scrub_tasks_list`',
+    );
+    const steps = await poolScrubTaskUpdate.plan(system([scrubRow({ id: 2 }), scrubRow()]).ctx, toMonthly());
+    expect(steps).toHaveLength(2);
+  });
+
+  it('plans the read it makes and the update, sending only the fields passed', async () => {
+    const steps = await poolScrubTaskUpdate.plan(system().ctx, toMonthly({ threshold: 6 }));
+    expect(steps.map((step) => step.method)).toEqual(['pool.scrub.query', 'pool.scrub.update']);
+    expect(steps[0].params).toEqual([[['id', '=', 1]], {}]);
+    expect(steps[0].description).toContain('Changes nothing.');
+    expect(steps[1].params).toEqual([1, { schedule: MONTHLY, threshold: 6 }]);
+    expect(steps[1].description).toContain(
+      'Change the scrub task with id 1 on pool "tank": schedule minute "0", hour "3", dom "1", month "*", ' +
+        'dow "*" (now schedule minute "0", hour "0", dom "*", month "*", dow "0"); threshold 6 (now threshold 35).',
+    );
+  });
+
+  it('states each other field beside what the task holds now', async () => {
+    const [, update] = await poolScrubTaskUpdate.plan(
+      system([scrubRow({ description: undefined, enabled: 'x' })]).ctx,
+      { id: 1, enabled: false, description: 'off for now' },
+    );
+    expect(update.description).toContain('disabled (now enabled (not readable))');
+    expect(update.description).toContain('description "off for now" (now none reported)');
+  });
+
+  it('says in the plan when the task already holds every value sent', async () => {
+    const [, same] = await poolScrubTaskUpdate.plan(system().ctx, { id: 1, schedule: SUNDAYS });
+    expect(same.description).toContain('The task already holds every value this sends, which is not an error.');
+    const [, different] = await poolScrubTaskUpdate.plan(system().ctx, toMonthly());
+    expect(different.description).not.toContain('already holds');
+  });
+
+  it('reports a change it made, read off the response', async () => {
+    const { ctx, query, call } = system();
+    expect(await poolScrubTaskUpdate.execute(ctx, toMonthly())).toEqual({
+      id: 1,
+      requested: { schedule: MONTHLY },
+      lookup: 'FOUND',
+      lookup_error: null,
+      previous: reported(),
+      resulting: reported({ schedule: MONTHLY }),
+      changed: true,
+      confirmed: true,
+    });
+    expect(query).toHaveBeenCalledWith('pool.scrub.query', [['id', '=', 1]]);
+    expect(call).toHaveBeenCalledWith('pool.scrub.update', [1, { schedule: MONTHLY }]);
+  });
+
+  it('reports a task already holding the values as unchanged and confirmed', async () => {
+    const { ctx } = system([scrubRow()], scrubRow());
+    expect(await poolScrubTaskUpdate.execute(ctx, { id: 1, schedule: SUNDAYS })).toMatchObject({
+      changed: false,
+      confirmed: true,
+    });
+  });
+
+  it('reads a response still holding the old value as not confirmed', async () => {
+    const { ctx } = system([scrubRow()], scrubRow());
+    expect(await poolScrubTaskUpdate.execute(ctx, toMonthly())).toMatchObject({
+      changed: false,
+      confirmed: false,
+    });
+  });
+
+  it('compares only the fields sent', async () => {
+    // The description moved and nobody asked about it.
+    const { ctx } = system([scrubRow()], scrubRow({ enabled: false, description: 'renamed' }));
+    expect(await poolScrubTaskUpdate.execute(ctx, { id: 1, enabled: false })).toMatchObject({
+      changed: true,
+      confirmed: true,
+    });
+  });
+
+  it('establishes nothing where the response cannot be read', async () => {
+    const { ctx } = system([scrubRow()], true);
+    expect(await poolScrubTaskUpdate.execute(ctx, toMonthly())).toMatchObject({
+      resulting: null,
+      changed: null,
+      confirmed: null,
+    });
+    // One field unreadable and the rest as sent: not established. `hour` read
+    // back different from before, so the task did change.
+    const partial = system([scrubRow()], scrubRow({ schedule: { ...MONTHLY, dow: 0 } }));
+    expect(await poolScrubTaskUpdate.execute(partial.ctx, toMonthly())).toMatchObject({
+      changed: true,
+      confirmed: null,
+    });
+  });
+
+  it('reports NOT_FOUND and still makes the update the plan named', async () => {
+    const { ctx, call } = system([]);
+    expect(await poolScrubTaskUpdate.execute(ctx, toMonthly())).toMatchObject({
+      lookup: 'NOT_FOUND',
+      previous: null,
+      changed: null,
+      confirmed: true,
+    });
+    expect(call).toHaveBeenCalledWith('pool.scrub.update', [1, { schedule: MONTHLY }]);
+  });
+
+  it('reports UNREADABLE with the reason, and still makes the update', async () => {
+    const { ctx, call } = failingSystem(
+      { ['pool.scrub.update']: updated },
+      { ['pool.scrub.query']: new Error('websocket closed') },
+    );
+    expect(await poolScrubTaskUpdate.execute(ctx, toMonthly())).toMatchObject({
+      lookup: 'UNREADABLE',
+      lookup_error: 'websocket closed',
+      previous: null,
+      changed: null,
+      confirmed: true,
+    });
+    expect(call).toHaveBeenCalledWith('pool.scrub.update', [1, { schedule: MONTHLY }]);
+  });
+
+  it('says what disabling costs, and that it cannot move a task to another pool', () => {
+    expect(poolScrubTaskUpdate.description).toContain('`enabled: false` STOPS THE POOL BEING SCRUBBED');
+    expect(poolScrubTaskUpdate.description).toContain('the pool a task scrubs is not changed by this tool');
+    expect(poolScrubTaskUpdate.description.endsWith(poolScrubTaskUpdate.resultGuidance ?? '')).toBe(true);
   });
 });

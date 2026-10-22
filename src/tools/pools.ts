@@ -1,10 +1,18 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
-import { ReadOnlyTool } from '@/catalog/tool';
-import { booleanOrNull, numberOrNull, recordOrNull, textOrNull } from '@/tools/common';
+import { MutatingTool, PlanStep, ReadOnlyTool, ToolContext } from '@/catalog/tool';
+import {
+  booleanOrNull,
+  errorText,
+  numberOrNull,
+  plural,
+  recordOrNull,
+  textOrNull,
+} from '@/tools/common';
 
 /** Pool internals: the vdev tree beneath each pool, the state of every device
- * in it, and the outcome of the last scrub that verified it.
+ * in it, and the outcome of the last scrub that verified it — and, since #181,
+ * the periodic scrub tasks that decide when the next one runs.
  *
  * `storage_pool_status` reports a pool as one unit, so it can say a pool is
  * DEGRADED and not which device made it so. The vdev tree is where that answer
@@ -459,6 +467,774 @@ export const poolResilverConfig: ReadOnlyTool = {
       begin: textOrNull(settings['begin']),
       end: textOrNull(settings['end']),
       weekday: weekdayList(settings['weekday']),
+    };
+  },
+};
+
+/**
+ * The periodic scrub tasks: `pool_scrub_tasks_list`, `pool_scrub_task_create`
+ * and `pool_scrub_task_update` (#181).
+ *
+ * `storage_scrub_history` says when a pool last scrubbed; these say when it
+ * will scrub next, and change that. The listing ships with the two mutations
+ * because a mutating tool keyed on an id nothing lists is unreachable (#119) —
+ * `pool.scrub.query` is the neighbouring verb `storage_scrub_history`
+ * deliberately does not read, and nothing else in the catalog reports a scrub
+ * task's id.
+ *
+ * THE SCHEDULE IS STATED AS ITS FIVE CRON FIELDS AND IS NOT PUT INTO WORDS. The
+ * cron rendering — `describeSchedule` and the helpers under it — is the tasks
+ * family's own vocabulary (#95), and importing it here is re-siting another
+ * family's code rather than matching its convention (#141). What is matched
+ * instead is the reading: these are the same five fields, spelled the way cron
+ * spells them and the way `automated_tasks_list` reports them, and every plan
+ * here quotes them exactly as they will be sent. A plan that said "every
+ * Sunday at 00:00" through a second rendering would be a second opinion about
+ * what a cron expression means, which is the drift worth avoiding most.
+ *
+ * `threshold` HAS NO DECLARED UNIT (#96). It keeps the middleware's name, is
+ * passed through as the number sent, and no description here puts a unit on
+ * it.
+ *
+ * `pool` IS THE POOL'S NUMERIC ID on this API, and every other tool names a
+ * pool by its name. So the listing reports both, the id as `pool_id` — a field
+ * named `pool` holding a number would read as a name in a catalog where `pool`
+ * always is one — and creation takes the name and resolves it.
+ */
+
+/** The five cron fields a scrub task's schedule carries, in crontab order. */
+const SCRUB_CRON_FIELDS = ['minute', 'hour', 'dom', 'month', 'dow'] as const;
+
+type ScrubCronField = (typeof SCRUB_CRON_FIELDS)[number];
+
+/** A schedule as these tools send one: all five fields, never fewer. */
+type ScrubSchedule = Record<ScrubCronField, string>;
+
+/** A schedule as read off a row: each field a string, or null where none was readable. */
+type ScrubScheduleReading = Record<ScrubCronField, string | null>;
+
+/** One scrub task, through the allowlist. */
+interface ScrubTaskRow {
+  id: number | null;
+  pool_id: number | null;
+  pool_name: string | null;
+  enabled: boolean | null;
+  threshold: number | null;
+  description: string | null;
+  schedule: ScrubScheduleReading | null;
+}
+
+/**
+ * The five cron fields of a stored schedule, named one by one so a field a
+ * later release adds to `PoolScrubCron` does not reach a caller. Null where
+ * the row's `schedule` is not a record at all, which is a different answer
+ * from a record with a field missing.
+ */
+function scrubScheduleOf(value: unknown): ScrubScheduleReading | null {
+  const held = recordOrNull(value);
+  if (held === null) return null;
+  return {
+    minute: textOrNull(held['minute']),
+    hour: textOrNull(held['hour']),
+    dom: textOrNull(held['dom']),
+    month: textOrNull(held['month']),
+    dow: textOrNull(held['dow']),
+  };
+}
+
+/**
+ * One `pool.scrub.query` row, or a create/update response, through the
+ * allowlist. A row that is not a record becomes a row of nulls rather than
+ * being dropped: under #93 a list one task shorter says a pool scrubs less
+ * often than it does, which is a claim this read did not establish.
+ */
+function scrubTaskRow(value: unknown): ScrubTaskRow {
+  const row = recordOrNull(value) ?? {};
+  return {
+    id: numberOrNull(row['id']),
+    pool_id: numberOrNull(row['pool']),
+    pool_name: textOrNull(row['pool_name']),
+    enabled: booleanOrNull(row['enabled']),
+    threshold: numberOrNull(row['threshold']),
+    description: textOrNull(row['description']),
+    schedule: scrubScheduleOf(row['schedule']),
+  };
+}
+
+/** What a field the system reported no readable value for is stated as, in a plan. */
+const NOT_READ = '(not readable)';
+
+/** A schedule as the plan states it: the five fields, quoted exactly. */
+function scheduleText(schedule: ScrubSchedule | ScrubScheduleReading | null): string {
+  if (schedule === null) return `schedule ${NOT_READ}`;
+  return `schedule ${SCRUB_CRON_FIELDS.map(
+    (name) => `${name} ${schedule[name] === null ? NOT_READ : `"${schedule[name]}"`}`,
+  ).join(', ')}`;
+}
+
+/** `enabled`, `disabled`, or the stated absence of a reading. */
+function enabledText(enabled: boolean | null): string {
+  return enabled === null ? `enabled ${NOT_READ}` : enabled ? 'enabled' : 'disabled';
+}
+
+/** A threshold as the plan states it: the number, with no unit, because none is reported. */
+function thresholdText(threshold: number | null): string {
+  return `threshold ${threshold === null ? NOT_READ : threshold}`;
+}
+
+/** One existing task, in the plan's words. */
+function describeScrubTask(task: ScrubTaskRow): string {
+  return (
+    `id ${task.id ?? NOT_READ} (${enabledText(task.enabled)}, ${scheduleText(task.schedule)}, ` +
+    `${thresholdText(task.threshold)}, description ` +
+    `${task.description === null ? '(none reported)' : `"${task.description}"`})`
+  );
+}
+
+/** Where the ids `pool_scrub_task_update` takes come from, worded once. */
+const SCRUB_TASK_IDS_FROM = '`pool_scrub_tasks_list`';
+
+/**
+ * The account of a scrub task row, shared by all three tools' results because
+ * all three report rows through {@link scrubTaskRow}.
+ */
+const SCRUB_TASK_FIELDS =
+  'A scrub task row carries `id`, the task\'s own id, which is what ' +
+  '`pool_scrub_task_update` takes; `pool_id`, the numeric id the system holds the ' +
+  'pool under, which is what the middleware stores and names nothing outside it; ' +
+  '`pool_name`, which matches `name` in `storage_pool_status`; `enabled`; ' +
+  '`threshold`, as the number the system reported — NO UNIT IS REPORTED FOR IT AND ' +
+  'IT IS NOT TO BE CONVERTED; `description`; and `schedule`, the five cron fields ' +
+  '`minute`, `hour`, `dom`, `month` and `dow` exactly as stored, read the way cron ' +
+  'reads them and the way `automated_tasks_list` reports them (0 and 7 are both ' +
+  'Sunday in `dow`), and not rendered in words here. Each is null where the system ' +
+  'reported no value this tool could read — a null `enabled` IS NOT `false`, and a ' +
+  'null `description` is either none set or one that could not be read, which are ' +
+  'not separated. `schedule` is null where the row carried no schedule record at ' +
+  'all, and a field inside it is null where the record lacked that field.';
+
+const SCRUB_LIST_GUIDANCE =
+  `One row per scrub task on the system. ${SCRUB_TASK_FIELDS} A row the system ` +
+  'sent that was not a record is kept as a row of nulls rather than dropped, ' +
+  'because dropping it would say a pool has one task fewer than it does. AN EMPTY ' +
+  'LIST IS THE SYSTEM REPORTING NO SCRUB TASKS AT ALL — every data pool on it is ' +
+  'then not scrubbed on a schedule by a task — and is never what a failed read ' +
+  'returns: a read that failed, or that answered with anything other than a list, ' +
+  'is an error. A POOL WITH NO ROW HERE IS NOT SCRUBBED ON A SCHEDULE BY ANY TASK, ' +
+  'and a pool whose every row is `enabled: false` is not either; that is the ' +
+  'finding, not a gap. A pool can carry more than one task. (unconfirmed) TrueNAS ' +
+  'uses `threshold` to skip a scheduled scrub when the pool was scrubbed recently ' +
+  'enough, so a schedule firing does not by itself mean a scrub ran — ' +
+  '`storage_scrub_history` reports when the last one actually did.';
+
+export const poolScrubTasksList: ReadOnlyTool = {
+  name: 'pool_scrub_tasks_list',
+  description:
+    'The periodic scrub tasks on this system: which pool each one scrubs, on ' +
+    'what schedule, with what threshold, and whether it is enabled. This is ' +
+    'when the next scrub is ARRANGED to run; `storage_scrub_history` is when ' +
+    'the last one DID, and the two answer different questions. The `id` ' +
+    'reported here is what `pool_scrub_task_update` takes, and ' +
+    '`pool_scrub_task_create` adds a task. This reads `pool.scrub.query`, which ' +
+    'covers the data pools; the boot pool\'s scrub interval is a different ' +
+    'setting this catalog does not read. THIS TOOL ONLY READS: it does not start ' +
+    'a scrub now and does not delete a task, and nothing in this catalog does ' +
+    'either. ' +
+    SCRUB_LIST_GUIDANCE,
+  resultGuidance: SCRUB_LIST_GUIDANCE,
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.ReadOnly,
+  mutating: false,
+  async handler({ system }) {
+    const rows: unknown = await firstValueFrom(system.client.api.query('pool.scrub.query'));
+    // Fatal rather than `[]`: an empty list is this tool's one positive finding
+    // — no pool is scrubbed on a schedule — and a read that answered with
+    // anything else has established nothing of the kind (#133).
+    if (!Array.isArray(rows)) {
+      throw new Error('pool.scrub.query did not answer with a list of scrub tasks');
+    }
+    return rows.map(scrubTaskRow);
+  },
+};
+
+/**
+ * The `schedule` argument as it will be sent, or the error naming what is
+ * wrong with it.
+ *
+ * ALL FIVE FIELDS ARE REQUIRED, for #180's reason: whether the middleware
+ * fills a partial schedule with defaults or merges it with the stored one is
+ * not established, and either way a caller who said "2am" and sent only
+ * `hour` gets a schedule nobody showed them. An unknown key is refused rather
+ * than dropped, which is what the schema's `additionalProperties: false`
+ * advertises.
+ */
+function parseScrubSchedule(raw: unknown): ScrubSchedule {
+  const given = recordOrNull(raw);
+  if (given === null) {
+    throw new Error('"schedule" must be an object');
+  }
+  const unknownKeys = Object.keys(given).filter(
+    (key) => !(SCRUB_CRON_FIELDS as readonly string[]).includes(key),
+  );
+  if (unknownKeys.length > 0) {
+    throw new Error(
+      `"schedule" takes only ${SCRUB_CRON_FIELDS.join(', ')} — not ${unknownKeys.join(', ')}`,
+    );
+  }
+  const schedule: Partial<ScrubSchedule> = {};
+  for (const name of SCRUB_CRON_FIELDS) {
+    const value = given[name];
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error(
+        `"schedule.${name}" is required and must be a non-empty string — all five cron ` +
+          'fields are sent together, because what the system does with a missing one is ' +
+          'not established',
+      );
+    }
+    schedule[name] = value;
+  }
+  return schedule as ScrubSchedule;
+}
+
+/** A threshold as sent: any finite number, passed through, since no unit or range is declared. */
+function parseThreshold(raw: unknown): number {
+  if (numberOrNull(raw) === null) {
+    throw new Error('"threshold" must be a number');
+  }
+  return raw as number;
+}
+
+/** Strict, as `scheduled_task_set_enabled` is: coercing `"false"` would enable a task asked to be off. */
+function parseEnabled(raw: unknown): boolean {
+  if (typeof raw !== 'boolean') {
+    throw new Error('"enabled" must be a boolean');
+  }
+  return raw;
+}
+
+/** A non-empty description; an empty one would be stored as a description of nothing. */
+function parseDescription(raw: unknown): string {
+  if (textOrNull(raw) === null) {
+    throw new Error('"description" must be a non-empty string');
+  }
+  return raw as string;
+}
+
+/** The fields a create or an update sends, besides the pool. */
+interface ScrubTaskFields {
+  schedule?: ScrubSchedule;
+  threshold?: number;
+  enabled?: boolean;
+  description?: string;
+}
+
+/**
+ * The optional fields of either mutation, parsed, with an absent one left out
+ * entirely — so the object is both what is sent and what the confirmation key
+ * is computed over, and an omitted field cannot reach either as `undefined`.
+ */
+function parseScrubFields(args: Record<string, unknown>): ScrubTaskFields {
+  const fields: ScrubTaskFields = {};
+  if (args['schedule'] !== undefined) fields.schedule = parseScrubSchedule(args['schedule']);
+  if (args['threshold'] !== undefined) fields.threshold = parseThreshold(args['threshold']);
+  if (args['enabled'] !== undefined) fields.enabled = parseEnabled(args['enabled']);
+  if (args['description'] !== undefined) fields.description = parseDescription(args['description']);
+  return fields;
+}
+
+/**
+ * The flat set of values a row or a request is compared on: the five cron
+ * fields, threshold, enabled and description. Only the keys a request SENT are
+ * ever compared, so a field nobody asked about cannot make a call read as
+ * unconfirmed.
+ */
+type ScrubComparable = Record<string, string | number | boolean | null>;
+
+function comparableOfRow(row: ScrubTaskRow): ScrubComparable {
+  return {
+    ...(row.schedule ?? { minute: null, hour: null, dom: null, month: null, dow: null }),
+    threshold: row.threshold,
+    enabled: row.enabled,
+    description: row.description,
+  };
+}
+
+function comparableOfFields(fields: ScrubTaskFields): ScrubComparable {
+  return {
+    ...(fields.schedule ?? {}),
+    ...(fields.threshold === undefined ? {} : { threshold: fields.threshold }),
+    ...(fields.enabled === undefined ? {} : { enabled: fields.enabled }),
+    ...(fields.description === undefined ? {} : { description: fields.description }),
+  };
+}
+
+/**
+ * Whether `got` holds what `wanted` names, key by key: false as soon as one key
+ * reads back as a different value, null where none does but at least one could
+ * not be read on either side, and true only where every key was read on both
+ * and agrees. A definite mismatch outranks an unreadable field — one value the
+ * system reported back as something else is already "not what was asked for".
+ */
+function agreement(wanted: ScrubComparable, got: ScrubComparable): boolean | null {
+  let unread = false;
+  for (const key of Object.keys(wanted)) {
+    const want = wanted[key] ?? null;
+    const have = got[key] ?? null;
+    if (want === null || have === null) {
+      unread = true;
+    } else if (want !== have) {
+      return false;
+    }
+  }
+  return unread ? null : true;
+}
+
+/** The fields sent, in the plan's words, in the order the schema lists them. */
+function fieldsText(fields: ScrubTaskFields): string[] {
+  return [
+    ...(fields.schedule === undefined ? [] : [scheduleText(fields.schedule)]),
+    ...(fields.threshold === undefined ? [] : [thresholdText(fields.threshold)]),
+    ...(fields.enabled === undefined ? [] : [enabledText(fields.enabled)]),
+    ...(fields.description === undefined ? [] : [`description "${fields.description}"`]),
+  ];
+}
+
+/** The input schema's `schedule`, written once for both mutations. */
+const SCHEDULE_SCHEMA = {
+  type: 'object',
+  description:
+    'When the scrub task runs, as the five cron fields. All five are required ' +
+    'and are sent together; no other key is accepted.',
+  properties: {
+    minute: { type: 'string', description: 'Cron minute field, e.g. "0".' },
+    hour: { type: 'string', description: 'Cron hour field, e.g. "0" or "*".' },
+    dom: { type: 'string', description: 'Cron day-of-month field, e.g. "*" or "1".' },
+    month: { type: 'string', description: 'Cron month field, e.g. "*".' },
+    dow: {
+      type: 'string',
+      description: 'Cron day-of-week field, e.g. "*" or "0"; 0 and 7 are both Sunday.',
+    },
+  },
+  required: [...SCRUB_CRON_FIELDS],
+  additionalProperties: false,
+};
+
+const THRESHOLD_SCHEMA = {
+  type: 'number',
+  description:
+    'Passed to the system as given. NO UNIT IS REPORTED FOR THIS FIELD and none ' +
+    'is applied here, so do not convert a value into it.',
+};
+
+/** What a read step's params are when `execute` dispatches `api.query(method, filters)`: `[filters, {}]`. */
+function queryParams(filters: unknown): unknown {
+  return [filters, {}];
+}
+
+/** A pool `pool.query` listed under the name asked for, with the id the middleware holds it under. */
+interface ResolvedPool {
+  name: string;
+  id: number;
+}
+
+/**
+ * The data pool named `name`, or the error naming it.
+ *
+ * The match is made on the RESPONSE, by name, and never on the row count: an
+ * unrecognised filter is dropped rather than refused, and the first row of a
+ * filter that did not apply is a different pool (#121, #153). A pool listed
+ * under that name with no id this tool can read is refused too — creating a
+ * task needs the id, and guessing one is not an option.
+ */
+async function resolvePool(ctx: ToolContext, name: string): Promise<ResolvedPool> {
+  const rows: unknown = await firstValueFrom(
+    ctx.system.client.api.query('pool.query', [['name', '=', name]]),
+  );
+  const match = (Array.isArray(rows) ? rows : [])
+    .map((row) => recordOrNull(row))
+    .find((row) => row !== null && textOrNull(row['name']) === name);
+  if (match === undefined || match === null) {
+    throw new Error(
+      `No pool named "${name}" on this system — \`storage_pool_status\` lists the data ` +
+        'pools by name, and the boot pool is not one of them',
+    );
+  }
+  const id = numberOrNull(match['id']);
+  if (id === null) {
+    throw new Error(`Pool "${name}" is listed with no id this tool could read, so no task can name it`);
+  }
+  return { name, id };
+}
+
+/**
+ * What the create plan says about the scrub tasks the pool already has.
+ *
+ * Plan-time only and not a step, because `execute` does not make this read
+ * (#119), and its failure does not fail the plan (#154): a second task is
+ * legal, so not knowing whether there is a first is something to state rather
+ * than a reason to refuse.
+ *
+ * Every task whose `pool` reads as this pool's id is named. A row whose pool
+ * could not be read at all is COUNTED and said to be unattributed rather than
+ * left out, by #93's direction — leaving it out moves the sentence towards
+ * "this pool has no task", which is the claim that makes a duplicate look safe.
+ */
+async function existingTasksSentence(ctx: ToolContext, pool: ResolvedPool): Promise<string> {
+  let rows: unknown;
+  try {
+    rows = await firstValueFrom(ctx.system.client.api.query('pool.scrub.query', [['pool', '=', pool.id]]));
+  } catch (reason) {
+    return (
+      `Whether pool "${pool.name}" already has a scrub task could not be read ` +
+      `(pool.scrub.query failed: ${errorText(reason)}); a second task on one pool is allowed.`
+    );
+  }
+  if (!Array.isArray(rows)) {
+    return (
+      `Whether pool "${pool.name}" already has a scrub task could not be read ` +
+      '(pool.scrub.query did not answer with a list); a second task on one pool is allowed.'
+    );
+  }
+  const tasks = rows.map(scrubTaskRow);
+  const own = tasks.filter((task) => task.pool_id === pool.id);
+  const unattributed = tasks.filter((task) => task.pool_id === null).length;
+  const extra =
+    unattributed > 0
+      ? ` ${plural(unattributed, 'further task')} named no pool this tool could read, and may be on this one.`
+      : '';
+  if (own.length === 0) {
+    return `Pool "${pool.name}" has no scrub task now.${extra}`;
+  }
+  return (
+    `Pool "${pool.name}" already has ${plural(own.length, 'scrub task')}: ` +
+    `${own.map(describeScrubTask).join('; ')}. This adds another beside ` +
+    `${own.length === 1 ? 'it' : 'them'}, which is allowed; whether that is what was meant ` +
+    `is the approver's call.${extra}`
+  );
+}
+
+/** What `pool_scrub_task_create` was asked to do. */
+interface ScrubCreate {
+  pool: string;
+  fields: Required<Pick<ScrubTaskFields, 'schedule' | 'threshold' | 'enabled'>> &
+    Pick<ScrubTaskFields, 'description'>;
+}
+
+function parseScrubCreate(args: Record<string, unknown>): ScrubCreate {
+  const pool = textOrNull(args['pool']);
+  if (pool === null) {
+    throw new Error('"pool" is required and must be a pool name');
+  }
+  for (const required of ['schedule', 'threshold', 'enabled']) {
+    if (args[required] === undefined) throw new Error(`"${required}" is required`);
+  }
+  const fields = parseScrubFields(args) as ScrubCreate['fields'];
+  return { pool, fields };
+}
+
+const SCRUB_CREATE_GUIDANCE =
+  '`pool` is the name asked for and `pool_id` the id it resolved to when the ' +
+  'call was made. `requested` is exactly what was sent besides the pool. `task` ' +
+  'is the created task read back off the response the create itself answered ' +
+  `with — never copied from the request — or null where that response was not a ` +
+  `record. ${SCRUB_TASK_FIELDS} Its \`id\` is what \`pool_scrub_task_update\` ` +
+  'takes. `confirmed` is whether `task` holds the pool and every value sent: ' +
+  'true is the system reporting back what was asked for; FALSE IS NOT A SUCCESS — ' +
+  'the call did not reject and at least one value was stored as something else, ' +
+  'compared as the strings were spelled, so a cron field the system stored under ' +
+  'a different spelling reads as false; and null is a response in which some ' +
+  'value sent could not be read back and none read back as different, under ' +
+  'which nothing here establishes what the task holds. A null `task` means ' +
+  'nothing here establishes that a task was created, and is not evidence that ' +
+  'none was — `pool_scrub_tasks_list` shows what the system now holds.';
+
+export const poolScrubTaskCreate: MutatingTool = {
+  name: 'pool_scrub_task_create',
+  description:
+    'Creates one periodic scrub task for a named data pool on this TrueNAS ' +
+    'system. Two-phase: called without a confirmation_token it returns a plan ' +
+    'for user approval; called with one it creates the task. A scrub reads ' +
+    'every block of the pool and checks it, and destroys nothing. `pool` is the ' +
+    'pool\'s NAME, as `storage_pool_status` reports it, and is resolved to the ' +
+    'id the system stores; a name no data pool has fails the plan, naming it, ' +
+    'and the boot pool is not covered. `schedule` takes ALL FIVE cron fields — ' +
+    '`minute`, `hour`, `dom`, `month`, `dow`, as cron spells them — and refuses ' +
+    'a schedule missing any of them, because what the system would do with a ' +
+    'missing one is not established. `threshold` is required and is passed ' +
+    'through as given: NO UNIT IS REPORTED FOR IT AND NONE IS APPLIED HERE. ' +
+    '(unconfirmed) TrueNAS uses it to skip a scheduled scrub when the pool was ' +
+    'scrubbed recently enough. `enabled` is required; `description` is ' +
+    'optional. THE PLAN NAMES EVERY SCRUB TASK THE POOL ALREADY HAS, or says it ' +
+    'has none, or that this could not be read: a second task on one pool is ' +
+    'allowed, and whether it was meant is the approver\'s call. The pool is ' +
+    'looked up by name again when the task is created, and nothing is created ' +
+    'if no pool of that name is listed then. `destructiveness` is `reversible`, ' +
+    'but NO TOOL IN THIS CATALOG DELETES A SCRUB TASK: undoing this means ' +
+    'disabling the task with `pool_scrub_task_update`, or deleting it outside ' +
+    'this catalog. ' +
+    SCRUB_CREATE_GUIDANCE,
+  resultGuidance: SCRUB_CREATE_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      pool: {
+        type: 'string',
+        description: 'The data pool\'s name, as `storage_pool_status` reports it.',
+      },
+      schedule: SCHEDULE_SCHEMA,
+      threshold: THRESHOLD_SCHEMA,
+      enabled: { type: 'boolean', description: 'Whether the task is created enabled.' },
+      description: { type: 'string', description: 'Optional; a non-empty label for the task.' },
+    },
+    required: ['pool', 'schedule', 'threshold', 'enabled'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const { pool, fields } = parseScrubCreate(rawArgs);
+    return { pool, ...fields };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const { pool: name, fields } = parseScrubCreate(rawArgs);
+    const pool = await resolvePool(ctx, name);
+    const existing = await existingTasksSentence(ctx, pool);
+    return [
+      {
+        method: 'pool.query',
+        params: queryParams([['name', '=', name]]),
+        description:
+          `Look up pool "${name}" by name, to send the id the system holds it under — ` +
+          `${pool.id} when this plan was made. Changes nothing. If no pool of that name ` +
+          'is listed when this runs, nothing is created.',
+      },
+      {
+        method: 'pool.scrub.create',
+        params: [{ pool: pool.id, ...fields }],
+        description:
+          `Create a scrub task for pool "${name}" with ${fieldsText(fields).join(', ')}. ` +
+          `No unit is reported for the threshold and none is applied. ${existing}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const { pool: name, fields } = parseScrubCreate(rawArgs);
+    // Read again rather than taken from the plan: the confirmation token binds
+    // the arguments and not the plan, and the argument is a NAME. A pool that
+    // is gone fails here, before anything is created; one exported and
+    // re-imported under the same name is the pool that was approved, under the
+    // id it now has.
+    const pool = await resolvePool(ctx, name);
+    const created: unknown = await firstValueFrom(
+      ctx.system.client.api.call('pool.scrub.create', [{ pool: pool.id, ...fields }]),
+    );
+    const task = recordOrNull(created) === null ? null : scrubTaskRow(created);
+    return {
+      pool: name,
+      pool_id: pool.id,
+      requested: fields,
+      task,
+      confirmed:
+        task === null
+          ? null
+          : agreement(
+              { pool_id: pool.id, ...comparableOfFields(fields) },
+              { pool_id: task.pool_id, ...comparableOfRow(task) },
+            ),
+    };
+  },
+};
+
+/** What `pool_scrub_task_update` was asked to do. */
+interface ScrubUpdate {
+  id: number;
+  fields: ScrubTaskFields;
+}
+
+function parseScrubUpdate(args: Record<string, unknown>): ScrubUpdate {
+  const id = args['id'];
+  if (typeof id !== 'number' || !Number.isInteger(id)) {
+    throw new Error('"id" is required and must be a whole number');
+  }
+  const fields = parseScrubFields(args);
+  if (Object.keys(fields).length === 0) {
+    throw new Error('Nothing to change: pass at least one of schedule, threshold, enabled, description');
+  }
+  return { id, fields };
+}
+
+/**
+ * The task the system listed under this id, or null where it listed none that
+ * did. The id is compared on the RESPONSE and the first row is never taken,
+ * because a filter that did not apply comes back as the whole table (#121).
+ */
+function scrubTaskWithId(rows: unknown, id: number): ScrubTaskRow | null {
+  if (!Array.isArray(rows)) return null;
+  for (const row of rows) {
+    const held = recordOrNull(row);
+    if (held !== null && numberOrNull(held['id']) === id) return scrubTaskRow(held);
+  }
+  return null;
+}
+
+function readScrubTask(ctx: ToolContext, id: number): Promise<unknown> {
+  return firstValueFrom(ctx.system.client.api.query('pool.scrub.query', [['id', '=', id]]));
+}
+
+/** Each field sent, beside what the task holds for it now. */
+function changesText(fields: ScrubTaskFields, task: ScrubTaskRow): string[] {
+  return [
+    ...(fields.schedule === undefined
+      ? []
+      : [`${scheduleText(fields.schedule)} (now ${scheduleText(task.schedule)})`]),
+    ...(fields.threshold === undefined
+      ? []
+      : [`${thresholdText(fields.threshold)} (now ${thresholdText(task.threshold)})`]),
+    ...(fields.enabled === undefined
+      ? []
+      : [`${enabledText(fields.enabled)} (now ${enabledText(task.enabled)})`]),
+    ...(fields.description === undefined
+      ? []
+      : [
+          `description "${fields.description}" (now ${
+            task.description === null ? 'none reported' : `"${task.description}"`
+          })`,
+        ]),
+  ];
+}
+
+const SCRUB_UPDATE_GUIDANCE =
+  '`requested` is exactly what was sent. `previous` is the task as read ' +
+  'immediately before the call, and `resulting` is the task read back off the ' +
+  'response the update itself answered with — never copied from the request. ' +
+  `${SCRUB_TASK_FIELDS} \`previous\` is null where that read failed or listed no ` +
+  'such task, and `resulting` is null where the response was not a record. ' +
+  '`lookup` says what the read did: `FOUND`, `NOT_FOUND` (deleted between the ' +
+  'plan and the confirmation), or `UNREADABLE` with `lookup_error` naming why; ' +
+  'THE UPDATE IS ATTEMPTED IN ALL THREE CASES, because what runs must be what was ' +
+  'approved. Only the fields that were SENT are compared. `changed` is true where ' +
+  '`previous` and `resulting` differ in one of them and false where they agree in ' +
+  'all, WHICH IS TWO OUTCOMES AND NOT ONE: the task already held those values, or ' +
+  'the call did not apply. `confirmed` is what tells those apart, and `changed` ' +
+  'must not be read without it. `confirmed` is whether `resulting` holds every ' +
+  'value sent: true is the system reporting back what was asked for; FALSE IS NOT ' +
+  'A SUCCESS — the call did not reject and at least one value was stored as ' +
+  'something else, compared as the strings were spelled; null is a response in ' +
+  'which some value sent could not be read back and none read back as different. ' +
+  'Both are null wherever a reading they need is missing — `changed` is null ' +
+  'whenever `previous` or `resulting` is, or where no compared field differs and ' +
+  'one could not be read on either side.';
+
+export const poolScrubTaskUpdate: MutatingTool = {
+  name: 'pool_scrub_task_update',
+  description:
+    'Changes one periodic scrub task on this TrueNAS system: its schedule, ' +
+    'threshold, description or whether it is enabled. Two-phase: called without ' +
+    'a confirmation_token it returns a plan for user approval; called with one ' +
+    'it sends the change. `id` is the task\'s id as `pool_scrub_tasks_list` ' +
+    'reports it; PLANNING AGAINST AN id NO SCRUB TASK HAS FAILS, naming it. ONLY ' +
+    'THE FIELDS PASSED ARE SENT, and at least one is required; the pool a task ' +
+    'scrubs is not changed by this tool. `schedule`, when passed, takes ALL FIVE ' +
+    'cron fields — `minute`, `hour`, `dom`, `month`, `dow` — and refuses a ' +
+    'schedule missing any of them, because what the system would do with a ' +
+    'missing one is not established. `threshold` is passed through as given: NO ' +
+    'UNIT IS REPORTED FOR IT AND NONE IS APPLIED HERE. `description`, when passed, ' +
+    'must be non-empty, so this tool cannot clear one. `enabled: false` STOPS THE ' +
+    'POOL BEING SCRUBBED ON THAT SCHEDULE AND ANNOUNCES THAT NOWHERE — a pool whose ' +
+    'every task is disabled is not scrubbed on a schedule at all. THE PLAN STATES ' +
+    'EACH VALUE SENT BESIDE THE ONE THE TASK HOLDS NOW, with the schedule as its ' +
+    'five cron fields exactly. SENDING A TASK A VALUE IT ALREADY HOLDS IS NOT AN ' +
+    'ERROR. This tool cannot create, delete or run a task; `pool_scrub_task_create` ' +
+    'creates one. ' +
+    SCRUB_UPDATE_GUIDANCE,
+  resultGuidance: SCRUB_UPDATE_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'integer',
+        description: `The scrub task's \`id\`, as ${SCRUB_TASK_IDS_FROM} reports it on the system being targeted.`,
+      },
+      schedule: SCHEDULE_SCHEMA,
+      threshold: THRESHOLD_SCHEMA,
+      enabled: { type: 'boolean', description: 'true enables the task, false disables it.' },
+      description: { type: 'string', description: 'A non-empty label for the task.' },
+    },
+    required: ['id'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const { id, fields } = parseScrubUpdate(rawArgs);
+    return { id, ...fields };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const { id, fields } = parseScrubUpdate(rawArgs);
+    const task = scrubTaskWithId(await readScrubTask(ctx, id), id);
+    if (task === null) {
+      throw new Error(`No scrub task with id ${id} on this system — ids come from ${SCRUB_TASK_IDS_FROM}`);
+    }
+    const already =
+      agreement(comparableOfFields(fields), comparableOfRow(task)) === true
+        ? ' The task already holds every value this sends, which is not an error.'
+        : '';
+    return [
+      {
+        method: 'pool.scrub.query',
+        params: queryParams([['id', '=', id]]),
+        description:
+          `Read this system's scrub task with id ${id}, to report what it held before ` +
+          'the change. Changes nothing.',
+      },
+      {
+        method: 'pool.scrub.update',
+        params: [id, fields],
+        description:
+          `Change the scrub task with id ${id} on pool ` +
+          `${task.pool_name === null ? NOT_READ : `"${task.pool_name}"`}: ` +
+          `${changesText(fields, task).join('; ')}. Only these fields are sent, and no unit ` +
+          `is reported for the threshold.${already}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const { id, fields } = parseScrubUpdate(rawArgs);
+    let previous: ScrubTaskRow | null = null;
+    let lookupError: string | null = null;
+    try {
+      previous = scrubTaskWithId(await readScrubTask(ctx, id), id);
+    } catch (reason) {
+      lookupError = errorText(reason);
+    }
+    // Issued whatever the read said: skipping it for a task the read no longer
+    // lists would be `execute` branching on state the confirmation token cannot
+    // bind.
+    const updated: unknown = await firstValueFrom(
+      ctx.system.client.api.call('pool.scrub.update', [id, fields]),
+    );
+    const resulting = recordOrNull(updated) === null ? null : scrubTaskRow(updated);
+    const wanted = comparableOfFields(fields);
+    // `changed` compares the two READINGS on the fields that were sent, never
+    // the request: a response still holding the old value is a call that did
+    // not apply, not one that changed nothing.
+    let same: boolean | null = null;
+    if (previous !== null && resulting !== null) {
+      const before = comparableOfRow(previous);
+      same = agreement(
+        Object.fromEntries(Object.keys(wanted).map((key) => [key, before[key]])),
+        comparableOfRow(resulting),
+      );
+    }
+    return {
+      id,
+      requested: fields,
+      lookup: lookupError !== null ? 'UNREADABLE' : previous === null ? 'NOT_FOUND' : 'FOUND',
+      lookup_error: lookupError,
+      previous,
+      resulting,
+      changed: same === null ? null : !same,
+      confirmed: resulting === null ? null : agreement(wanted, comparableOfRow(resulting)),
     };
   },
 };

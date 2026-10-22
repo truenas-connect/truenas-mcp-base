@@ -16,7 +16,14 @@ import { disksList, disksTemperature } from '@/tools/disks';
 import { fleetComplianceReport, fleetHealthRollup, haStatus } from '@/tools/fleet';
 import { networkConfig, networkInterfaces } from '@/tools/network';
 import { nfsClients } from '@/tools/nfs';
-import { poolResilverConfig, poolTopology, scrubHistory } from '@/tools/pools';
+import {
+  poolResilverConfig,
+  poolScrubTaskCreate,
+  poolScrubTasksList,
+  poolScrubTaskUpdate,
+  poolTopology,
+  scrubHistory,
+} from '@/tools/pools';
 import { replicationStatus, replicationTopology } from '@/tools/replication';
 import {
   reportingAppVmUsage,
@@ -64,7 +71,7 @@ import {
 } from '@/tools/tasks';
 import { vmClone, vmDevices, vmLogs, vmRestart, vmsList, vmStart, vmStop } from '@/tools/vms';
 
-/** The sketch's catalog: fifty-eight read-only tools plus eighteen mutating tools. */
+/** The sketch's catalog: fifty-nine read-only tools plus twenty mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -80,6 +87,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(poolTopology);
   catalog.register(scrubHistory);
   catalog.register(poolResilverConfig);
+  catalog.register(poolScrubTasksList);
   catalog.register(bootPoolStatus);
   catalog.register(listDatasets);
   catalog.register(quotaReport);
@@ -143,6 +151,8 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(containerStart);
   catalog.register(containerStop);
   catalog.register(containerRestart);
+  catalog.register(poolScrubTaskCreate);
+  catalog.register(poolScrubTaskUpdate);
   return catalog;
 }
 
@@ -183,6 +193,9 @@ export {
   nfsClients,
   nvmeofList,
   poolResilverConfig,
+  poolScrubTaskCreate,
+  poolScrubTasksList,
+  poolScrubTaskUpdate,
   poolStatus,
   poolTopology,
   privilegesList,

@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the seventy-six sketch tools', () => {
+  it('registers the seventy-nine sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -18,6 +18,7 @@ describe('createDefaultCatalog', () => {
       'storage_pool_topology',
       'storage_scrub_history',
       'pool_resilver_config',
+      'pool_scrub_tasks_list',
       'boot_pool_status',
       'storage_list_datasets',
       'datasets_quota_report',
@@ -81,7 +82,16 @@ describe('createDefaultCatalog', () => {
       'container_start',
       'container_stop',
       'container_restart',
+      'pool_scrub_task_create',
+      'pool_scrub_task_update',
     ]);
+  });
+
+  it('advertises pool_scrub_tasks_list to a read-only credential, and not the two scrub task mutations', () => {
+    const readOnly = createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name);
+    expect(readOnly).toContain('pool_scrub_tasks_list');
+    expect(readOnly).not.toContain('pool_scrub_task_create');
+    expect(readOnly).not.toContain('pool_scrub_task_update');
   });
 
   it('does not advertise the container power tools to a read-only credential', () => {

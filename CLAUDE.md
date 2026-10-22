@@ -2709,6 +2709,28 @@ snapshots affected". It is plan-time only and therefore not a step (#119), and
 its failure does not fail the plan (#154). What it does NOT say is what happens
 to each snapshot it names, and the plan says that too.
 
+### A name argument is resolved again when the call runs, and the lookup is a step (#181)
+
+`pool_scrub_task_create` takes a pool's NAME, because every other tool names a
+pool that way, and `pool.scrub.create` takes the pool's numeric id. The
+confirmation token binds the arguments and not the plan, so the id the plan
+resolved is not something `execute` can be handed — it reads `pool.query`
+again, by name, and creates against the id it finds. That read is therefore a
+call `execute` makes and is the plan's first step (#119), whose description
+gives the id as it was when the plan was made. **A name that no longer resolves
+fails before anything is created**; that is a refusal, not a branch to a
+different call. The task the plan approved is "a scrub task on the pool named
+X", and that is what runs.
+
+The scrub schedules are **stated as their five cron fields, quoted, and never
+put into words.** `describeSchedule` is the tasks family's rendering (#95), and
+importing it into `pools.ts` would be re-siting another family's code rather
+than matching its convention (#141). The fields are the same five, spelled as
+cron spells them and as `automated_tasks_list` reports them, and the plan
+quotes exactly what will be sent. If a later ticket wants scrub schedules in
+words, that is the moment to promote the rendering deliberately, not to add a
+second one here.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
