@@ -2271,3 +2271,441 @@ export const iscsiTargetUpdate: MutatingTool = {
 function readTarget(ctx: ToolContext, id: number): Promise<unknown> {
   return firstValueFrom(ctx.system.client.api.query('iscsi.target.query', [['id', '=', id]]));
 }
+
+/**
+ * `nvmeof_subsystem_create` and `nvmeof_subsystem_update`: making one NVMe-oF
+ * subsystem, and changing an existing one's name, NQN and whether it admits any
+ * host.
+ *
+ * TWO TOOLS AND NOT ONE, for the iSCSI pair's reason above.
+ *
+ * WHETHER THE METHODS EXIST DEPENDS ON THE SYSTEM. `nvmeof_list` reports
+ * `supported: false` off an absent-method rejection of `nvmet.subsys.query`, and
+ * both plans read that same call and fail on that same rejection, saying NVMe-oF
+ * is not supported there — rather than letting an approver approve a call the
+ * system has no method for. Any other rejection is not read as unsupported, for
+ * `nvmeof_list`'s reason.
+ *
+ * `subnqn` OMITTED IS THE MIDDLEWARE'S TO DERIVE, by a rule the surface does not
+ * state, so the create plan does not predict it and the result reads it back off
+ * the response (#170's rule for an identifier the middleware invents). `serial`
+ * is always the middleware's, and is read back the same way.
+ *
+ * `allow_any_host` TRUE ADMITS EVERY HOST THAT CAN REACH A PUBLISHED PORT, and
+ * both plans say so in words wherever it would be true after the call. Hosts,
+ * namespaces and port publication are out of scope, so a subsystem created here
+ * serves nothing until something outside this catalog gives it a namespace and
+ * publishes it on a port — which the create plan says.
+ *
+ * `pi_enable`, `qid_max`, `ieee_oui` and `ana` are refused by name: tuning fields
+ * whose meaning the surface does not state (#102).
+ *
+ * THE ROLE IS `Role.Sharing`, with the iSCSI pair's caveat: that the
+ * sharing-admin role grants `nvmet.subsys.create` and `nvmet.subsys.update` is
+ * (unconfirmed) against a live system's `privilege.roles`.
+ */
+
+/** The settings both tools send. Every one is optional on update. */
+type SubsystemFields = {
+  name?: string;
+  subnqn?: string;
+  allow_any_host?: boolean;
+};
+
+/** The order the plan states the fields in, which is the schema's. */
+const SUBSYSTEM_FIELDS = ['name', 'subnqn', 'allow_any_host'] as const;
+
+/** Why the tuning fields are refused, worded once for both tools. */
+const SUBSYSTEM_REFUSED =
+  "a subsystem's tuning fields are out of this tool's scope, because the surface does not state what they mean";
+
+/**
+ * The subsystem settings, each validated where it was passed and left out where
+ * it was not, in the schema's order — so the record is exactly what is sent.
+ */
+function parseSubsystemFields(args: Record<string, unknown>): SubsystemFields {
+  refuseArgs(args, ['pi_enable', 'qid_max', 'ieee_oui', 'ana'], SUBSYSTEM_REFUSED);
+  const fields: SubsystemFields = {};
+  const name = args['name'];
+  if (name !== undefined) {
+    if (textOrNull(name) === null) throw new Error('"name" must be a non-empty string');
+    fields.name = name as string;
+  }
+  const subnqn = args['subnqn'];
+  if (subnqn !== undefined) {
+    // Omitting it is how the system is asked to derive one; an empty or null one
+    // is refused rather than read as that, so a caller who meant one is not told
+    // the other happened.
+    if (textOrNull(subnqn) === null) {
+      throw new Error('"subnqn" must be a non-empty string, an NVMe Qualified Name; omit it to let the system derive one');
+    }
+    fields.subnqn = subnqn as string;
+  }
+  const anyHost = args['allow_any_host'];
+  if (anyHost !== undefined) {
+    if (typeof anyHost !== 'boolean') throw new Error('"allow_any_host" must be true or false');
+    fields.allow_any_host = anyHost;
+  }
+  return fields;
+}
+
+/** What `nvmeof_subsystem_create` sends: the settings passed, with a name. */
+type SubsystemCreate = SubsystemFields & { name: string };
+
+function parseSubsystemCreate(args: Record<string, unknown>): SubsystemCreate {
+  const fields = parseSubsystemFields(args);
+  if (fields.name === undefined) throw new Error('"name" is required');
+  return { ...fields, name: fields.name };
+}
+
+/** What `nvmeof_subsystem_update` was asked to do. */
+interface SubsystemUpdate {
+  id: number;
+  fields: SubsystemFields;
+}
+
+function parseSubsystemUpdate(args: Record<string, unknown>): SubsystemUpdate {
+  const fields = parseSubsystemFields(args);
+  const id = args['id'];
+  if (!isWholeNumber(id)) throw new Error('"id" is required and must be a whole number');
+  if (Object.keys(fields).length === 0) {
+    throw new Error(`Nothing to change: pass at least one of ${SUBSYSTEM_FIELDS.join(', ')}`);
+  }
+  return { id, fields };
+}
+
+/**
+ * An NVMe-oF subsystem as these tools report it, field by field. The tuning
+ * fields are not reported, for the reason they are refused, and neither are the
+ * host, namespace and port id lists — `nvmeof_list` reports what those name.
+ */
+interface SubsystemResult {
+  id: number | null;
+  name: string | null;
+  subnqn: string | null;
+  serial: string | null;
+  allow_any_host: boolean | null;
+}
+
+function subsystemResult(row: Record<string, unknown>): SubsystemResult {
+  return {
+    id: numberOrNull(row['id']),
+    name: textOrNull(row['name']),
+    subnqn: textOrNull(row['subnqn']),
+    serial: textOrNull(row['serial']),
+    allow_any_host: booleanOrNull(row['allow_any_host']),
+  };
+}
+
+/** A row's values for the fields named, as {@link agreement} compares them. */
+function subsystemReading(row: Record<string, unknown>, keys: readonly string[]): Record<string, string | boolean | null> {
+  const read = subsystemResult(row);
+  return Object.fromEntries(keys.map((key) => [key, read[key as keyof SubsystemFields]]));
+}
+
+/** One field as the subsystem holds it now, as a plan states it. */
+function storedSubsystemValue(row: Record<string, unknown>, key: string): string {
+  const value = subsystemReading(row, [key])[key];
+  return value === null ? NONE_REPORTED : JSON.stringify(value);
+}
+
+/** What a plan says where the system has no NVMe-oF, as `nvmeof_list` would. */
+function unsupported(reason: unknown): Error {
+  return new Error(
+    `NVMe-oF is not supported on this system: it has no nvmet.subsys methods (${errorText(reason)}), ` +
+      'which `nvmeof_list` reports as `supported: false`.',
+  );
+}
+
+/** The words for a subsystem that admits any host. */
+const ANY_HOST =
+  'ANY HOST THAT CAN REACH A PORT THIS SUBSYSTEM IS PUBLISHED ON CAN CONNECT (allow_any_host true)';
+
+/** The words for a subsystem that admits only the hosts allowed onto it. */
+const LISTED_HOSTS =
+  'only hosts explicitly allowed onto it may connect (allow_any_host false); `nvmeof_list` reports which ' +
+  'hosts those are, and no tool in this catalog allows one';
+
+/** Who the new subsystem admits, in words, given what is sent. */
+function createHostSentence(anyHost: boolean | undefined): string {
+  if (anyHost === true) return ` ${ANY_HOST}.`;
+  if (anyHost === false) return ` It admits ${LISTED_HOSTS}.`;
+  return (
+    " `allow_any_host` is not sent, so the system's default applies, which is not read here — " +
+    `(unconfirmed) that this is false. Where it is true, ${ANY_HOST}; the result reports which it is.`
+  );
+}
+
+/** Who the subsystem will admit after the update, in words. */
+function updateHostSentence(sent: boolean | undefined, now: boolean | null): string {
+  if (sent === true) return ` ${ANY_HOST}.`;
+  if (sent === false) {
+    return (
+      ` After this it admits ${LISTED_HOSTS}` +
+      (now === true ? '. A host that could connect only because it allowed any host loses access.' : '.')
+    );
+  }
+  if (now === true) return ` It allows any host now and this does not change that: ${ANY_HOST}.`;
+  if (now === null) return ' Whether it admits any host could not be read; this does not change it.';
+  return '';
+}
+
+const SUBSYSTEM_ROW_FIELDS =
+  "`id`, which is what `nvmeof_subsystem_update` takes; `name`; `subnqn`, the NVMe Qualified Name " +
+  "hosts connect to — what `nvmeof_list` reports as `nqn`; `serial`, the system's own; and " +
+  '`allow_any_host`. Each is null where the response stated no value this tool could read. The ' +
+  "subsystem's tuning fields and its host, namespace and port lists are not reported.";
+
+const SUBSYSTEM_CREATE_GUIDANCE =
+  '`requested` is exactly what was sent. `subsystem` is the created subsystem read back off the ' +
+  'response the create itself answered with — never copied from the request — or null where that ' +
+  `response was not a record. Its fields are ${SUBSYSTEM_ROW_FIELDS} WHERE \`subnqn\` WAS NOT SENT ` +
+  'THE ONE REPORTED IS THE ONE THE SYSTEM DERIVED, and is the NQN to give a host. `confirmed` is ' +
+  'whether `subsystem` holds every value sent: true is the system reporting back what was asked ' +
+  'for; FALSE IS NOT A SUCCESS — the call did not reject and at least one value was stored as ' +
+  'something else; and null is a response in which some value sent could not be read back and none ' +
+  'read back as different. A null `subsystem` means nothing here establishes that a subsystem was ' +
+  'created, and is not evidence that none was — `nvmeof_list` shows what the system now holds.';
+
+export const nvmeofSubsystemCreate: MutatingTool = {
+  name: 'nvmeof_subsystem_create',
+  description:
+    'Creates one NVMe-oF subsystem on this TrueNAS system. Two-phase: called without a ' +
+    'confirmation_token it returns a plan for user approval; called with one it creates the ' +
+    'subsystem. `name` is required; `subnqn` and `allow_any_host` are optional. `subnqn` OMITTED ' +
+    'IS DERIVED BY THE SYSTEM, by a rule this catalog does not know, and the result reports the one ' +
+    'it chose. `pi_enable`, `qid_max`, `ieee_oui` and `ana` are refused. ON A SYSTEM WITHOUT ' +
+    "NVMe-oF THE PLAN FAILS, saying so, where `nvmeof_list` reports `supported: false`. " +
+    '`allow_any_host` true admits ANY HOST THAT CAN REACH A PORT THE SUBSYSTEM IS PUBLISHED ON, and ' +
+    'the plan says so in words wherever it may be true. A NEW SUBSYSTEM HAS NO NAMESPACE AND IS ' +
+    'PUBLISHED ON NO PORT, SO IT SERVES NOTHING AND IS UNREACHABLE: no tool in this catalog adds a ' +
+    'namespace, allows a host or publishes a subsystem on a port, and `nvmeof_list` reports where ' +
+    'one is published under `ports[].subsystems`. `destructiveness` is `reversible`, but NO TOOL IN ' +
+    'THIS CATALOG DELETES AN NVMe-oF SUBSYSTEM: undoing this means deleting it outside this catalog. ' +
+    SUBSYSTEM_CREATE_GUIDANCE,
+  resultGuidance: SUBSYSTEM_CREATE_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', description: "The subsystem's short name." },
+      subnqn: {
+        type: 'string',
+        description: 'The NVMe Qualified Name hosts connect to. Omit it and the system derives one.',
+      },
+      allow_any_host: {
+        type: 'boolean',
+        description: 'true admits ANY host that can reach a port the subsystem is published on.',
+      },
+    },
+    required: ['name'],
+  },
+  requiredRole: Role.Sharing,
+  mutating: true,
+  // Additive: the subsystem is a new row and nothing existing is removed. Who it
+  // admits is stated in the plan rather than recorded here.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    return parseSubsystemCreate(rawArgs);
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const body = parseSubsystemCreate(rawArgs);
+    // Plan-time only and not a step (#119): it is read for whether the method
+    // exists, and no row of it is used, so one row is all it asks for.
+    let support = '';
+    try {
+      await firstValueFrom(ctx.system.client.api.query('nvmet.subsys.query', [], { limit: 1 }));
+    } catch (reason) {
+      if (isMissingMethod(reason)) throw unsupported(reason);
+      support =
+        ' Whether this system supports NVMe-oF could not be checked: nvmet.subsys.query failed ' +
+        `(${errorText(reason)}).`;
+    }
+    const subnqn =
+      body.subnqn === undefined
+        ? ' `subnqn` is not sent, so the system derives the NQN hosts connect to, by a rule this ' +
+          'catalog does not know; the result reports the one it chose.'
+        : '';
+    return [
+      {
+        method: 'nvmet.subsys.create',
+        params: [body],
+        description:
+          `Create an NVMe-oF subsystem, ${Object.entries(body)
+            .map(([key, value]) => `${key} ${JSON.stringify(value)}`)
+            .join(', ')}.${subnqn}${createHostSentence(body.allow_any_host)}` +
+          ' A NEW SUBSYSTEM HAS NO NAMESPACE AND IS PUBLISHED ON NO PORT, SO IT SERVES NOTHING: no ' +
+          'tool in this catalog adds a namespace or publishes a subsystem on a port, and ' +
+          '`nvmeof_list` reports where one is published under `ports[].subsystems`.' +
+          support,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const body = parseSubsystemCreate(rawArgs);
+    const created: unknown = await firstValueFrom(ctx.system.client.api.call('nvmet.subsys.create', [body]));
+    const held = recordOrNull(created);
+    return {
+      requested: body,
+      subsystem: held === null ? null : subsystemResult(held),
+      confirmed: held === null ? null : agreement(body, subsystemReading(held, Object.keys(body))),
+    };
+  },
+};
+
+const SUBSYSTEM_UPDATE_GUIDANCE =
+  '`requested` is exactly what was sent. `previous` is the subsystem as read immediately before the ' +
+  'call, and `resulting` is the subsystem read back off the response the update itself answered ' +
+  'with — never copied from the request. Both carry the fields `nvmeof_subsystem_create` reports; ' +
+  '`previous` is null where that read failed or listed no such subsystem, and `resulting` is null ' +
+  'where the response was not a record. `changes` names each field that was SENT, as `requested`, ' +
+  '`before` (off `previous`) and `after` (off `resulting`), and `before` or `after` is null wherever ' +
+  'the reading behind it is. `lookup` says what the read did: `FOUND`, `NOT_FOUND` (deleted between ' +
+  'the plan and the confirmation), or `UNREADABLE` with `lookup_error` naming why; THE UPDATE IS ' +
+  'ATTEMPTED IN ALL THREE CASES, because what runs must be what was approved. `changed` is true where ' +
+  'the subsystem before and after differ in one of the sent fields and false where they agree in ' +
+  'all, WHICH IS TWO OUTCOMES AND NOT ONE: the subsystem already held those values, or the call did ' +
+  'not apply. `confirmed` is what tells those apart, and `changed` must not be read without it. ' +
+  '`confirmed` is whether `resulting` holds every value sent: true is the system reporting back what ' +
+  'was asked for; FALSE IS NOT A SUCCESS — the call did not reject and at least one value was stored ' +
+  'as something else; null is a response in which some value sent could not be read back and none ' +
+  'read back as different. Both are null wherever a reading they need is missing.';
+
+export const nvmeofSubsystemUpdate: MutatingTool = {
+  name: 'nvmeof_subsystem_update',
+  description:
+    "Changes one existing NVMe-oF subsystem's `name`, `subnqn` or `allow_any_host` on this TrueNAS " +
+    'system. Two-phase: called without a confirmation_token it returns a plan for user approval; ' +
+    "called with one it sends the change. `id` is the subsystem's id as `nvmeof_list` reports it; " +
+    'PLANNING AGAINST AN id NO NVMe-oF SUBSYSTEM HAS FAILS, naming it, and on a system without ' +
+    'NVMe-oF the plan fails saying so. ONLY THE FIELDS PASSED ARE SENT, and at least one is ' +
+    'required; `pi_enable`, `qid_max`, `ieee_oui` and `ana` are refused. THE PLAN STATES EACH VALUE ' +
+    'SENT BESIDE THE ONE THE SUBSYSTEM HOLDS NOW, so the call that undoes it is in the plan, AND SAYS ' +
+    'IN WORDS WHERE IT WILL ADMIT ANY HOST. CHANGING `subnqn` CHANGES WHAT HOSTS CONNECT TO, so hosts ' +
+    'configured with the old NQN will no longer find it; whether renaming it changes the NQN too is ' +
+    '(unconfirmed), and the result reports the NQN read back. SENDING A SUBSYSTEM A VALUE IT ALREADY ' +
+    'HOLDS IS NOT AN ERROR. This tool cannot create or delete a subsystem; `nvmeof_subsystem_create` ' +
+    'creates one. ' +
+    SUBSYSTEM_UPDATE_GUIDANCE,
+  resultGuidance: SUBSYSTEM_UPDATE_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'integer',
+        description: "The subsystem's `id`, as `nvmeof_list` reports it on the system being targeted.",
+      },
+      name: { type: 'string', description: 'A new short name for the subsystem.' },
+      subnqn: {
+        type: 'string',
+        description: 'A new NVMe Qualified Name. Hosts configured with the old one will no longer find it.',
+      },
+      allow_any_host: {
+        type: 'boolean',
+        description: 'true admits ANY host that can reach a port the subsystem is published on.',
+      },
+    },
+    required: ['id'],
+  },
+  requiredRole: Role.Sharing,
+  mutating: true,
+  // Every field it sends can be sent back, and the plan states the value each
+  // held. What a new NQN or a narrower admission does to connected hosts is
+  // stated in the plan rather than recorded here.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const { id, fields } = parseSubsystemUpdate(rawArgs);
+    return { id, ...fields };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const { id, fields } = parseSubsystemUpdate(rawArgs);
+    let rows: unknown;
+    try {
+      rows = await readSubsystem(ctx, id);
+    } catch (reason) {
+      if (isMissingMethod(reason)) throw unsupported(reason);
+      throw reason;
+    }
+    const row = rowWithId(rows, id);
+    if (row === null) {
+      throw new Error(`No NVMe-oF subsystem with id ${id} on this system — ids come from \`nvmeof_list\``);
+    }
+    const now = subsystemResult(row);
+    const notes: string[] = [];
+    if (fields.subnqn !== undefined && fields.subnqn !== now.subnqn) {
+      notes.push(
+        ' CHANGING THE NQN CHANGES WHAT HOSTS CONNECT TO: hosts configured with ' +
+          `${now.subnqn === null ? 'the old NQN' : `"${now.subnqn}"`} will no longer find this subsystem.`,
+      );
+    } else if (fields.name !== undefined && fields.name !== now.name && fields.subnqn === undefined) {
+      notes.push(' Whether renaming it also changes the NQN hosts connect to is (unconfirmed); the result reports the NQN read back.');
+    }
+    notes.push(updateHostSentence(fields.allow_any_host, now.allow_any_host));
+    const already =
+      agreement(fields, subsystemReading(row, Object.keys(fields))) === true
+        ? ' The subsystem already holds every value this sends, which is not an error.'
+        : '';
+    const changes = Object.entries(fields)
+      .map(([key, value]) => `${key} ${JSON.stringify(value)} (now ${storedSubsystemValue(row, key)})`)
+      .join('; ');
+    return [
+      readStep('nvmet.subsys.query', 'NVMe-oF subsystem', id),
+      {
+        method: 'nvmet.subsys.update',
+        params: [id, fields],
+        description:
+          `Change the NVMe-oF subsystem named ${now.name === null ? NONE_REPORTED : `"${now.name}"`} ` +
+          `(id ${id}): ${changes}. Only these fields are sent.${notes.join('')}${already}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const { id, fields } = parseSubsystemUpdate(rawArgs);
+    let previous: Record<string, unknown> | null = null;
+    let lookupError: string | null = null;
+    try {
+      previous = rowWithId(await readSubsystem(ctx, id), id);
+    } catch (reason) {
+      lookupError = errorText(reason);
+    }
+    // Issued whatever the read said: skipping it for a subsystem the read no
+    // longer lists would be `execute` branching on state the confirmation token
+    // cannot bind.
+    const updated: unknown = await firstValueFrom(ctx.system.client.api.call('nvmet.subsys.update', [id, fields]));
+    const resulting = recordOrNull(updated);
+    const keys = Object.keys(fields);
+    const before = previous === null ? null : subsystemResult(previous);
+    const after = resulting === null ? null : subsystemResult(resulting);
+    const changes = Object.fromEntries(
+      Object.entries(fields).map(([key, value]) => [
+        key,
+        {
+          requested: value,
+          before: before?.[key as keyof SubsystemFields] ?? null,
+          after: after?.[key as keyof SubsystemFields] ?? null,
+        },
+      ]),
+    );
+    // `changed` compares the two READINGS on the fields that were sent, never
+    // the request: a response still holding the old value is a call that did
+    // not apply, not one that changed nothing.
+    const same =
+      previous === null || resulting === null
+        ? null
+        : agreement(subsystemReading(previous, keys), subsystemReading(resulting, keys));
+    return {
+      id,
+      requested: fields,
+      lookup: lookupError !== null ? 'UNREADABLE' : previous === null ? 'NOT_FOUND' : 'FOUND',
+      lookup_error: lookupError,
+      previous: before,
+      resulting: after,
+      changes,
+      changed: same === null ? null : !same,
+      confirmed: resulting === null ? null : agreement(fields, subsystemReading(resulting, keys)),
+    };
+  },
+};
+
+function readSubsystem(ctx: ToolContext, id: number): Promise<unknown> {
+  return firstValueFrom(ctx.system.client.api.query('nvmet.subsys.query', [['id', '=', id]]));
+}

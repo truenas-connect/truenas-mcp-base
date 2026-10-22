@@ -2813,6 +2813,25 @@ read through `tag` and `user` alone: it carries `secret` and `peersecret`.
 `refuseArgs` moved to `common.ts` beside `agreement`, as the second family to
 refuse API arguments by name.
 
+### A mutation on a feature the system may lack reads support the way its listing does (#186)
+
+`nvmeof_subsystem_create` and `nvmeof_subsystem_update` act on NVMe-oF, which a
+TrueNAS predating it has no methods for. **Both plans read `nvmet.subsys.query`
+and fail on an absent-method rejection with the same verdict `nvmeof_list`
+reports as `supported: false`**, so an approver is never shown a call the
+system cannot make, and the two tools cannot disagree with the listing about
+the same system. Any other rejection is not read as unsupported, for the
+listing's reason. On the update that read is the existence check and a step,
+so it raises; on the create it is plan-time only and not a step (#119), asks
+for one row because no row is used, and its failure is stated in the plan
+rather than failing it (#154).
+
+`subnqn` left out is derived by the middleware by a rule the surface does not
+state, so the create plan does not predict it and the result reads it back —
+#170's rule for an identifier the middleware invents. A `null` or empty
+`subnqn` is refused rather than read as "derive", so omitting the field is the
+only way to ask for that.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

@@ -3,7 +3,7 @@ import { Role } from '@/interfaces';
 import { createDefaultCatalog } from '@/tools/index';
 
 describe('createDefaultCatalog', () => {
-  it('registers the eighty-six sketch tools', () => {
+  it('registers the eighty-eight sketch tools', () => {
     expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toEqual([
       'system_info',
       'system_update_status',
@@ -91,10 +91,12 @@ describe('createDefaultCatalog', () => {
       'nfs_share_update',
       'iscsi_target_create',
       'iscsi_target_update',
+      'nvmeof_subsystem_create',
+      'nvmeof_subsystem_update',
     ]);
   });
 
-  it('advertises the SMB, NFS and iSCSI target mutations to a sharing credential, and not to a read-only one', () => {
+  it('advertises the SMB, NFS, iSCSI target and NVMe-oF subsystem mutations to a sharing credential, and not to a read-only one', () => {
     const sharing = createDefaultCatalog().list(Role.Sharing).map((t) => t.name);
     const readOnly = createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name);
     for (const name of [
@@ -104,6 +106,8 @@ describe('createDefaultCatalog', () => {
       'nfs_share_update',
       'iscsi_target_create',
       'iscsi_target_update',
+      'nvmeof_subsystem_create',
+      'nvmeof_subsystem_update',
     ]) {
       expect(sharing).toContain(name);
       expect(readOnly).not.toContain(name);
