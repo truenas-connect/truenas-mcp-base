@@ -14,7 +14,7 @@ import { smbShareCreate } from '@/tools/index';
 const datasets = [
   { id: 'tank', mountpoint: '/mnt/tank' },
   { id: 'tank/projects', mountpoint: '/mnt/tank/projects' },
-  { id: 'tank/vol', mountpoint: null },
+  { id: 'tank/vol', type: 'VOLUME', mountpoint: null },
   { id: 'tank/legacy', mountpoint: 'legacy' },
 ];
 
@@ -211,6 +211,25 @@ describe('smb_share_create', () => {
           path: '/srv/x',
         }),
       ).rejects.toThrow(/1 dataset could not be read, and so could not be compared/);
+    });
+
+    it('counts a filesystem reporting no mountpoint as unread, and a volume as nothing to compare', async () => {
+      // A locked filesystem under the path is the deepest dataset there, so
+      // naming its parent alone would point the approver at the wrong ACL.
+      const rows = [
+        { id: 'tank', type: 'FILESYSTEM', mountpoint: '/mnt/tank' },
+        { id: 'tank/secret', type: 'FILESYSTEM', mountpoint: null },
+        { id: 'tank/unknown', mountpoint: null },
+        { id: 'tank/vol', type: 'VOLUME', mountpoint: null },
+      ];
+      const [step] = await smbShareCreate.plan(system({ 'pool.dataset.query': rows }).ctx, {
+        ...args,
+        path: '/mnt/tank/secret',
+      });
+      expect(step.description).toContain('is a directory inside dataset "tank"');
+      expect(step.description).toContain('2 datasets could not be read, so the path may belong to one of them');
+      const [clean] = await smbShareCreate.plan(system().ctx, args);
+      expect(clean.description).not.toContain('could not be read, so the path');
     });
 
     it('fails, naming why, when the datasets could not be read at all', async () => {

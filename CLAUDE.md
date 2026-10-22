@@ -2744,9 +2744,15 @@ or lies inside — never a dataset id derived from the string.** `/mnt/<pool>/�
 is a convention and a mountpoint is a fact, so a lookup that strips `/mnt/` and
 filters on the remainder would be guessing at the one thing the read exists to
 establish. The walk is `storage.ts`'s (`retrieve_children: true`, `properties:
-[]`), and a row whose id cannot be read is COUNTED and stated, because if it is
-the deepest mountpoint over the path the dataset named is its parent (#93). A
-directory inside a dataset is legal and is said to be one, not refused.
+[]`), and a row whose id cannot be read — or a filesystem reporting no
+mountpoint, which the client declares nullable and a locked dataset plausibly
+sends — is COUNTED and stated, because if it is the deepest mountpoint over the
+path the dataset named is its parent (#93). Only a `VOLUME`, or a mountpoint
+of `none` or `legacy`, is skipped as having no directory to compare. The path
+itself is refused unless written plainly — no empty, `.` or `..` segment and no
+trailing slash — because the comparison is by string, and `/mnt/tank/../x` or
+`/mnt/tank//projects` would otherwise match the wrong mountpoint. A directory
+inside a dataset is legal and is said to be one, not refused.
 
 **A middleware pre-check is a plan-time read whose REJECTION is a refusal.**
 `sharing.smb.share_precheck` answers `null`, so the only thing it can say is

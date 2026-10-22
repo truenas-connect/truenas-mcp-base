@@ -1461,9 +1461,15 @@ async function datasetOfPath(ctx: ToolContext, path: string): Promise<PathOwner>
       continue;
     }
     // A volume has no mountpoint and a filesystem can name `none` or `legacy`:
-    // neither is a directory a share could sit under.
+    // neither is a directory a share could sit under. A filesystem reporting
+    // NO mountpoint is another matter — the client declares the field nullable,
+    // and a locked dataset is the likely case — so it is counted as unread.
     const mountpoint = textOrNull(held?.['mountpoint']);
-    if (mountpoint === null || !mountpoint.startsWith('/')) continue;
+    if (mountpoint === null) {
+      if (textOrNull(held?.['type']) !== 'VOLUME') unreadable += 1;
+      continue;
+    }
+    if (!mountpoint.startsWith('/')) continue;
     const mount = trimmedPath(mountpoint);
     const exact = wanted === mount;
     if (!exact && !wanted.startsWith(mount === '/' ? '/' : `${mount}/`)) continue;
