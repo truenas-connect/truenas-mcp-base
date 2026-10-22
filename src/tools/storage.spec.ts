@@ -1092,12 +1092,11 @@ describe('dataset_set_quota', () => {
   };
 
   describe('arguments', () => {
-    it('refuses a call naming neither limit, in the schema and in the parse', () => {
+    it('refuses a call naming neither limit, in the parse and with no combinator at the schema root', () => {
       expect(datasetSetQuota.inputSchema['required']).toEqual(['dataset']);
-      expect(datasetSetQuota.inputSchema['anyOf']).toEqual([
-        { required: ['quota_bytes'] },
-        { required: ['refquota_bytes'] },
-      ]);
+      for (const combinator of ['anyOf', 'oneOf', 'allOf']) {
+        expect(datasetSetQuota.inputSchema).not.toHaveProperty(combinator);
+      }
       expect(() => datasetSetQuota.normalizeArgs?.({ dataset: 'tank/media' })).toThrow(
         'Nothing to change: pass at least one of quota_bytes, refquota_bytes',
       );

@@ -1221,7 +1221,8 @@ export const datasetSetQuota: MutatingTool = {
     'refreservation, neither of which this tool reads; the call is then rejected. The ' +
     'current values are read when the plan is made and not ' +
     'again, so a dataset that grows before confirmation can still have the change ' +
-    'refused. Setting a limit the dataset already holds is not an error. This tool does ' +
+    'refused. Setting a limit the dataset already holds is not an error, unless its usage ' +
+    'has already passed that limit, which fails the plan as above. This tool does ' +
     'not set the quota warning or critical alert thresholds, per-user or per-group ' +
     "quotas, reservations, or a volume's size. `destructiveness` is `reversible`: nothing " +
     'is deleted, and sending back the old values the plan names puts the limits back — ' +
@@ -1247,8 +1248,11 @@ export const datasetSetQuota: MutatingTool = {
         description: 'The new `refquota`, in bytes: caps the data the dataset itself holds. 0 or null removes it.',
       },
     },
+    // "At least one limit" is enforced by the parse, as every sibling update
+    // tool's "at least one field" is: a combinator at the root of a tool's
+    // input schema is refused by some hosts, which would take down the whole
+    // catalog rather than this tool.
     required: ['dataset'],
-    anyOf: [{ required: ['quota_bytes'] }, { required: ['refquota_bytes'] }],
   },
   requiredRole: Role.Full,
   mutating: true,
