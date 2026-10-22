@@ -1211,17 +1211,23 @@ export const datasetSetQuota: MutatingTool = {
     'its descendants and snapshots, and `refquota` caps `referenced`, the data the dataset ' +
     'itself holds alone. THE PLAN STATES EACH LIMIT AS IT IS NOW, AS IT WILL BE, AND THE ' +
     'USAGE IT CAPS, in bytes and in binary units, so wherever the current limit could be ' +
-    'read the call that undoes this is in the plan. A LIMIT BELOW THE USAGE IT CAPS FAILS ' +
-    'THE PLAN, naming both, because ZFS refuses one (read from the OpenZFS implementation, ' +
-    'not from this API surface). A LIMIT EXACTLY AT THAT USAGE IS ACCEPTED AND THE PLAN ' +
-    'SAYS WRITES WILL THEN FAIL — that is how a quota stops a runaway writer. ZFS also ' +
-    "refuses a limit below the dataset's reservation, which this tool does not read; the " +
-    'call is then rejected. The current values are read when the plan is made and not ' +
+    'read the call that undoes this is in the plan. A VOLUME FAILS THE PLAN: `quota` and ' +
+    '`refquota` are filesystem properties, and a dataset whose type could not be read is ' +
+    'planned with a sentence saying the call may be rejected. A LIMIT BELOW THE USAGE IT ' +
+    'CAPS FAILS THE PLAN, naming both, because ZFS refuses one (read from the OpenZFS ' +
+    'implementation, not from this API surface). A LIMIT EXACTLY AT THAT USAGE IS ACCEPTED ' +
+    'AND THE PLAN SAYS WRITES WILL THEN FAIL — that is how a quota stops a runaway writer. ' +
+    "ZFS also refuses a `quota` below the dataset's reservation, and a `refquota` below its " +
+    'refreservation, neither of which this tool reads; the call is then rejected. The ' +
+    'current values are read when the plan is made and not ' +
     'again, so a dataset that grows before confirmation can still have the change ' +
     'refused. Setting a limit the dataset already holds is not an error. This tool does ' +
     'not set the quota warning or critical alert thresholds, per-user or per-group ' +
     "quotas, reservations, or a volume's size. `destructiveness` is `reversible`: nothing " +
-    'is deleted, and sending back the old values the plan names puts the limits back. ' +
+    'is deleted, and sending back the old values the plan names puts the limits back — ' +
+    'BUT ONLY WHILE THE USAGE EACH CAPS IS STILL AT OR BELOW THE OLD VALUE. A dataset that ' +
+    'grows past an old limit after it was raised or removed cannot be given it back, by ' +
+    'this tool or by ZFS. ' +
     DATASET_SET_QUOTA_GUIDANCE,
   resultGuidance: DATASET_SET_QUOTA_GUIDANCE,
   inputSchema: {
@@ -1257,6 +1263,20 @@ export const datasetSetQuota: MutatingTool = {
     const request = parseQuotaRequest(rawArgs);
     const { dataset, limits } = request;
     const row = await readQuotaDataset(ctx, dataset);
+    // The middleware refuses these limits on a volume, so the plan does too
+    // (#161). An unreadable type does not refuse anything (#154); it is stated.
+    const type = textOrNull(row['type']);
+    if (type === 'VOLUME') {
+      throw new Error(
+        `Dataset "${dataset}" is a volume, and \`quota\` and \`refquota\` are filesystem properties ` +
+          "that ZFS does not set on one — a volume's size is its `volsize`, which this tool does not change",
+      );
+    }
+    const typeNote =
+      type === null
+        ? ' Whether this dataset is a filesystem could not be read; ZFS does not set these limits on a ' +
+          'volume, so the call may be rejected.'
+        : '';
     const sentences = (Object.keys(limits) as QuotaKind[])
       .map((kind) => limitSentence(dataset, kind, limits[kind] ?? null, row))
       .join('');
@@ -1266,7 +1286,7 @@ export const datasetSetQuota: MutatingTool = {
         params: quotaUpdateParams(request),
         description:
           `Set limits on dataset "${dataset}". Only ${Object.keys(limits).join(' and ')} ` +
-          `${Object.keys(limits).length === 1 ? 'is' : 'are'} sent.${sentences} The current values ` +
+          `${Object.keys(limits).length === 1 ? 'is' : 'are'} sent.${typeNote}${sentences} The current values ` +
           'and usage were read when this plan was made and are not read again.',
       },
     ];

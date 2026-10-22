@@ -1211,6 +1211,22 @@ describe('dataset_set_quota', () => {
       );
     });
 
+    it('refuses a volume, and states rather than refuses a type it could not read', async () => {
+      const volume = system({ 'pool.dataset.query': [media({ type: 'VOLUME' })] });
+      await expect(datasetSetQuota.plan(volume.ctx, { dataset: 'tank/media', quota_bytes: 5 * TIB })).rejects.toThrow(
+        'Dataset "tank/media" is a volume, and `quota` and `refquota` are filesystem properties',
+      );
+      const unread = await describeStep({ quota_bytes: 5 * TIB }, { 'pool.dataset.query': [media({ type: 7 })] });
+      expect(unread).toContain('Whether this dataset is a filesystem could not be read');
+      expect(await describeStep({ quota_bytes: 5 * TIB })).not.toContain('is a filesystem');
+    });
+
+    it('promises the reversal only while usage is at or below the old value', () => {
+      expect(datasetSetQuota.description).toContain(
+        'BUT ONLY WHILE THE USAGE EACH CAPS IS STILL AT OR BELOW THE OLD VALUE',
+      );
+    });
+
     it('says the comparison was not made where the usage could not be read', async () => {
       const text = await describeStep({ quota_bytes: TIB }, { 'pool.dataset.query': [media({ used: undefined })] });
       expect(text).toContain('its current `used` could not be read');

@@ -189,7 +189,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   Its plan states each limit as it is now and as it will be, beside the usage
   that limit caps. A limit below that usage fails the plan, because ZFS refuses
   one; a limit exactly at it is accepted, and the plan says writes will then
-  fail. It does not touch the quota
+  fail. A volume is refused, since it has neither limit. It does not touch the quota
   alert thresholds, per-user or per-group quotas, reservations, or a volume's
   size.
   `container_list` and the three container power tools are the first family
