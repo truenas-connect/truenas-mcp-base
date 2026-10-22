@@ -1,6 +1,7 @@
+import type { CallParams } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
-import { MutatingTool, PlanStep, ReadOnlyTool, SystemHandle, ToolContext } from '@/catalog/tool';
+import { ApiSurface, MutatingTool, PlanStep, ReadOnlyTool, SystemHandle, ToolContext } from '@/catalog/tool';
 import {
   agreement,
   booleanOrNull,
@@ -1044,6 +1045,14 @@ function parseQuotaRequest(args: Record<string, unknown>): QuotaRequest {
   return { dataset, limits };
 }
 
+/**
+ * The update's params, typed off the call (#91) and built in one place, so the
+ * plan step names exactly the call `execute` makes.
+ */
+function quotaUpdateParams(request: QuotaRequest): CallParams<ApiSurface, 'pool.dataset.update'> {
+  return [request.dataset, { ...request.limits }];
+}
+
 /** The arguments as passed, under their own names, for the confirmation token and the result. */
 function quotaArgs(limits: QuotaRequest['limits']): Record<string, number | null> {
   return Object.fromEntries(
@@ -1086,22 +1095,42 @@ const QUOTA_CAPS: Record<QuotaKind, { caps: string; usage: 'used' | 'referenced'
 };
 
 /**
+ * Where ZFS's own refusal of a limit below usage is read from. It is not on the
+ * API surface, so every sentence that relies on it says so.
+ */
+const BELOW_USAGE_SOURCE = 'read from the OpenZFS implementation, not from this API surface';
+
+/**
  * One limit's sentence in the plan: what it caps, what it is now, what it will
  * be, and the usage it caps.
  *
- * A limit at or below current usage is WARNED about and not refused. ZFS
- * accepts it and the dataset is then over its limit, so every write that would
- * add to the capped usage fails — and shrinking a quota to stop a runaway writer
- * is a real use of exactly that. The warning is the one thing an approver must
- * not miss, so it is stated outright; where the usage could not be read the plan
- * says the comparison was not made rather than staying silent, since silence
- * reads as "there is room".
+ * **A limit BELOW current usage fails the plan**, because ZFS refuses it: the
+ * quota and refquota set-checks answer `ENOSPC` for a new value under `used` or
+ * `referenced` respectively. That is #161's rule — a plan-time refusal is owed
+ * where the middleware refuses — and the ticket's premise that ZFS accepts such
+ * a limit was wrong. A limit EQUAL to usage is accepted and leaves no room, so
+ * it is warned about: that is the "stop a runaway writer" case, and it is the
+ * one thing an approver must not miss. Where the usage could not be read the
+ * plan says the comparison was not made rather than staying silent, since
+ * silence reads as "there is room".
  */
-function limitSentence(kind: QuotaKind, sent: number | null, row: Record<string, unknown>): string {
+function limitSentence(
+  dataset: string,
+  kind: QuotaKind,
+  sent: number | null,
+  row: Record<string, unknown>,
+): string {
   const { caps, usage } = QUOTA_CAPS[kind];
   const current = quotaLimit(row[kind]);
   const used = propertyBytes(row[usage]);
   const wanted = sent ?? 0;
+  if (wanted > 0 && used !== null && wanted < used) {
+    throw new Error(
+      `The new ${kind} for dataset "${dataset}", ${bytesText(wanted)}, is below its current \`${usage}\` ` +
+        `of ${bytesText(used)}, and ZFS refuses a ${kind} below what the dataset already holds ` +
+        `(${BELOW_USAGE_SOURCE}). To stop further writes, set it to the current \`${usage}\` or above`,
+    );
+  }
   const spelled = sent === null ? 'null' : String(sent);
   const usageText = used === null ? `its current \`${usage}\` could not be read` : `it currently has ${bytesText(used)} \`${usage}\``;
   let effect = '';
@@ -1110,14 +1139,15 @@ function limitSentence(kind: QuotaKind, sent: number | null, row: Record<string,
   }
   if (wanted > 0 && used === null) {
     effect +=
-      ` Whether the new ${kind} is below what the dataset already holds was not established, ` +
-      'because that usage could not be read.';
-  } else if (wanted > 0 && used !== null && wanted <= used) {
+      ` ZFS refuses a ${kind} below what the dataset already holds (${BELOW_USAGE_SOURCE}), and that ` +
+      'usage could not be read, so the call may be rejected.';
+  } else if (wanted > 0 && wanted === used) {
     effect +=
-      ` THE NEW ${kind.toUpperCase()} IS AT OR BELOW WHAT THE DATASET ALREADY HOLDS, SO WRITES ` +
-      `THAT ADD TO ITS \`${usage}\` WILL FAIL` +
+      ` THE NEW ${kind.toUpperCase()} IS EXACTLY WHAT THE DATASET ALREADY HOLDS, SO WRITES THAT ADD ` +
+      `TO ITS \`${usage}\` WILL FAIL` +
       `${kind === 'quota' ? ', in the dataset and in every descendant,' : ''} until space is freed or ` +
-      'the limit is raised. This is allowed and is not refused.';
+      'the limit is raised. If the dataset has grown by the time this is confirmed, ZFS refuses ' +
+      `the change instead (${BELOW_USAGE_SOURCE}).`;
   }
   return (
     ` \`${kind}\` (caps ${caps}): now ${limitText(current)}; will be ` +
@@ -1180,14 +1210,18 @@ export const datasetSetQuota: MutatingTool = {
     'things, as `datasets_quota_report` describes: `quota` caps `used`, the dataset with ' +
     'its descendants and snapshots, and `refquota` caps `referenced`, the data the dataset ' +
     'itself holds alone. THE PLAN STATES EACH LIMIT AS IT IS NOW, AS IT WILL BE, AND THE ' +
-    'USAGE IT CAPS, in bytes and in binary units, so the call that undoes it is in the ' +
-    'plan. A LIMIT AT OR BELOW CURRENT USAGE IS ACCEPTED, NOT REFUSED, AND THE PLAN SAYS ' +
-    'WRITES WILL THEN FAIL — lowering a quota to stop a runaway writer is a real use. The ' +
-    'current values are read when the plan is made and not again. Setting a limit the ' +
-    'dataset already holds is not an error. This tool does not set the quota warning or ' +
-    'critical alert thresholds, per-user or per-group quotas, reservations, or a volume\'s ' +
-    'size. `destructiveness` is `reversible`: nothing is deleted, and sending the old ' +
-    'values the plan names puts the limits back. ' +
+    'USAGE IT CAPS, in bytes and in binary units, so wherever the current limit could be ' +
+    'read the call that undoes this is in the plan. A LIMIT BELOW THE USAGE IT CAPS FAILS ' +
+    'THE PLAN, naming both, because ZFS refuses one (read from the OpenZFS implementation, ' +
+    'not from this API surface). A LIMIT EXACTLY AT THAT USAGE IS ACCEPTED AND THE PLAN ' +
+    'SAYS WRITES WILL THEN FAIL — that is how a quota stops a runaway writer. ZFS also ' +
+    "refuses a limit below the dataset's reservation, which this tool does not read; the " +
+    'call is then rejected. The current values are read when the plan is made and not ' +
+    'again, so a dataset that grows before confirmation can still have the change ' +
+    'refused. Setting a limit the dataset already holds is not an error. This tool does ' +
+    'not set the quota warning or critical alert thresholds, per-user or per-group ' +
+    "quotas, reservations, or a volume's size. `destructiveness` is `reversible`: nothing " +
+    'is deleted, and sending back the old values the plan names puts the limits back. ' +
     DATASET_SET_QUOTA_GUIDANCE,
   resultGuidance: DATASET_SET_QUOTA_GUIDANCE,
   inputSchema: {
@@ -1213,22 +1247,23 @@ export const datasetSetQuota: MutatingTool = {
   requiredRole: Role.Full,
   mutating: true,
   // Two numbers on one dataset, and the plan names the values to send back.
-  // A limit below usage stops writes and deletes nothing.
+  // A limit at usage stops writes and deletes nothing.
   destructiveness: 'reversible',
   normalizeArgs(rawArgs) {
     const { dataset, limits } = parseQuotaRequest(rawArgs);
     return { dataset, ...quotaArgs(limits) };
   },
   async plan(ctx, rawArgs): Promise<PlanStep[]> {
-    const { dataset, limits } = parseQuotaRequest(rawArgs);
+    const request = parseQuotaRequest(rawArgs);
+    const { dataset, limits } = request;
     const row = await readQuotaDataset(ctx, dataset);
     const sentences = (Object.keys(limits) as QuotaKind[])
-      .map((kind) => limitSentence(kind, limits[kind] ?? null, row))
+      .map((kind) => limitSentence(dataset, kind, limits[kind] ?? null, row))
       .join('');
     return [
       {
         method: 'pool.dataset.update',
-        params: [dataset, limits],
+        params: quotaUpdateParams(request),
         description:
           `Set limits on dataset "${dataset}". Only ${Object.keys(limits).join(' and ')} ` +
           `${Object.keys(limits).length === 1 ? 'is' : 'are'} sent.${sentences} The current values ` +
@@ -1237,9 +1272,10 @@ export const datasetSetQuota: MutatingTool = {
     ];
   },
   async execute(ctx, rawArgs) {
-    const { dataset, limits } = parseQuotaRequest(rawArgs);
+    const request = parseQuotaRequest(rawArgs);
+    const { dataset, limits } = request;
     const updated: unknown = await firstValueFrom(
-      ctx.system.client.api.call('pool.dataset.update', [dataset, limits]),
+      ctx.system.client.api.call('pool.dataset.update', quotaUpdateParams(request)),
     );
     // The update answers with the updated dataset, so the limits are read off
     // that rather than echoed from the request (#121), through the same reading

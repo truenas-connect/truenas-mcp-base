@@ -1178,16 +1178,33 @@ describe('dataset_set_quota', () => {
       expect(await describeStep({ quota_bytes: null })).toContain('will be no limit (sent as null)');
     });
 
-    it('warns, and does not refuse, where the new limit is at or below the usage it caps', async () => {
-      const below = await describeStep({ quota_bytes: 2 * TIB });
-      expect(below).toContain(
-        'THE NEW QUOTA IS AT OR BELOW WHAT THE DATASET ALREADY HOLDS, SO WRITES THAT ADD TO ITS `used` ' +
-          'WILL FAIL, in the dataset and in every descendant, until space is freed or the limit is raised. ' +
-          'This is allowed and is not refused.',
+    it('refuses a limit below the usage it caps, which ZFS refuses', async () => {
+      await expect(
+        datasetSetQuota.plan(system().ctx, { dataset: 'tank/media', quota_bytes: 2 * TIB }),
+      ).rejects.toThrow(
+        `The new quota for dataset "tank/media", ${2 * TIB} bytes (2 TiB), is below its current \`used\` of ` +
+          `${3 * TIB} bytes (3 TiB), and ZFS refuses a quota below what the dataset already holds (read from ` +
+          'the OpenZFS implementation, not from this API surface). To stop further writes, set it to the ' +
+          'current `used` or above',
       );
-      const equal = await describeStep({ refquota_bytes: GIB });
-      expect(equal).toContain('THE NEW REFQUOTA IS AT OR BELOW WHAT THE DATASET ALREADY HOLDS');
-      expect(equal).not.toContain('every descendant');
+      // Each limit is held against its own usage: a refquota under `used` but
+      // over `referenced` is fine, and one under `referenced` is not.
+      await expect(describeStep({ refquota_bytes: 2 * GIB })).resolves.not.toContain('WILL FAIL');
+      await expect(
+        datasetSetQuota.plan(system().ctx, { dataset: 'tank/media', refquota_bytes: GIB - 1 }),
+      ).rejects.toThrow(/is below its current `referenced`/);
+    });
+
+    it('warns where the new limit is exactly the usage it caps', async () => {
+      const equal = await describeStep({ quota_bytes: 3 * TIB });
+      expect(equal).toContain(
+        'THE NEW QUOTA IS EXACTLY WHAT THE DATASET ALREADY HOLDS, SO WRITES THAT ADD TO ITS `used` ' +
+          'WILL FAIL, in the dataset and in every descendant, until space is freed or the limit is raised. ' +
+          'If the dataset has grown by the time this is confirmed, ZFS refuses the change instead',
+      );
+      const refEqual = await describeStep({ refquota_bytes: GIB });
+      expect(refEqual).toContain('THE NEW REFQUOTA IS EXACTLY WHAT THE DATASET ALREADY HOLDS');
+      expect(refEqual).not.toContain('every descendant');
       // Removing a limit can never be below anything.
       expect(await describeStep({ quota_bytes: 0 }, { 'pool.dataset.query': [media({ used: { parsed: 1 } })] })).not.toContain(
         'WILL FAIL',
@@ -1197,7 +1214,10 @@ describe('dataset_set_quota', () => {
     it('says the comparison was not made where the usage could not be read', async () => {
       const text = await describeStep({ quota_bytes: TIB }, { 'pool.dataset.query': [media({ used: undefined })] });
       expect(text).toContain('its current `used` could not be read');
-      expect(text).toContain('Whether the new quota is below what the dataset already holds was not established');
+      expect(text).toContain(
+        'ZFS refuses a quota below what the dataset already holds (read from the OpenZFS implementation, ' +
+          'not from this API surface), and that usage could not be read, so the call may be rejected.',
+      );
       expect(text).not.toContain('WILL FAIL');
     });
 
@@ -1213,9 +1233,12 @@ describe('dataset_set_quota', () => {
     });
 
     it('renders a size that does not round exactly as about', async () => {
-      expect(await describeStep({ quota_bytes: 1536 * GIB + 1 })).toContain(`${1536 * GIB + 1} bytes (about 1.5 TiB)`);
-      expect(await describeStep({ quota_bytes: 1000 })).toContain('will be 1000 bytes;');
-      expect(await describeStep({ quota_bytes: 1 })).toContain('will be 1 byte;');
+      const empty = { 'pool.dataset.query': [media({ used: { parsed: 0 } })] };
+      expect(await describeStep({ quota_bytes: 1536 * GIB + 1 }, empty)).toContain(
+        `${1536 * GIB + 1} bytes (about 1.5 TiB)`,
+      );
+      expect(await describeStep({ quota_bytes: 1000 }, empty)).toContain('will be 1000 bytes;');
+      expect(await describeStep({ quota_bytes: 1 }, empty)).toContain('will be 1 byte;');
     });
   });
 

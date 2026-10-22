@@ -2868,14 +2868,25 @@ refuses SMB beside a disabled password (also read from the implementation).
 Neither is left to be discovered as a rejection at `execute`. Neither has been
 checked against a live system.
 
-### A limit below current usage is warned about, not refused (#189)
+### A limit below current usage is refused, because ZFS refuses it (#189)
 
-`dataset_set_quota` accepts a `quota` or `refquota` at or below the usage it
-caps. ZFS accepts one, and the dataset is then over its limit and writes that
-add to it fail. Shrinking a quota to stop a runaway writer is a real use of
-exactly that, so the plan states it in capitals beside the current usage and
-does not refuse. Where the usage could not be read, the plan says the
-comparison was not made. Silence there would read as "there is room".
+The ticket asked whether `dataset_set_quota` should refuse or warn on a limit
+below current usage, on the premise that ZFS accepts one. **It does not.**
+OpenZFS's quota and refquota set-checks answer `ENOSPC` for a new value under
+`used` or `referenced` respectively ("size is less than current used or
+reserved space"). That is read from the OpenZFS implementation, not from this
+API surface, and the plan and description say so. So the plan fails, naming
+both numbers. That is #161's rule: a plan-time refusal is owed where the
+middleware refuses, and a plan promising a call that will be rejected promises
+more than the call delivers.
+
+**A limit exactly at usage is accepted, and it is warned about in capitals.**
+That is how a quota stops a runaway writer, and the ticket's use case survives
+at that value rather than below it. Where the usage could not be read, the plan
+says the call may be rejected. Silence there would read as "there is room". The
+read is plan-time only, so a dataset that grows before confirmation can still
+see the change refused. The description says so, and also that a limit below
+the dataset's reservation is refused for the same reason and is not read here.
 
 **The limits are read the way `datasets_quota_report` reads them, through the
 same `quotaLimit`.** There is one account of what `0`, null and an unreadable

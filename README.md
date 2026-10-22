@@ -187,8 +187,9 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `refquota`, or both, in bytes; `0` and null both remove a limit. It is the
   mutating half of `datasets_quota_report` and reads the limits the same way.
   Its plan states each limit as it is now and as it will be, beside the usage
-  that limit caps. A limit at or below that usage is accepted rather than
-  refused, and the plan says writes will then fail. It does not touch the quota
+  that limit caps. A limit below that usage fails the plan, because ZFS refuses
+  one; a limit exactly at it is accepted, and the plan says writes will then
+  fail. It does not touch the quota
   alert thresholds, per-user or per-group quotas, reservations, or a volume's
   size.
   `container_list` and the three container power tools are the first family
