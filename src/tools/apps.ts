@@ -657,20 +657,13 @@ async function readApp(ctx: ToolContext, name: string): Promise<AppReading | nul
  * — and the returned sentence says the call may be rejected instead. An engine
  * READ as not running refuses, because the middleware cannot deploy an app
  * there and a plan promising the call would promise more than it delivers.
+ *
+ * THE ENGINE IS READ FIRST. Whether `app.query` still lists applications while
+ * the engine is down is (unconfirmed) here; if it answers with none, checking
+ * the application first would refuse with "no application named …" — naming a
+ * missing app rather than the stopped engine that is the actual cause.
  */
 async function planPreconditions(ctx: ToolContext, name: string): Promise<{ app: AppReading; engine: string }> {
-  let app: AppReading | null;
-  try {
-    app = await readApp(ctx, name);
-  } catch (reason) {
-    throw new Error(
-      `Whether an application named "${name}" is installed could not be read (app.query failed: ` +
-        `${errorText(reason)}), so nothing is planned`,
-    );
-  }
-  if (app === null) {
-    throw new Error(`No application named "${name}" is installed on this system; \`apps_list\` reports every name`);
-  }
   let status: string | null = null;
   let failure: string | null = null;
   try {
@@ -693,6 +686,18 @@ async function planPreconditions(ctx: ToolContext, name: string): Promise<{ app:
           '`app_engine_status` reports it.'
         : `The app engine reported ${status === null ? 'no status this tool could read' : `the status ${status}, which this catalog does not know`}, ` +
           'so the call may be rejected; `app_engine_status` reports it.';
+  let app: AppReading | null;
+  try {
+    app = await readApp(ctx, name);
+  } catch (reason) {
+    throw new Error(
+      `Whether an application named "${name}" is installed could not be read (app.query failed: ` +
+        `${errorText(reason)}), so nothing is planned`,
+    );
+  }
+  if (app === null) {
+    throw new Error(`No application named "${name}" is installed on this system; \`apps_list\` reports every name`);
+  }
   return { app, engine };
 }
 

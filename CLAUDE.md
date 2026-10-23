@@ -3118,7 +3118,10 @@ app still coming up.
 
 The engine check refuses only an engine READ as not running. A failed read, or
 a status word this catalog does not know, adds a sentence saying the call may
-be rejected (#161). A rollback version list that could not be read refuses
+be rejected (#161). The engine is read BEFORE the app listing: whether
+`app.query` still lists apps while the engine is down is `(unconfirmed)`, and
+checking the app first would name a missing app instead of the stopped engine.
+A rollback version list that could not be read refuses
 instead, because the version would otherwise reach approval unchecked (#190).
 
 ## Conventions

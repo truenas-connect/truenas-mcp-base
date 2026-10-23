@@ -680,6 +680,12 @@ describe.each([
     await expect(tool.plan(ctx, args)).rejects.toThrow(/reports STOPPED, not RUNNING.*`app_engine_status`/);
   });
 
+  it('names the stopped engine, not a missing app, where a stopped engine lists no applications', async () => {
+    const { ctx, query } = appJobSystem({ engine: { value: { status: 'STOPPED' } }, rows: { value: [] } });
+    await expect(tool.plan(ctx, args)).rejects.toThrow(/reports STOPPED, not RUNNING.*`app_engine_status`/);
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it('does not refuse an engine it could not read, and says the call may be rejected', async () => {
     const failed = await tool.plan(appJobSystem({ engine: { fails: new Error('no docker') } }).ctx, args);
     expect(failed[0].description).toContain('could not be read (no docker), so the call may be rejected');
