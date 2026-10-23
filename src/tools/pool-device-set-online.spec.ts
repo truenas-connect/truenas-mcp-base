@@ -330,6 +330,31 @@ describe('pool_device_set_online', () => {
       expect(other.description).toContain('It sits beneath spare-0 (type not readable), whose members are sdb OFFLINE.');
     });
 
+    it('claims less redundancy only for taking an ONLINE device offline', async () => {
+      const row = pool({ data: [vdev('MIRROR', [leaf('sda'), leaf('sdb', 'FAULTED')])] });
+      const [, call] = await plan([row]);
+      expect(call.description).toContain('It is not ONLINE now, so whatever it still adds to its vdev is given up');
+      expect(call.description).not.toContain('less redundancy');
+    });
+
+    it('promises a resilver only for a member that was taken OFFLINE', async () => {
+      for (const status of ['FAULTED', 'UNAVAIL', 'REMOVED', null]) {
+        const row = pool({ data: [vdev('MIRROR', [leaf('sda'), leaf('sdb', status)])] });
+        const [, call] = await plan([row], { online: true });
+        expect(call.description).toContain(
+          'It is not OFFLINE now, so it rejoins its vdev and is resilvered only if it can be opened again',
+        );
+        expect(call.description).not.toContain('RESILVER FOLLOWS');
+      }
+    });
+
+    it("lets the device's own unreadable state through, counting it as not ONLINE", async () => {
+      const row = pool({ data: [vdev('MIRROR', [leaf('sda'), leaf('sdb', null)])] });
+      await expect(plan([row])).resolves.toHaveLength(2);
+      const raidz1 = pool({ data: [vdev('RAIDZ1', [leaf('sda', 'FAULTED'), leaf('sdb', null), leaf('sdc')])] });
+      await expect(plan([raidz1])).rejects.toThrow('more than its parity of 1 covers');
+    });
+
     it('says a device already ONLINE is not an error', async () => {
       const [, call] = await plan([MIRROR], { online: true });
       expect(call.description).toContain('It is already ONLINE, which is not an error.');

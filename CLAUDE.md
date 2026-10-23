@@ -2901,7 +2901,7 @@ none" is said only where every group and privilege entry was read.
 
 `pool_device_set_online` refuses to take a device offline wherever its vdev
 would be left unable to serve its data, and **every case it cannot read
-refuses too**. That covers an unreadable vdev type or member state, and a dRAID
+refuses too**. That covers an unreadable vdev type or another member's state, and a dRAID
 parity that neither the type nor the vdev's name spells. It also covers a device
 nested beneath another inside its vdev, such as a member being replaced or one
 covered by a spare, which the mirror and parity counting does not model. A check

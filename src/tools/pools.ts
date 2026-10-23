@@ -1476,6 +1476,12 @@ function onlineEffect(located: LocatedDevice): string {
   if (located.depth === 0) {
     return ' It is a vdev on its own, so there is no other copy beside it in its vdev to resilver from.';
   }
+  // Only a device that was taken offline is known to come back: one that
+  // faulted, or was pulled, rejoins only if it can be opened again.
+  if (textOrNull(located.device['status']) !== 'OFFLINE') {
+    return ' It is not OFFLINE now, so it rejoins its vdev and is resilvered only if it can ' +
+      'be opened again, which this call does not establish.';
+  }
   return ' A RESILVER FOLLOWS: ZFS rewrites onto the device what it missed while it was away, ' +
     'reading it from the rest of its vdev, which takes time.';
 }
@@ -1609,13 +1615,14 @@ export const poolDeviceSetOnline: MutatingTool = {
     'IS MADE, wherever its vdev would be left unable to serve its data: a `data`, ' +
     '`special` or `dedup` device that is a vdev on its own (a stripe); the last ' +
     'ONLINE member of a mirror; a RAIDZ or dRAID member where the members not ' +
-    'ONLINE, counting this one, would exceed the parity; and any device whose vdev ' +
-    'type or member states could not be read, or that sits beneath another device ' +
-    'inside its vdev (one being replaced, or covered by a spare). Those are also ' +
-    'refused WHILE A RESILVER IS RUNNING ON THE POOL, or where whether one is ' +
-    'could not be read, because a member being resilvered reads ONLINE before it ' +
-    'holds all of its data and the count would take it for a working copy. A ' +
-    'device already OFFLINE is not refused. A `log`, `cache` or `spare` device is not refused, ' +
+    'ONLINE, counting this one, would exceed the parity; any device whose vdev\'s ' +
+    'type could not be read, or in whose vdev another member\'s state could not ' +
+    'be read; and any device that sits beneath another device inside its vdev (one being replaced, or ' +
+    'covered by a spare). EVERY `data`, `special` OR `dedup` DEVICE NOT ALREADY ' +
+    'OFFLINE IS ALSO REFUSED WHILE A RESILVER IS RUNNING ON THE POOL, or where ' +
+    'whether one is could not be read, because a member being resilvered reads ' +
+    'ONLINE before it holds all of its data and the count would take it for a ' +
+    'working copy. A device already OFFLINE is not refused. A `log`, `cache` or `spare` device is not refused, ' +
     'and the plan names which it is. The plan states the vdev\'s type and every ' +
     'member\'s current state. dRAID parity is read from the vdev\'s type, or from ' +
     'its name where the type does not carry it, (unconfirmed) that either does; ' +
@@ -1624,12 +1631,14 @@ export const poolDeviceSetOnline: MutatingTool = {
     'rely on it. The device is named to the system by its vdev GUID, ' +
     '(unconfirmed) that the call takes the GUID rather than a device path. ' +
     'BRINGING A DEVICE ONLINE DOES NOT REPAIR IT: a member of a mirror or a ' +
-    'parity vdev is then resilvered with what it missed, and a disk that has failed stays ' +
-    'failed; the plan says which applies. A device already in the ' +
+    'parity vdev that was taken OFFLINE is then resilvered with what it missed, ' +
+    'while one that faulted or was pulled rejoins only if it can be opened again, ' +
+    'which the call does not establish, and a disk that has failed stays failed; ' +
+    'the plan says which of those the device\'s current state puts it in. A device already in the ' +
     'state asked for is not an error. `destructiveness` is `reversible`: the ' +
     'reverse call brings the device back, and destroys no data either way — but a ' +
-    'device left offline leaves its vdev with less redundancy than it had until it ' +
-    'is back and resilvered. ' +
+    'device taken offline adds nothing to its vdev\'s redundancy until it is back ' +
+    'and resilvered. ' +
     DEVICE_GUIDANCE,
   resultGuidance: DEVICE_GUIDANCE,
   inputSchema: {
@@ -1676,8 +1685,13 @@ export const poolDeviceSetOnline: MutatingTool = {
       ? onlineEffect(found.located) +
         ' Bringing it online does not repair it, and a disk that has failed stays failed.'
       : DATA_CATEGORIES.includes(category)
-        ? ' Its vdev runs with less redundancy than it has now until the device is back ' +
-          'online and resilvered.'
+        ? status === 'ONLINE'
+          ? ' Its vdev runs with less redundancy than it has now until the device is back ' +
+            'online and resilvered.'
+          : // A FAULTED or REMOVED member may hold no working copy at all, so
+            // "less redundancy than now" would be a claim this read cannot make.
+            ' It is not ONLINE now, so whatever it still adds to its vdev is given up until ' +
+            'it is back online and resilvered.'
         : ` It is a \`${category}\` device, which holds no data the pool depends on, so ` +
           'no data redundancy is lost; the pool runs without it until it is back.';
     return [
