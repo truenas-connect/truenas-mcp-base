@@ -170,11 +170,43 @@ describe('dataset_set_property', () => {
         'WRITES TO THE DATASET WILL FAIL once this is applied — every application, share and client writing to ' +
           'it gets an error — until `readonly` is set back.',
       );
-      expect(await describeUpdate({ property: 'readonly', value: 'INHERIT' })).toContain(
+      const local = { 'pool.dataset.query': [logs({ readonly: { value: 'off', source: 'LOCAL' } })] };
+      expect(await describeUpdate({ property: 'readonly', value: 'INHERIT' }, local)).toContain(
         "If the parent is read-only, WRITES TO THE DATASET WILL FAIL once this is applied; the parent's value is " +
           'not read here.',
       );
       expect(await describeUpdate({ property: 'readonly', value: 'OFF' })).not.toContain('WILL FAIL');
+    });
+
+    it('says snapdir VISIBLE and HIDDEN expose snapshot contents, that INHERIT may, and DISABLED does not', async () => {
+      const exposure = "every snapshot's copy of the data — files deleted since the snapshot was taken";
+      const visible = await describeUpdate({ property: 'snapdir', value: 'VISIBLE' });
+      expect(visible).toContain('SNAPSHOT CONTENTS BECOME BROWSABLE once this is applied');
+      expect(visible).toContain(exposure);
+      const hidden = await describeUpdate({ property: 'snapdir', value: 'HIDDEN' });
+      expect(hidden).toContain('SNAPSHOT CONTENTS STAY REACHABLE BY PATH while HIDDEN');
+      expect(hidden).toContain(exposure);
+      const local = { 'pool.dataset.query': [logs({ snapdir: { value: 'disabled', source: 'LOCAL' } })] };
+      expect(await describeUpdate({ property: 'snapdir', value: 'INHERIT' }, local)).toContain(
+        "If the parent's `snapdir` is VISIBLE or HIDDEN, SNAPSHOT CONTENTS BECOME REACHABLE once this is applied; " +
+          "the parent's value is not read here.",
+      );
+      expect(await describeUpdate({ property: 'snapdir', value: 'DISABLED' })).not.toContain('SNAPSHOT CONTENTS');
+      expect(datasetSetProperty.description).toContain('`snapdir` CAN EXPOSE DATA');
+      expect(datasetSetProperty.description).toContain(exposure);
+      expect(datasetSetProperty.description).not.toContain('nor expose');
+    });
+
+    it('gives no warning about applying a change the plan says changes nothing', async () => {
+      const held = { 'pool.dataset.query': [logs({ readonly: { value: 'on', source: 'LOCAL' } })] };
+      const text = await describeUpdate({ property: 'readonly', value: 'ON' }, held);
+      expect(text).toContain('changes nothing');
+      expect(text).not.toContain('WILL FAIL');
+      const inherited = await describeUpdate({ property: 'readonly', value: 'INHERIT' });
+      expect(inherited).toContain('It already inherits');
+      expect(inherited).not.toContain('WILL FAIL');
+      const visible = { 'pool.dataset.query': [logs({ snapdir: { value: 'visible', source: 'LOCAL' } })] };
+      expect(await describeUpdate({ property: 'snapdir', value: 'VISIBLE' }, visible)).not.toContain('SNAPSHOT CONTENTS');
     });
 
     it('says a value already held locally, or an inheritance already in place, changes nothing', async () => {

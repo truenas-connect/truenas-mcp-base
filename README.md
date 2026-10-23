@@ -214,8 +214,10 @@ confirmation UX, audit sinks) enters through injected interfaces.
   size.
   `dataset_set_property` sets one of `compression`, `atime`, `recordsize`,
   `snapdir`, `exec` and `readonly` on one dataset, or sets it back to
-  inheriting. Those are the properties whose change can neither lose nor expose
-  data and is undone by setting it back; `sync`, `deduplication`, `checksum`,
+  inheriting. Those are the properties whose change loses no data and is undone
+  by setting it back. `snapdir` can still expose data: anything but `DISABLED`
+  leaves every snapshot's copy of the dataset readable under `.zfs/snapshot`,
+  including through its shares, and the plan says so. `sync`, `deduplication`, `checksum`,
   `copies`, `acltype` and `aclmode` are deliberately not settable. A value is
   checked against the values the API declares for that property, and a
   `recordsize` against the system's own list of sizes. `recordsize` cannot be

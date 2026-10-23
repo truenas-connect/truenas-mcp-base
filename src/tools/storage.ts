@@ -1355,10 +1355,13 @@ type DatasetUpdate = CallParams<ApiSurface, 'pool.dataset.update'>[1];
 
 /**
  * The properties `dataset_set_property` sets. The test for a place here is that
- * changing it can neither lose nor expose data, and setting it back undoes it.
- * `readonly` is disruptive — writers start failing — and passes both, so it is
- * in; `sync`, `deduplication`, `checksum`, `copies`, `acltype` and `aclmode` fail
- * one or the other and are named as excluded in the description (#102).
+ * changing it loses no data, and setting it back undoes it. `readonly` is
+ * disruptive — writers start failing — and passes, so it is in. `snapdir`
+ * passes and still EXPOSES data: anything but DISABLED leaves every snapshot's
+ * copy readable under the mountpoint, so the description and its plan say so,
+ * as they say `readonly` ON fails writes. `sync`, `deduplication`, `checksum`,
+ * `copies`, `acltype` and `aclmode` are excluded for the reasons the
+ * description names (#102).
  */
 const SETTABLE_PROPERTIES = [
   'compression',
@@ -1580,11 +1583,22 @@ async function checkRecordsize(ctx: ToolContext, row: Record<string, unknown>, r
   }
 }
 
+/**
+ * What a `snapdir` other than DISABLED makes readable. One text, so the
+ * description and every plan sentence say the same thing about it.
+ */
+const SNAPDIR_EXPOSURE =
+  "`.zfs/snapshot` under the dataset's mountpoint, and so through any SMB or NFS share of it, holds every " +
+  "snapshot's copy of the data — files deleted since the snapshot was taken, and files as they were before a " +
+  'later `chmod` or ACL change, since a snapshot keeps the permissions a file had when it was taken. That is ' +
+  'ZFS behaviour, not stated by this API surface.';
+
 /** What the plan says the change does, beyond setting the value. */
 function propertyEffect(request: PropertyRequest, current: PropertyReading): string {
   const { property, value } = request;
   let effect = '';
-  if (readingMatches(value, current) === true) {
+  const unchanged = readingMatches(value, current) === true;
+  if (unchanged) {
     effect +=
       value === 'INHERIT'
         ? ' It already inherits, so this changes nothing and is not an error.'
@@ -1600,6 +1614,9 @@ function propertyEffect(request: PropertyRequest, current: PropertyReading): str
       ` EXISTING DATA IS NOT REWRITTEN: only blocks written after the change use the new \`${property}\`, and ` +
       'what is already on the dataset keeps the one it was written with.';
   }
+  // A warning about what applying the change does is not given for a change
+  // the plan has just said does nothing: the two read as contradicting.
+  if (unchanged) return effect;
   if (property === 'readonly' && value === 'ON') {
     effect +=
       ' WRITES TO THE DATASET WILL FAIL once this is applied — every application, share and client writing to ' +
@@ -1608,6 +1625,15 @@ function propertyEffect(request: PropertyRequest, current: PropertyReading): str
     effect +=
       ' If the parent is read-only, WRITES TO THE DATASET WILL FAIL once this is applied; the parent\'s ' +
       'value is not read here.';
+  }
+  if (property === 'snapdir' && value === 'VISIBLE') {
+    effect += ` SNAPSHOT CONTENTS BECOME BROWSABLE once this is applied: ${SNAPDIR_EXPOSURE}`;
+  } else if (property === 'snapdir' && value === 'HIDDEN') {
+    effect += ` SNAPSHOT CONTENTS STAY REACHABLE BY PATH while HIDDEN — \`.zfs\` is not listed, but opening it by name works: ${SNAPDIR_EXPOSURE}`;
+  } else if (property === 'snapdir' && value === 'INHERIT') {
+    effect +=
+      " If the parent's `snapdir` is VISIBLE or HIDDEN, SNAPSHOT CONTENTS BECOME REACHABLE once this is applied; " +
+      `the parent's value is not read here. ${SNAPDIR_EXPOSURE}`;
   }
   return effect;
 }
@@ -1636,8 +1662,11 @@ export const datasetSetProperty: MutatingTool = {
     'Two-phase: called without a confirmation_token it returns a plan for user approval; called with one ' +
     "it sends the change. `dataset` is the dataset's full name, as `storage_list_datasets` reports it in " +
     '`id`; a name the system does not list fails the plan, naming it. `property` is one of `compression`, ' +
-    '`atime`, `recordsize`, `snapdir`, `exec` and `readonly` — properties whose change can neither lose ' +
-    'nor expose data, and is undone by setting it back. DELIBERATELY NOT SETTABLE HERE: `sync` (DISABLED ' +
+    '`atime`, `recordsize`, `snapdir`, `exec` and `readonly` — properties whose change loses no data, and ' +
+    'is undone by setting it back. `snapdir` CAN EXPOSE DATA: VISIBLE lists `.zfs/snapshot` and HIDDEN ' +
+    'leaves it reachable by name, so anything but DISABLED makes snapshot contents readable — ' +
+    SNAPDIR_EXPOSURE +
+    ' Its plan says so. DELIBERATELY NOT SETTABLE HERE: `sync` (DISABLED ' +
     'acknowledges writes before they are on stable storage, so a power loss loses data a client was told ' +
     'was written), `deduplication` (its memory cost, and data written while it was on stays deduplicated ' +
     'after it is turned off), `checksum` (OFF disables ZFS\'s integrity check), `copies` (it affects new ' +
