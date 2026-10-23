@@ -3155,6 +3155,35 @@ not make.
 `bytesText` and `DATASET_NAME_CHARS` moved from `storage.ts` to `common.ts`
 here, as the second family to state bytes in a plan and to name a new dataset.
 
+### A method's preconditions read from the middleware decide the call sequence (#199)
+
+`vm_disk_image_import` was filed with two questions open: which way
+`vm.device.convert({ source, destination })` converts, and whether it creates
+the zvol. Neither is on the API surface. Both were read from the middleware's
+`plugins/vm/vm_device_convert.py` (`convert_disk`, on `master`): a `source`
+ending in `qcow2`, `qed`, `raw`, `vdi`, `vhdx` or `vmdk` is an import, and the
+zvol must ALREADY EXIST, with a `volsize` at least the image's virtual size
+(`qemu-img info`). So the tool is two calls, `pool.dataset.create` then the
+convert job. The create is the call whose failure throws. The convert's failure
+is data, under #198's rule.
+
+**The ticket's argument list did not survive that reading.** It asked for
+`image_path` and `zvol` and a zvol sized from the image. The middleware's
+`vm.device.virtual_size` is not on `DefaultApiDirectory`, so the tool also
+takes `zvol_volsize`. Only for a raw image is the file size the virtual size,
+so only there is a too-small zvol refused at plan time (#161). For every other
+format the plan says the file size is not the virtual size.
+
+**Creating first also changed the race the ticket described.** A dataset of
+that name made between plan and confirmation makes the create fail, so nothing
+is overwritten. The plan says that rather than the overwrite the ticket
+expected. **Before writing a plan's account of a race, check which call meets
+it.**
+
+`checkNewZvol` and `zvolSpaceSentence` now take the tool's own sentence for a
+taken name and for a refused create. Those sentences are each tool's own, and
+the checks are shared.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

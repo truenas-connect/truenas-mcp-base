@@ -106,13 +106,16 @@ describe('createDefaultCatalog', () => {
       'app_upgrade',
       'app_rollback',
       'vm_create',
+      'vm_disk_image_import',
     ]);
   });
 
-  it('advertises vm_create to a full-access credential only', () => {
-    expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain('vm_create');
-    expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain('vm_create');
-    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain('vm_create');
+  it('advertises vm_create and vm_disk_image_import to a full-access credential only', () => {
+    for (const name of ['vm_create', 'vm_disk_image_import']) {
+      expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain(name);
+      expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain(name);
+      expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(name);
+    }
   });
 
   it('advertises pool_device_set_online, disk_identify, certificate_csr_create and alert_class_set to a full-access credential only', () => {
