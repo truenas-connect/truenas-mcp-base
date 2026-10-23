@@ -82,6 +82,7 @@ import {
   systemGeneralConfig,
   systemInfo,
   systemNtpStatus,
+  systemUpdateApply,
   updateStatus,
   upsConfig,
 } from '@/tools/system';
@@ -108,7 +109,7 @@ import {
   vmStop,
 } from '@/tools/vms';
 
-/** The sketch's catalog: fifty-nine read-only tools plus forty-three mutating tools. */
+/** The sketch's catalog: fifty-nine read-only tools plus forty-four mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -213,6 +214,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(appRollback);
   catalog.register(vmCreate);
   catalog.register(vmDiskImageImport);
+  catalog.register(systemUpdateApply);
   return catalog;
 }
 
@@ -304,6 +306,7 @@ export {
   systemHealthReport,
   systemInfo,
   systemNtpStatus,
+  systemUpdateApply,
   tasksRecentRuns,
   updateStatus,
   upsConfig,

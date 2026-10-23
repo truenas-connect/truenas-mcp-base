@@ -48,8 +48,13 @@ interface BootPool {
   free_bytes: number | null;
 }
 
-/** One boot environment as this tool reports it. */
-interface BootEnvironment {
+/**
+ * One boot environment as this tool reports it. Exported, with
+ * {@link readEnvironments}, for `system_update_apply`, which reads the same list
+ * back after installing an update (#200) — one reading of a boot environment
+ * rather than a second one in `system.ts`.
+ */
+export interface BootEnvironment {
   name: string | null;
   active: boolean | null;
   active_on_reboot: boolean | null;
@@ -160,7 +165,7 @@ function mapEnvironment(row: unknown): BootEnvironment {
  * between "no fallback exists" and "nothing was established about the
  * fallbacks", which on this subject are opposite answers.
  */
-async function readEnvironments(system: SystemHandle): Promise<Attempt<BootEnvironment[]>> {
+export async function readEnvironments(system: SystemHandle): Promise<Attempt<BootEnvironment[]>> {
   try {
     const rows = await firstValueFrom(system.client.api.query('boot.environment.query'));
     if (!Array.isArray(rows)) return { value: null, error: NOT_A_LIST };
