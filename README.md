@@ -51,7 +51,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `nvmeof_subsystem_create`, `nvmeof_subsystem_update`, `user_create`,
   `user_set_locked`, `dataset_set_quota`, `pool_device_set_online`,
   `dataset_set_property`, `dataset_create`, `dataset_rename`, `disk_identify`,
-  `certificate_csr_create` —
+  `certificate_csr_create`, `alert_class_set` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop`, `container_restart` and
   `certificate_csr_create` the eight that start a background job,
@@ -257,6 +257,15 @@ confirmation UX, audit sinks) enters through injected interfaces.
   states the subject and alternative names the request will carry. Its job is
   watched for a bounded time; where that ends first the CSR is not returned,
   and no tool here returns it later. Nothing here deletes a certificate.
+  `alert_class_set` changes one alert class's severity level or notification
+  policy, or removes the class's stored setting so it returns to its defaults.
+  It is the mutating half of `alert_settings`' `class_overrides`. A class the
+  system does not list fails the plan. The update takes the whole per-class
+  map, so the call reads it immediately before writing and writes every other
+  class back unchanged. The plan says that a change someone else makes to
+  another class in between is overwritten, and says in words that `NEVER`
+  sends the class nowhere. The result reads the class's setting back off the
+  update's response. It does not change alert destinations.
   `container_list` and the three container power tools are the first family
   written against the client's `ops` layer rather than `api.call`, because every
   one of these operations changes SHAPE between TrueNAS versions and not just

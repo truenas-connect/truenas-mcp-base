@@ -1,8 +1,8 @@
-import type { CallResponse } from '@truenas/api-client';
+import type { CallParams, CallResponse } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
-import { ApiSurface, MutatingTool, ReadOnlyTool, ToolContext } from '@/catalog/tool';
-import { booleanOrNull, errorText, recordOrNull, textOrNull } from '@/tools/common';
+import { ApiSurface, MutatingTool, PlanStep, ReadOnlyTool, ToolContext } from '@/catalog/tool';
+import { agreement, booleanOrNull, errorText, recordOrNull, textOrNull } from '@/tools/common';
 
 /**
  * The system's own health verdict. `system_info` and the storage tools describe
@@ -258,7 +258,8 @@ export const alertSettings: ReadOnlyTool = {
     'delivered depends on both halves: a class set to `NEVER` reaches no ' +
     'destination however many are configured, and a class at its default ' +
     'reaches none when `destinations` is empty. This tool reports the settings ' +
-    'as they are and changes none of them. NO field beyond those named here is ' +
+    'as they are and changes none of them; `alert_class_set` changes one ' +
+    "class's level or policy. NO field beyond those named here is " +
     'returned, whatever else a later TrueNAS release adds to a destination or ' +
     'to a class setting.',
   inputSchema: { type: 'object', properties: {} },
@@ -539,7 +540,7 @@ export const alertsDismiss: MutatingTool = alertStateTool({
     '`alerts_restore` is the exact inverse and un-dismisses an alert this tool ' +
     'dismissed. It changes no data, no configuration and no storage, it starts ' +
     'no job, and it silences nothing for the future — `alert_settings` reports ' +
-    'the per-class policies that do that, and no tool here changes them.',
+    'the per-class policies that do that, and `alert_class_set` changes them.',
 });
 
 export const alertsRestore: MutatingTool = alertStateTool({
@@ -582,3 +583,435 @@ export const alertsRestore: MutatingTool = alertStateTool({
     'changes no ' +
     'data, no configuration and no storage, and it starts no job.',
 });
+
+/**
+ * `alert_class_set`: the mutating half of `alert_settings`' `class_overrides`.
+ * It changes one alert class's `level` and/or `policy`, or removes that class's
+ * stored setting so the class returns to its defaults.
+ *
+ * `alertclasses.update` TAKES THE WHOLE MAP. Whether an update naming one class
+ * merges into the stored map or replaces it is (unconfirmed), so this assumes
+ * it replaces: `execute` reads `alertclasses.config`, changes the one entry and
+ * writes every entry back. That read is a call `execute` makes, so it is the
+ * plan's first step (#119). Every other entry is written back as the system
+ * sent it, never re-read through a guard, so a field this file does not name
+ * — `proactive_support` included — survives the write.
+ *
+ * THE READ IS THE RACE, AND THE PLAN SAYS SO. Another session changing a
+ * different class between this read and the write is overwritten. Comparing
+ * against the plan-time map and refusing on a difference would be `execute`
+ * branching on state the confirmation token cannot bind (#119), so the plan
+ * states the overwrite instead. A read that fails, or answers no map, refuses
+ * the call before anything is sent: writing one entry alone would, under the
+ * assumption above, delete every other class's setting. That is a refusal,
+ * not a branch to a different call (#181).
+ *
+ * THE CLASS NAME IS VALIDATED against `alert.list_categories`, at plan time
+ * only, by each listed class's `id`. A name the system does not list is
+ * refused, and so is a list that could not be read: an unknown name may be
+ * stored silently (unconfirmed), and the approver would then be shown a change
+ * that silences nothing. The same read gives the class's title and its own
+ * default level, which is what lets the plan name the class in words.
+ */
+
+/** The update's data argument, typed off the call (#91). */
+type ClassesUpdate = CallParams<ApiSurface, 'alertclasses.update'>[0];
+
+/** One class's setting as the update declares it. */
+type ClassSetting = NonNullable<ClassesUpdate['classes']>[string];
+
+type ClassLevel = NonNullable<ClassSetting['level']>;
+type ClassPolicy = NonNullable<ClassSetting['policy']>;
+
+/**
+ * Every level and policy the update declares, as a `Record` over each union so
+ * a value the client adds or drops fails to compile here (#190). Least severe
+ * first, which is the order the description names them in.
+ */
+const DECLARED_LEVELS: Record<ClassLevel, true> = {
+  INFO: true,
+  NOTICE: true,
+  WARNING: true,
+  ERROR: true,
+  CRITICAL: true,
+  ALERT: true,
+  EMERGENCY: true,
+};
+
+const DECLARED_POLICIES: Record<ClassPolicy, true> = {
+  IMMEDIATELY: true,
+  HOURLY: true,
+  DAILY: true,
+  NEVER: true,
+};
+
+/** What `alert_class_set` was asked to do. `reset` excludes both of the others. */
+interface ClassSetRequest {
+  className: string;
+  level?: ClassLevel;
+  policy?: ClassPolicy;
+  reset: boolean;
+}
+
+/** A value from one of the two declared unions, or the error naming the union. */
+function declaredValue<T extends string>(
+  key: string,
+  value: unknown,
+  declared: Record<T, true>,
+): T | undefined {
+  if (value === undefined) return undefined;
+  // `Object.hasOwn`, not `in`, which would accept `constructor` (#101).
+  if (typeof value !== 'string' || !Object.hasOwn(declared, value)) {
+    throw new Error(`"${key}" must be one of ${Object.keys(declared).join(', ')}`);
+  }
+  return value as T;
+}
+
+function parseClassSet(args: Record<string, unknown>): ClassSetRequest {
+  const className = args['class'];
+  if (typeof className !== 'string' || className === '') {
+    throw new Error(
+      '"class" is required and must be an alert class identifier, such as "ZpoolCapacityWarning"',
+    );
+  }
+  const level = declaredValue('level', args['level'], DECLARED_LEVELS);
+  const policy = declaredValue('policy', args['policy'], DECLARED_POLICIES);
+  const reset = args['reset'];
+  if (reset !== undefined && reset !== true) {
+    throw new Error('"reset" takes only true; omit it to set a level or policy');
+  }
+  if (reset === true && (level !== undefined || policy !== undefined)) {
+    throw new Error(
+      '"reset" removes the class\'s stored setting, so it cannot be combined with "level" or "policy"',
+    );
+  }
+  if (reset !== true && level === undefined && policy === undefined) {
+    throw new Error('Nothing to change: pass "level", "policy", or "reset": true');
+  }
+  return { className, level, policy, reset: reset === true };
+}
+
+/** The change as passed, under the arguments' own names, for the result. */
+function requestedChange(request: ClassSetRequest): Record<string, string | boolean> {
+  return {
+    ...(request.level !== undefined ? { level: request.level } : {}),
+    ...(request.policy !== undefined ? { policy: request.policy } : {}),
+    ...(request.reset ? { reset: true } : {}),
+  };
+}
+
+/**
+ * The map to write: every stored entry other than this class's, exactly as the
+ * system sent it, and this class's entry changed or removed.
+ *
+ * A `level` or `policy` not asked for is kept as stored, and so is
+ * `proactive_support`: the change is to the fields named and nothing else. A
+ * stored entry that is not a record is replaced rather than merged, since there
+ * is nothing in it this tool could keep.
+ */
+function nextClassMap(
+  stored: Record<string, unknown>,
+  request: ClassSetRequest,
+): Record<string, ClassSetting> {
+  const next: Record<string, unknown> = {};
+  for (const [name, setting] of Object.entries(stored)) {
+    if (name !== request.className) next[name] = setting;
+  }
+  if (!request.reset) {
+    next[request.className] = {
+      ...(recordOrNull(stored[request.className]) ?? {}),
+      ...(request.level !== undefined ? { level: request.level } : {}),
+      ...(request.policy !== undefined ? { policy: request.policy } : {}),
+    };
+  }
+  // Every other entry is written back as it was sent, never narrowed, which is
+  // what keeps a field this file does not name from being dropped by the write.
+  return next as Record<string, ClassSetting>;
+}
+
+/** The update's params, built in one place so the plan step names the call `execute` makes. */
+function classUpdateParams(classes: Record<string, ClassSetting>): CallParams<ApiSurface, 'alertclasses.update'> {
+  return [{ classes }];
+}
+
+/** The stored per-class map, or null where the response carried none this tool could read. */
+function storedClassMap(config: unknown): Record<string, unknown> | null {
+  return recordOrNull(recordOrNull(config)?.['classes']);
+}
+
+/** One class's stored setting, in the fields `alert_settings` reads. */
+interface ClassState {
+  /** Whether the map holds a setting for this class at all; null where the map was not read. */
+  stored: boolean | null;
+  level: string | null;
+  policy: string | null;
+  proactive_support: boolean | null;
+}
+
+function classState(classes: Record<string, unknown> | null, name: string): ClassState {
+  const stored = classes === null ? null : Object.hasOwn(classes, name);
+  const setting = stored === true ? recordOrNull(classes?.[name]) : null;
+  return {
+    stored,
+    level: textOrNull(setting?.['level']),
+    policy: textOrNull(setting?.['policy']),
+    proactive_support: booleanOrNull(setting?.['proactive_support']),
+  };
+}
+
+/** The class as `alert.list_categories` lists it. */
+interface ListedClass {
+  title: string | null;
+  category: string | null;
+  defaultLevel: string | null;
+}
+
+/**
+ * The class named, from the system's own list, or a refusal. Matched on each
+ * class's `id` across every category; a list that could not be read refuses
+ * too, because the name would otherwise reach approval unchecked (#190).
+ */
+async function findAlertClass(ctx: ToolContext, name: string): Promise<ListedClass> {
+  let categories: unknown;
+  try {
+    categories = await firstValueFrom(ctx.system.client.api.call('alert.list_categories'));
+  } catch (reason) {
+    throw new Error(
+      `The system's alert classes could not be listed (alert.list_categories failed: ${errorText(reason)}), ` +
+        `so "${name}" cannot be checked and nothing is planned`,
+    );
+  }
+  if (Array.isArray(categories)) {
+    for (const category of categories.map(recordOrNull)) {
+      const classes = category?.['classes'];
+      if (!Array.isArray(classes)) continue;
+      const listed = classes.map(recordOrNull).find((held) => held !== null && held['id'] === name);
+      if (listed !== undefined && listed !== null) {
+        return {
+          title: textOrNull(listed['title']),
+          category: textOrNull(category?.['title']) ?? textOrNull(category?.['id']),
+          defaultLevel: textOrNull(listed['level']),
+        };
+      }
+    }
+  }
+  throw new Error(
+    `No alert class "${name}" is listed on this system — the identifier is the one \`alerts_list\` ` +
+      'reports as `klass` and `alert_settings` as `class`',
+  );
+}
+
+/** The stored setting as the plan states it. */
+function stateText(state: ClassState): string {
+  if (state.stored === false) return 'it holds no stored setting, so it is at its defaults';
+  return (
+    `it is stored with level ${state.level ?? 'unset (the default)'}, ` +
+    `policy ${state.policy ?? 'unset (the default)'}`
+  );
+}
+
+/** What the class will hold after the call, as the plan states it. */
+function requestText(request: ClassSetRequest, state: ClassState): string {
+  if (request.reset) {
+    const support =
+      state.proactive_support === null
+        ? ''
+        : ` This also removes its stored proactive_support setting (${state.proactive_support}).`;
+    const noop =
+      state.stored === false ? ' It holds no stored setting already, so this changes nothing for it and is not an error.' : '';
+    return (
+      ' This removes its stored setting, so its level and policy return to the defaults — the level ' +
+      `this system lists for it, and the policy this API surface does not state.${support}${noop}`
+    );
+  }
+  const parts = [
+    ...(request.level !== undefined ? [`level ${request.level}`] : []),
+    ...(request.policy !== undefined ? [`policy ${request.policy}`] : []),
+  ];
+  const already =
+    (request.level === undefined || request.level === state.level) &&
+    (request.policy === undefined || request.policy === state.policy);
+  const kept = request.level === undefined ? ' Its level is kept as stored.' : request.policy === undefined ? ' Its policy is kept as stored.' : '';
+  const never =
+    request.policy === 'NEVER'
+      ? ' POLICY NEVER SILENCES THIS CLASS: its alerts are still raised and `alerts_list` still reports ' +
+        'them, but none is sent to any destination.'
+      : '';
+  return (
+    ` This sets ${parts.join(' and ')}.${kept}` +
+    `${already ? ' It already holds that, so this changes nothing for it and is not an error.' : ''}${never}`
+  );
+}
+
+/**
+ * Said in the update step whatever was asked, because every write is a write
+ * of the whole map.
+ */
+const OVERWRITE =
+  ' EVERY OTHER CLASS\'S STORED SETTING IS WRITTEN BACK AS THE READ ABOVE FINDS IT, IMMEDIATELY ' +
+  'BEFORE THIS CALL, SO A CHANGE ANYONE ELSE MAKES TO ANOTHER CLASS BETWEEN THAT READ AND THIS ' +
+  'WRITE IS OVERWRITTEN. The params shown were computed from the settings as read when this plan ' +
+  'was made; the call sends them as that read finds them.';
+
+const ALERT_CLASS_SET_GUIDANCE =
+  '`class` is the class named and `requested` exactly what was passed. `before` is the ' +
+  "class's stored setting as read immediately before the update and `after` as the update's " +
+  'own response states it — never copied from the request. In each, `stored` is whether the ' +
+  'map holds a setting for this class at all: false is a class at its defaults, and its other ' +
+  'three fields are then null. `level`, `policy` and `proactive_support` are null where the ' +
+  'stored setting names none, which is that field at its default and NOT unreadable versus ' +
+  'set — a field stored in a shape this tool does not read is null too, and is not told ' +
+  'apart. `after.stored` and the three beside it are ALL null where the response carried no ' +
+  'map this tool could read. `confirmed` is true where the response holds what was asked — ' +
+  'every field sent, or, for `reset`, no setting for the class; FALSE IS NOT A SUCCESS: the ' +
+  'call did not reject and the class is not in the state that was asked for; and null is a ' +
+  'response from which that could not be read.';
+
+export const alertClassSet: MutatingTool = {
+  name: 'alert_class_set',
+  description:
+    "Changes one alert class's severity `level` and/or notification `policy` on this TrueNAS " +
+    "system, or removes that class's stored setting so it returns to its defaults. Two-phase: " +
+    'called without a confirmation_token it returns a plan for user approval; called with one it ' +
+    'sends the change. `class` is the middleware\'s class identifier — `ZpoolCapacityWarning`, ' +
+    '`SMARTError` — the same one `alerts_list` reports as `klass` and `alert_settings` as ' +
+    '`class`; a class the system does not list in `alert.list_categories` FAILS THE PLAN, and so ' +
+    'does a list that could not be read. `level` is one of `INFO`, `NOTICE`, `WARNING`, `ERROR`, ' +
+    '`CRITICAL`, `ALERT`, `EMERGENCY`, least severe first, and is the severity the class is ' +
+    'raised at. `policy` is one of `IMMEDIATELY`, `HOURLY`, `DAILY`, `NEVER`, how often the class ' +
+    'is sent; NEVER SILENCES THE CLASS — its alerts are still raised and `alerts_list` still ' +
+    'reports them, but none is sent to any destination. `reset: true` removes the stored ' +
+    'setting, including any stored `proactive_support`, and cannot be combined with the other ' +
+    'two; at least one of the three is required. A level or policy not passed is kept as ' +
+    'stored. THE WHOLE PER-CLASS MAP IS WRITTEN: the call reads every class\'s stored setting ' +
+    'immediately before the update and writes all of them back with this one changed, because ' +
+    'whether the update merges a partial map is not established — SO A CHANGE ANYONE ELSE MAKES ' +
+    'TO ANOTHER CLASS BETWEEN THAT READ AND THE WRITE IS OVERWRITTEN, and the plan says so. A ' +
+    'read that fails refuses the call before anything is sent. Whether a removed setting is ' +
+    'honoured is not established either, which is what `confirmed` reports. Setting what the ' +
+    'class already holds is not an error. It does not change alert destinations, dismiss ' +
+    'alerts (`alerts_dismiss`) or set `proactive_support`. `destructiveness` is `reversible`: ' +
+    'the plan names the stored setting, and setting it back restores the level and policy — ' +
+    'BUT A RESET ALSO REMOVES A STORED `proactive_support`, WHICH NO TOOL HERE SETS BACK. ' +
+    ALERT_CLASS_SET_GUIDANCE,
+  resultGuidance: ALERT_CLASS_SET_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      class: {
+        type: 'string',
+        minLength: 1,
+        description: 'The alert class identifier, e.g. "ZpoolCapacityWarning", as `alerts_list` reports it in `klass`.',
+      },
+      level: {
+        type: 'string',
+        enum: Object.keys(DECLARED_LEVELS),
+        description: 'The severity the class is raised at.',
+      },
+      policy: {
+        type: 'string',
+        enum: Object.keys(DECLARED_POLICIES),
+        description: 'How often the class is sent. NEVER sends it nowhere.',
+      },
+      reset: {
+        type: 'boolean',
+        description: "Only true: removes the class's stored setting. Not combined with level or policy.",
+      },
+    },
+    // "At least one of level, policy or reset" is enforced by the parse: a
+    // combinator at the root of a tool's input schema is refused by some hosts,
+    // which would take down the whole catalog rather than this tool.
+    required: ['class'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // Two fields on one class's notification setting. Nothing is deleted, and the
+  // plan names the values to send back.
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const request = parseClassSet(rawArgs);
+    return { class: request.className, ...requestedChange(request) };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const request = parseClassSet(rawArgs);
+    const name = request.className;
+    const listed = await findAlertClass(ctx, name);
+    let classes: Record<string, unknown> | null;
+    try {
+      classes = storedClassMap(await firstValueFrom(ctx.system.client.api.call('alertclasses.config')));
+    } catch (reason) {
+      throw new Error(
+        `The stored alert class settings could not be read (alertclasses.config failed: ${errorText(reason)}), ` +
+          'and this tool writes them back whole, so nothing is planned',
+      );
+    }
+    if (classes === null) {
+      throw new Error(
+        'alertclasses.config answered no per-class map this tool could read, and this tool writes the map ' +
+          'back whole, so nothing is planned',
+      );
+    }
+    const state = classState(classes, name);
+    const none = '(the system reported none)';
+    return [
+      {
+        method: 'alertclasses.config',
+        params: [],
+        description:
+          "Read every alert class's stored setting, immediately before the update, so that every other " +
+          'class is written back as it is stored. Changes nothing. If it fails, nothing is sent.',
+      },
+      {
+        method: 'alertclasses.update',
+        params: classUpdateParams(nextClassMap(classes, request)),
+        description:
+          `Change alert class "${name}" (${listed.title ?? none}; category ${listed.category ?? none}; ` +
+          `the system lists its default level as ${listed.defaultLevel ?? none}). Now ${stateText(state)}.` +
+          `${requestText(request, state)}${OVERWRITE}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const request = parseClassSet(rawArgs);
+    const name = request.className;
+    let classes: Record<string, unknown> | null;
+    try {
+      classes = storedClassMap(await firstValueFrom(ctx.system.client.api.call('alertclasses.config')));
+    } catch (reason) {
+      throw new Error(
+        `The stored alert class settings could not be read (alertclasses.config failed: ${errorText(reason)}), ` +
+          'so nothing was sent: this tool writes every class back whole',
+      );
+    }
+    if (classes === null) {
+      throw new Error(
+        'alertclasses.config answered no per-class map this tool could read, so nothing was sent: this ' +
+          'tool writes every class back whole',
+      );
+    }
+    const before = classState(classes, name);
+    const updated: unknown = await firstValueFrom(
+      ctx.system.client.api.call('alertclasses.update', classUpdateParams(nextClassMap(classes, request))),
+    );
+    // The update answers with the stored map, so the outcome is read off that
+    // rather than echoed from the request (#121).
+    const after = classState(storedClassMap(updated), name);
+    let confirmed: boolean | null;
+    if (after.stored === null) {
+      confirmed = null;
+    } else if (request.reset) {
+      confirmed = !after.stored;
+    } else if (!after.stored) {
+      confirmed = false;
+    } else {
+      confirmed = agreement(
+        {
+          ...(request.level !== undefined ? { level: request.level } : {}),
+          ...(request.policy !== undefined ? { policy: request.policy } : {}),
+        },
+        { level: after.level, policy: after.policy },
+      );
+    }
+    return { class: name, requested: requestedChange(request), before, after, confirmed };
+  },
+};

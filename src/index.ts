@@ -156,6 +156,7 @@ export {
   createSnapshot,
   alertsDismiss,
   alertsRestore,
+  alertClassSet,
   scheduledTaskSetEnabled,
   scheduledTaskSetSchedule,
   cloudsyncRun,
