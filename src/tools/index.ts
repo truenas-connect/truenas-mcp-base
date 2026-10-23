@@ -26,7 +26,7 @@ import {
   containerStop,
 } from '@/tools/containers';
 import { cloudCredentialsList } from '@/tools/credentials';
-import { disksList, disksTemperature } from '@/tools/disks';
+import { diskIdentify, disksList, disksTemperature } from '@/tools/disks';
 import { fleetComplianceReport, fleetHealthRollup, haStatus } from '@/tools/fleet';
 import { networkConfig, networkInterfaces } from '@/tools/network';
 import { nfsClients } from '@/tools/nfs';
@@ -98,7 +98,7 @@ import {
 } from '@/tools/tasks';
 import { vmClone, vmDevices, vmLogs, vmRestart, vmsList, vmStart, vmStop } from '@/tools/vms';
 
-/** The sketch's catalog: fifty-nine read-only tools plus thirty-six mutating tools. */
+/** The sketch's catalog: fifty-nine read-only tools plus thirty-seven mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -196,6 +196,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(datasetSetProperty);
   catalog.register(datasetCreate);
   catalog.register(datasetRename);
+  catalog.register(diskIdentify);
   return catalog;
 }
 
@@ -227,6 +228,7 @@ export {
   datasetSetProperty,
   datasetSetQuota,
   directoryServicesStatus,
+  diskIdentify,
   disksList,
   disksTemperature,
   fcList,

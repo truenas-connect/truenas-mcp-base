@@ -100,13 +100,16 @@ describe('createDefaultCatalog', () => {
       'dataset_set_property',
       'dataset_create',
       'dataset_rename',
+      'disk_identify',
     ]);
   });
 
-  it('advertises pool_device_set_online to a full-access credential only', () => {
-    expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain('pool_device_set_online');
-    expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain('pool_device_set_online');
-    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain('pool_device_set_online');
+  it('advertises pool_device_set_online and disk_identify to a full-access credential only', () => {
+    for (const name of ['pool_device_set_online', 'disk_identify']) {
+      expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain(name);
+      expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain(name);
+      expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(name);
+    }
   });
 
   it('advertises user_create and user_set_locked to a full-access credential only', () => {

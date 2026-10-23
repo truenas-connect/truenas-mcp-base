@@ -100,6 +100,7 @@ export {
   datasetRename,
   datasetPermissions,
   systemDatasetConfig,
+  diskIdentify,
   disksList,
   disksTemperature,
   appsList,
