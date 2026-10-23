@@ -1614,8 +1614,9 @@ function propertyEffect(request: PropertyRequest, current: PropertyReading): str
       ` EXISTING DATA IS NOT REWRITTEN: only blocks written after the change use the new \`${property}\`, and ` +
       'what is already on the dataset keeps the one it was written with.';
   }
-  // A warning about what applying the change does is not given for a change
-  // the plan has just said does nothing: the two read as contradicting.
+  // The `readonly` and `snapdir` warnings below are not given for a change the
+  // plan has just said does nothing: the two read as contradicting. The
+  // not-rewritten sentence above is still given, and is about the property.
   if (unchanged) return effect;
   if (property === 'readonly' && value === 'ON') {
     effect +=
