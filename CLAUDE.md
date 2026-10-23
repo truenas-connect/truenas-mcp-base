@@ -2997,6 +2997,23 @@ match, `changed` compares both pairs, and `confirmed` for an override needs
 source `LOCAL`. The source names (`LOCAL`, `INHERITED`, `DEFAULT`) are ZFS's and
 not declared by the surface, so the guidance marks them `(unconfirmed)`.
 
+### A create reports through the listing's fields, and inherits what it cannot state (#191)
+
+`dataset_create` reports the new dataset through `storage_list_datasets`' six
+fields, with an absent field null rather than missing, and its spec compares the
+key list against the listing's. **Do not forward `PoolDatasetEntry`**, which
+carries `user_properties` and every property of the dataset.
+
+Encryption is inherited, never chosen. The plan reads the parent's `encrypted`,
+`encryption_root` and `locked` and states the outcome, because an approver
+cannot see what "inherited" will mean. `share_type` is limited to GENERIC, SMB
+and NFS. MULTIPROTOCOL and APPS prepare a dataset for purposes no tool here
+serves, and the surface states what none of them change. `ix-applications` and
+`.system` are refused here whether or not the middleware refuses them
+`(unconfirmed)`. `compression` and `atime` reuse `dataset_set_property`'s
+lists, typed over the create's unions, so a value only the create declares fails
+to compile.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
