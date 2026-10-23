@@ -103,11 +103,21 @@ describe('createDefaultCatalog', () => {
       'disk_identify',
       'certificate_csr_create',
       'alert_class_set',
+      'app_upgrade',
+      'app_rollback',
     ]);
   });
 
   it('advertises pool_device_set_online, disk_identify, certificate_csr_create and alert_class_set to a full-access credential only', () => {
     for (const name of ['pool_device_set_online', 'disk_identify', 'certificate_csr_create', 'alert_class_set']) {
+      expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain(name);
+      expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain(name);
+      expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(name);
+    }
+  });
+
+  it('advertises app_upgrade and app_rollback to a full-access credential only', () => {
+    for (const name of ['app_upgrade', 'app_rollback']) {
       expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain(name);
       expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain(name);
       expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(name);

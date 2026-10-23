@@ -51,10 +51,11 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `nvmeof_subsystem_create`, `nvmeof_subsystem_update`, `user_create`,
   `user_set_locked`, `dataset_set_quota`, `pool_device_set_online`,
   `dataset_set_property`, `dataset_create`, `dataset_rename`, `disk_identify`,
-  `certificate_csr_create`, `alert_class_set` —
+  `certificate_csr_create`, `alert_class_set`, `app_upgrade`, `app_rollback` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
-  `service_control`, `container_stop`, `container_restart` and
-  `certificate_csr_create` the eight that start a background job,
+  `service_control`, `container_stop`, `container_restart`,
+  `certificate_csr_create`, `app_upgrade` and `app_rollback` the ten that start
+  a background job,
   which each watches for a bounded time and then reports on rather than waiting
   out — and `container_start` the one whose answer depends on the version it is
   talking to, a job on TrueNAS 25.10 and a synchronous call on 26 and later,
@@ -266,6 +267,18 @@ confirmation UX, audit sinks) enters through injected interfaces.
   another class in between is overwritten, and says in words that `NEVER`
   sends the class nowhere. The result reads the class's setting back off the
   update's response. It does not change alert destinations.
+  `app_upgrade` and `app_rollback` move one installed application to a named
+  or latest catalog version, and back to a version the system lists among the
+  ones it can roll back to. Both plans fail on an application the system does
+  not list, and on an app engine reported as not running. The upgrade plan
+  states the current and target versions and whether host paths are
+  snapshotted, which they are by default. Neither takes `values`, and the
+  rollback always sends `rollback_snapshot: false`, so it never restores the
+  app's volume snapshot. A rollback restores the version and not the data an
+  upgrade may have migrated, which both descriptions and plans say. The job's
+  answer and the listing read after the watch are reported by named field, so
+  the app's `config` is never returned. Nothing here installs, starts or stops
+  an app.
   `container_list` and the three container power tools are the first family
   written against the client's `ops` layer rather than `api.call`, because every
   one of these operations changes SHAPE between TrueNAS versions and not just
