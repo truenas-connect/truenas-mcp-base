@@ -138,9 +138,10 @@ confirmation UX, audit sinks) enters through injected interfaces.
   call is made, wherever its vdev would be left unable to serve its data — a
   striped `data`, `special` or `dedup` device, the last ONLINE member of a
   mirror, a RAIDZ or dRAID member past its parity — and wherever that could not
-  be read; a `log`, `cache` or `spare` device is not refused. Its plan states
-  the vdev's type and every member's state, and that bringing a device online
-  starts a resilver rather than repairing it. It does not replace or detach a
+  be read, or while a resilver is running on the pool; a `log`, `cache` or
+  `spare` device is not refused. Its plan states the vdev's type and every
+  member's state, and that bringing a device online does not repair it, saying
+  whether a resilver follows. It does not replace or detach a
   device.
   `share_set_enabled` switches one SMB share or NFS export on or off, named by
   `protocol` and `id` together as `shares_list` reports them, and is the first

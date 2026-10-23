@@ -2910,6 +2910,13 @@ that defaults to "safe" is #154's costly direction. The check is made only for
 device already OFFLINE is not refused, because sending it offline again takes
 nothing more away.
 
+**A member's state is not enough to count it as a working copy.** A member being
+resilvered reads ONLINE before it holds all of its data. Counted as a copy, it
+would let the one complete member of a mirror be taken offline. So the check
+also refuses while the pool's `scan` is a RESILVER still SCANNING, or where the
+scan could not be read. The scan record belongs to the pool, so this is
+pool-wide rather than per vdev, which is the conservative direction.
+
 **The check is made again in `execute`, on the read the call's params come
 from**, as `user_create`'s privilege check is (#187). The token binds the pool
 and disk names and not the ids or member states the plan read (#181), so a

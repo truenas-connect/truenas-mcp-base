@@ -27,9 +27,13 @@ const pool = (topology: Record<string, unknown>, over: Record<string, unknown> =
   id: 7,
   name: 'tank',
   status: 'ONLINE',
+  // No scan on record, which is a pool that has never been scanned.
+  scan: null,
   topology: { data: [], log: [], cache: [], spare: [], special: [], dedup: [], ...topology },
   ...over,
 });
+
+const scan = (operation: string, state: string) => ({ function: operation, state });
 
 const MIRROR = pool({ data: [vdev('MIRROR', [leaf('sda'), leaf('sdb')])] });
 
@@ -203,6 +207,29 @@ describe('pool_device_set_online', () => {
       await expect(plan([row])).rejects.toThrow('it sits beneath another device inside its vdev');
     });
 
+    it('refuses while a resilver is running, since a member being resilvered reads ONLINE', async () => {
+      const resilvering = { ...MIRROR, scan: scan('RESILVER', 'SCANNING') };
+      await expect(plan([resilvering])).rejects.toThrow(
+        'a resilver is running on the pool, and a member being resilvered reads ONLINE',
+      );
+      for (const settled of [scan('RESILVER', 'FINISHED'), scan('SCRUB', 'SCANNING'), scan('RESILVER', 'CANCELED')]) {
+        await expect(plan([{ ...MIRROR, scan: settled }])).resolves.toHaveLength(2);
+      }
+    });
+
+    it('refuses where whether a resilver is running could not be read', async () => {
+      for (const unread of [undefined, 'nope', { state: 'SCANNING' }, { function: 'RESILVER' }]) {
+        await expect(plan([{ ...MIRROR, scan: unread }])).rejects.toThrow(
+          'whether a resilver is running on the pool could not be read',
+        );
+      }
+    });
+
+    it('does not consult the scan for a log, cache or spare device', async () => {
+      const row = pool({ log: [leaf('sdb')] }, { scan: scan('RESILVER', 'SCANNING') });
+      await expect(plan([row])).resolves.toHaveLength(2);
+    });
+
     it('does not refuse a log, cache or spare device, and names which it is', async () => {
       for (const category of ['log', 'cache', 'spare']) {
         const [, call] = await plan([pool({ [category]: [leaf('sdb', category === 'spare' ? 'AVAIL' : 'ONLINE')] })]);
@@ -267,6 +294,40 @@ describe('pool_device_set_online', () => {
       expect(call.description).toContain('A RESILVER FOLLOWS');
       expect(call.description).toContain('does not repair it');
       expect(read.description).not.toContain('redundancy check');
+    });
+
+    it('claims no resilver for a cache or spare device, or for a vdev on its own', async () => {
+      for (const category of ['cache', 'spare']) {
+        const [, call] = await plan([pool({ [category]: [leaf('sdb', 'OFFLINE')] })], { online: true });
+        expect(call.description).toContain(
+          `It is a \`${category}\` device, which holds no data the pool depends on, so nothing the pool ` +
+            'needs is resilvered onto it.',
+        );
+        expect(call.description).not.toContain('RESILVER FOLLOWS');
+        expect(call.description).toContain('does not repair it');
+      }
+      const [, stripe] = await plan([pool({ data: [leaf('sdb', 'OFFLINE')] })], { online: true });
+      expect(stripe.description).toContain('there is no other copy beside it in its vdev to resilver from');
+      expect(stripe.description).not.toContain('RESILVER FOLLOWS');
+    });
+
+    it('lists the members of the node a nested device sits beneath', async () => {
+      const row = pool({
+        data: [
+          vdev('RAIDZ1', [leaf('sda'), vdev('REPLACING', [leaf('sdb', 'OFFLINE'), leaf('sdc')]), leaf('sdd')]),
+        ],
+      });
+      const [, call] = await plan([row], { online: true });
+      expect(call.description).toContain(
+        'its members are sda ONLINE, replacing-0 ONLINE, sdd ONLINE. It sits beneath replacing-0 ' +
+          '(REPLACING), whose members are sdb OFFLINE, sdc ONLINE.',
+      );
+      expect(call.description).toContain('A RESILVER FOLLOWS');
+      const untyped = pool({
+        data: [vdev('MIRROR', [leaf('sda'), { ...vdev('SPARE', [leaf('sdb', 'OFFLINE')]), type: null }])],
+      });
+      const [, other] = await plan([untyped], { online: true });
+      expect(other.description).toContain('It sits beneath spare-0 (type not readable), whose members are sdb OFFLINE.');
     });
 
     it('says a device already ONLINE is not an error', async () => {
@@ -341,6 +402,12 @@ describe('pool_device_set_online', () => {
     it('refuses and sends nothing where the vdev lost a member since the plan', async () => {
       const { ctx, call } = system([pool({ data: [vdev('MIRROR', [leaf('sda', 'FAULTED'), leaf('sdb')])] })]);
       await expect(poolDeviceSetOnline.execute(ctx, args())).rejects.toThrow('no other member of its mirror is ONLINE');
+      expect(call).not.toHaveBeenCalled();
+    });
+
+    it('refuses and sends nothing where a resilver started since the plan', async () => {
+      const { ctx, call } = system([{ ...MIRROR, scan: scan('RESILVER', 'SCANNING') }]);
+      await expect(poolDeviceSetOnline.execute(ctx, args())).rejects.toThrow('a resilver is running on the pool');
       expect(call).not.toHaveBeenCalled();
     });
 

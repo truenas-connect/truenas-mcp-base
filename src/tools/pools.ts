@@ -1265,6 +1265,8 @@ interface LocatedDevice {
   vdev: Record<string, unknown>;
   /** The vdev's members, every one of them a record — `[]` for a leaf on its own. */
   members: Record<string, unknown>[];
+  /** The node the leaf sits directly beneath — the vdev for a direct member, the leaf itself on its own. */
+  parent: Record<string, unknown>;
   /** 0 for a vdev on its own, 1 for a direct member, more for one nested deeper. */
   depth: number;
 }
@@ -1306,16 +1308,17 @@ function locateDevice(pool: string, row: Record<string, unknown>, disk: string):
     category: LocatedDevice['category'],
     vdev: Record<string, unknown>,
     members: Record<string, unknown>[],
+    parent: Record<string, unknown>,
     node: Record<string, unknown>,
     depth: number,
   ): void => {
-    if (textOrNull(node['disk']) === disk) found.push({ category, device: node, vdev, members, depth });
+    if (textOrNull(node['disk']) === disk) found.push({ category, device: node, vdev, members, parent, depth });
     const children = childNodes(node);
     if (children === null) {
       complete = false;
       return;
     }
-    for (const child of children) walk(category, vdev, members, child, depth + 1);
+    for (const child of children) walk(category, vdev, members, node, child, depth + 1);
   };
   for (const category of VDEV_CATEGORIES) {
     // An older middleware may not carry every category; a category it does
@@ -1331,7 +1334,7 @@ function locateDevice(pool: string, row: Record<string, unknown>, disk: string):
         complete = false;
         continue;
       }
-      walk(category, vdev, childNodes(vdev) ?? [], vdev, 0);
+      walk(category, vdev, childNodes(vdev) ?? [], vdev, vdev, 0);
     }
   }
   if (!complete) throw unreadable;
@@ -1382,11 +1385,19 @@ function vdevSentence(disk: string, located: LocatedDevice): string {
   if (depth === 0) {
     return `Disk "${disk}" is a \`${category}\` vdev on its own, and is now ${statusText(device)}.`;
   }
+  const states = (nodes: Record<string, unknown>[]) =>
+    nodes.map((member) => `${memberName(member)} ${statusText(member)}`).join(', ');
   const type = textOrNull(vdev['type']);
+  // A device nested deeper is named inside the node it sits beneath, whose own
+  // members are listed too: the vdev's list names that node and not them.
+  const nested =
+    depth > 1
+      ? ` It sits beneath ${memberName(located.parent)} (${textOrNull(located.parent['type']) ?? 'type not readable'}), ` +
+        `whose members are ${states(childNodes(located.parent) ?? [])}.`
+      : '';
   return (
     `Disk "${disk}" is in a ${type === null ? 'vdev of a type not readable' : `${type} vdev`} in ` +
-    `the \`${category}\` category, now ${statusText(device)}; its members are ` +
-    `${members.map((member) => `${memberName(member)} ${statusText(member)}`).join(', ')}.`
+    `the \`${category}\` category, now ${statusText(device)}; its members are ${states(members)}.${nested}`
   );
 }
 
@@ -1397,9 +1408,14 @@ function vdevSentence(disk: string, located: LocatedDevice): string {
  * redundancy check that defaults to "safe" is #154's costly direction. A device
  * already OFFLINE is not refused, because sending it offline again takes
  * nothing more away.
+ *
+ * A running resilver refuses whatever the count says, and so does a scan that
+ * could not be read: the count reads member STATES, and a member being
+ * resilvered reads ONLINE before it holds what it is being resilvered with. It
+ * is pool-wide rather than per vdev because the scan record is.
  */
-function offlineRefusal(pool: string, disk: string, located: LocatedDevice): string | null {
-  const { category, device, vdev, members, depth } = located;
+function offlineRefusal(pool: string, disk: string, found: DeviceFound): string | null {
+  const { category, device, vdev, members, depth } = found.located;
   if (!DATA_CATEGORIES.includes(category) || textOrNull(device['status']) === 'OFFLINE') return null;
   const refuse = (reason: string) => `Refusing to take disk "${disk}" offline in pool "${pool}": ${reason}`;
   if (depth === 0) {
@@ -1409,6 +1425,15 @@ function offlineRefusal(pool: string, disk: string, located: LocatedDevice): str
     return refuse(
       'it sits beneath another device inside its vdev (one being replaced, or covered by a spare), ' +
         'which the redundancy check here does not cover, so the check could not be made',
+    );
+  }
+  if (found.resilvering !== false) {
+    return refuse(
+      found.resilvering
+        ? 'a resilver is running on the pool, and a member being resilvered reads ONLINE before it ' +
+            'holds all of its data, so how many members can serve the vdev cannot be counted'
+        : 'whether a resilver is running on the pool could not be read, and a member being ' +
+            'resilvered reads ONLINE before it holds all of its data, so the check could not be made',
     );
   }
   const others = members.filter((member) => member !== device);
@@ -1436,6 +1461,25 @@ function offlineRefusal(pool: string, disk: string, located: LocatedDevice): str
     : null;
 }
 
+/**
+ * What bringing the device back does, by what it is. Only a member of a vdev
+ * that holds pool data has a rest-of-vdev to be resilvered from; a `cache` or
+ * `spare` device holds nothing the pool needs, and a vdev on its own has no
+ * other copy beside it. Claiming a resilver for those would put an effect in
+ * the plan that does not happen.
+ */
+function onlineEffect(located: LocatedDevice): string {
+  if (located.category === 'cache' || located.category === 'spare') {
+    return ` It is a \`${located.category}\` device, which holds no data the pool depends on, so ` +
+      'nothing the pool needs is resilvered onto it.';
+  }
+  if (located.depth === 0) {
+    return ' It is a vdev on its own, so there is no other copy beside it in its vdev to resilver from.';
+  }
+  return ' A RESILVER FOLLOWS: ZFS rewrites onto the device what it missed while it was away, ' +
+    'reading it from the rest of its vdev, which takes time.';
+}
+
 /** What `pool_device_set_online` was asked to do. */
 interface DeviceArgs {
   pool: string;
@@ -1460,6 +1504,26 @@ interface DeviceFound {
   poolId: number;
   guid: string;
   located: LocatedDevice;
+  /** Whether the pool's scan is a resilver still running, or null where that could not be read. */
+  resilvering: boolean | null;
+}
+
+/**
+ * Whether a resilver is running on the pool, or null where its scan could not
+ * be read. A pool that holds no scan has never had one, which is `scrubState`'s
+ * reading of the same null.
+ *
+ * This is what the redundancy count cannot see on its own: a member being
+ * resilvered reads ONLINE before it holds all of its vdev's data, so counting
+ * it as a working copy would let the one complete member be taken offline.
+ */
+function resilverRunning(row: Record<string, unknown>): boolean | null {
+  if (row['scan'] === null) return false;
+  const scan = recordOrNull(row['scan']);
+  const operation = scan === null ? null : textOrNull(scan['function']);
+  const state = scan === null ? null : textOrNull(scan['state']);
+  if (operation === null || state === null) return null;
+  return operation === 'RESILVER' && state === 'SCANNING';
 }
 
 /**
@@ -1481,7 +1545,7 @@ async function readDevice(ctx: ToolContext, args: DeviceArgs): Promise<DeviceFou
         'what the call names it by',
     );
   }
-  return { poolId, guid, located };
+  return { poolId, guid, located, resilvering: resilverRunning(row) };
 }
 
 /**
@@ -1547,8 +1611,11 @@ export const poolDeviceSetOnline: MutatingTool = {
     'ONLINE member of a mirror; a RAIDZ or dRAID member where the members not ' +
     'ONLINE, counting this one, would exceed the parity; and any device whose vdev ' +
     'type or member states could not be read, or that sits beneath another device ' +
-    'inside its vdev (one being replaced, or covered by a spare). A device already ' +
-    'OFFLINE is not refused. A `log`, `cache` or `spare` device is not refused, ' +
+    'inside its vdev (one being replaced, or covered by a spare). Those are also ' +
+    'refused WHILE A RESILVER IS RUNNING ON THE POOL, or where whether one is ' +
+    'could not be read, because a member being resilvered reads ONLINE before it ' +
+    'holds all of its data and the count would take it for a working copy. A ' +
+    'device already OFFLINE is not refused. A `log`, `cache` or `spare` device is not refused, ' +
     'and the plan names which it is. The plan states the vdev\'s type and every ' +
     'member\'s current state. dRAID parity is read from the vdev\'s type, or from ' +
     'its name where the type does not carry it, (unconfirmed) that either does; ' +
@@ -1556,8 +1623,9 @@ export const poolDeviceSetOnline: MutatingTool = {
     'an offline that would fault the pool is (unconfirmed), and this tool does not ' +
     'rely on it. The device is named to the system by its vdev GUID, ' +
     '(unconfirmed) that the call takes the GUID rather than a device path. ' +
-    'BRINGING A DEVICE ONLINE DOES NOT REPAIR IT: a resilver of what it missed ' +
-    'follows, and a disk that has failed stays failed. A device already in the ' +
+    'BRINGING A DEVICE ONLINE DOES NOT REPAIR IT: a member of a mirror or a ' +
+    'parity vdev is then resilvered with what it missed, and a disk that has failed stays ' +
+    'failed; the plan says which applies. A device already in the ' +
     'state asked for is not an error. `destructiveness` is `reversible`: the ' +
     'reverse call brings the device back, and destroys no data either way — but a ' +
     'device left offline leaves its vdev with less redundancy than it had until it ' +
@@ -1594,7 +1662,7 @@ export const poolDeviceSetOnline: MutatingTool = {
     const found = await readDevice(ctx, args);
     const { category, device } = found.located;
     if (!args.online) {
-      const refusal = offlineRefusal(args.pool, args.disk, found.located);
+      const refusal = offlineRefusal(args.pool, args.disk, found);
       if (refusal !== null) throw new Error(refusal);
     }
     // A device already in the state asked for is not an error (#119), and the
@@ -1605,9 +1673,8 @@ export const poolDeviceSetOnline: MutatingTool = {
     const effect = already !== ''
       ? ''
       : args.online
-      ? ' A RESILVER FOLLOWS: ZFS rewrites onto the device what it missed while it was ' +
-        'away, which reads the rest of its vdev and takes time. Bringing it online ' +
-        'does not repair it, and a disk that has failed stays failed.'
+      ? onlineEffect(found.located) +
+        ' Bringing it online does not repair it, and a disk that has failed stays failed.'
       : DATA_CATEGORIES.includes(category)
         ? ' Its vdev runs with less redundancy than it has now until the device is back ' +
           'online and resilvered.'
@@ -1647,7 +1714,7 @@ export const poolDeviceSetOnline: MutatingTool = {
     // call (#187).
     const found = await readDevice(ctx, args);
     if (!args.online) {
-      const refusal = offlineRefusal(args.pool, args.disk, found.located);
+      const refusal = offlineRefusal(args.pool, args.disk, found);
       if (refusal !== null) throw new Error(refusal);
     }
     const params: [number, { label: string }] = [found.poolId, { label: found.guid }];
