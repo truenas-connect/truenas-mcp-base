@@ -2005,6 +2005,15 @@ function haSentence(licensed: { value: unknown; error: string | null }): string 
   return ` Whether this system is an HA pair could not be read (${why}); if it is one, this reboots the node the catalog is connected to, and ${pointer}`;
 }
 
+/**
+ * What the plan's account of interruptions does not cover, said in the plan and
+ * the description alike so an account that found nothing is not read as
+ * "nothing is interrupted" (#154).
+ */
+const UNREAD_SESSIONS =
+  'THIS IS NOT EVERYTHING THE REBOOT INTERRUPTS: SMB sessions, iSCSI initiators, NVMe-oF hosts and Fibre ' +
+  'Channel clients are NOT READ here, and every one of them loses the server while the system is down.';
+
 /** The step for the boot id read `execute` makes immediately before the call (#119). */
 function bootIdStep(): PlanStep {
   return {
@@ -2025,10 +2034,13 @@ const REBOOT_GUIDANCE =
   'and `finished_at` when it ended, as an ISO 8601 UTC timestamp, null wherever `ended` is false. `job_id` is the ' +
   "job's numeric identity; null where no job event named this request, which does not mean nothing started. " +
   '`watched_seconds` is the ceiling that applied, not how long the watch lasted. `boot_id_before` is the ' +
-  '`system.boot_id` read immediately before the call — an opaque identifier, not to be shown or reasoned about — ' +
-  'and null where it could not be read, with `boot_id_read_error` saying why. WHETHER THE REBOOT HAPPENED IS ' +
-  'CONFIRMED BY A LATER READ, NOT BY THIS RESULT: call `system_reboot_info` once the system is back, and a ' +
-  '`boot_id` there that differs from `boot_id_before` is a system that restarted in between. That tool reads ' +
+  '`system.boot_id` read immediately before the call — an opaque identifier whose contents mean nothing and ' +
+  'are not to be reasoned about — and null where it could not be read, with `boot_id_read_error` saying why. ' +
+  'WHETHER THE REBOOT HAPPENED IS CONFIRMED BY A LATER READ, NOT BY THIS RESULT: call `system_reboot_info` once ' +
+  'the system is back, and a `boot_id` there that differs from `boot_id_before` is a system that restarted in ' +
+  'between. THAT HOLDS ONLY WHERE THE SAME NODE ANSWERS BOTH READS: on an HA pair a failover may leave the ' +
+  'catalog connected to the other node, whose boot id differs whether or not this one went down, so read ' +
+  '`ha_status` for which node answered before comparing. `system_reboot_info` reads ' +
   "`system.reboot.info`, whose `boot_id` TrueNAS builds from `system.boot_id`; that the two are one identifier " +
   'is read from the TrueNAS implementation and is not stated on the API surface, so it is (unconfirmed) here. A ' +
   'call that fails while the system is down is the system being down, not an answer.';
@@ -2043,8 +2055,9 @@ export const systemReboot: MutatingTool = {
     'what the reboot interrupts — virtual machines not reported stopped, applications not reported stopped or ' +
     'crashed, connected NFS clients, and jobs not reported as ended — read through `vms_list`, `apps_list`, ' +
     '`nfs_clients` and `tasks_recent_runs` WHEN THE PLAN IS MADE AND NOT AGAIN, and names every one of those reads ' +
-    'that failed as not established rather than as nothing running. It also states the boot id the system had ' +
-    'then. ON AN HA SYSTEM THIS REBOOTS THE NODE THE CATALOG IS CONNECTED TO; whether a failover follows is ' +
+    'that failed as not established rather than as nothing running. ' +
+    UNREAD_SESSIONS +
+    ' It also states the boot id the system had then. ON AN HA SYSTEM THIS REBOOTS THE NODE THE CATALOG IS CONNECTED TO; whether a failover follows is ' +
     '(unconfirmed), and the plan points at `ha_status`. UNDER FAN-OUT, SELECTING SEVERAL SYSTEMS REBOOTS THEM ' +
     "TOGETHER, AT ONCE, UNDER ONE CONFIRMATION; the plan is made per system — read each system's. " +
     '`destructiveness` is `reversible` because nothing is destroyed; a reboot is not undone, and what it ' +
@@ -2106,7 +2119,7 @@ export const systemReboot: MutatingTool = {
           `${haSentence(licensed)} ${boot} WHAT THE REBOOT INTERRUPTS, as read when this plan was made and not ` +
           `read again: ${vmSentence(vms)} ${appSentence(apps)} ${nfsSentence(nfs)} ${jobSentence(jobs)} The ` +
           'scheduled runs of cron jobs and init/shutdown scripts do not go through the job system and are not ' +
-          'covered by that last read.',
+          `covered by that last read. ${UNREAD_SESSIONS}`,
       },
     ];
   },

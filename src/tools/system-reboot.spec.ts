@@ -125,6 +125,13 @@ describe('system_reboot', () => {
   it('says `ended` false is the ordinary answer and names the tool that confirms the reboot', () => {
     expect(systemReboot.resultGuidance).toContain('FALSE IS THE ORDINARY ANSWER AND IS NOT A FAILED REBOOT');
     expect(systemReboot.resultGuidance).toContain('call `system_reboot_info` once the system is back');
+    expect(systemReboot.resultGuidance).toContain('THAT HOLDS ONLY WHERE THE SAME NODE ANSWERS BOTH READS');
+  });
+
+  it('says in the description and the plan which sessions it does not read', async () => {
+    const unread = 'SMB sessions, iSCSI initiators, NVMe-oF hosts and Fibre Channel clients are NOT READ';
+    expect(systemReboot.description).toContain(unread);
+    expect(await rebootStep()).toContain(`THIS IS NOT EVERYTHING THE REBOOT INTERRUPTS: ${unread}`);
   });
 
   describe('arguments', () => {

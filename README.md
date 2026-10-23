@@ -118,11 +118,13 @@ confirmation UX, audit sinks) enters through injected interfaces.
   reboot interrupts — VMs and apps not reported stopped, connected NFS clients
   and jobs not reported as ended, read through `vms_list`, `apps_list`,
   `nfs_clients` and `tasks_recent_runs` — and names any of those reads that
-  failed as not established. On an HA system it reboots the connected node and
-  points at `ha_status`. The connection dropping mid-job is the ordinary
+  failed as not established. SMB, iSCSI, NVMe-oF and Fibre Channel sessions are
+  not read, and the plan says so. On an HA system it reboots the connected node
+  and points at `ha_status`. The connection dropping mid-job is the ordinary
   outcome, so `ended: false` is not a failed reboot; the result carries the
   `system.boot_id` read just before the call, to compare against
-  `system_reboot_info`'s `boot_id` once the system is back.
+  `system_reboot_info`'s `boot_id` once the system is back — on the same node,
+  which after an HA failover it may not be.
   `snapshot_clone` is the additive route
   back to a snapshot's data: it deletes nothing and modifies no dataset that
   exists, which is what lets the catalog decline the rollback that answers the
