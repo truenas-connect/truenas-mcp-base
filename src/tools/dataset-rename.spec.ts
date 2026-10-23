@@ -95,6 +95,11 @@ describe('dataset_rename', () => {
         '"tank/projects/inner" is beneath "tank/projects" itself',
       );
       expect(() => normalize({ new_name: 'tank/new@x' })).toThrow('"new@x" has a character ZFS does not accept');
+      for (const leaf of ['.', '..']) {
+        expect(() => normalize({ new_name: `tank/archive/${leaf}` })).toThrow(
+          `"${leaf}" names a directory, not a dataset, and ZFS does not accept it as a dataset name`,
+        );
+      }
       for (const leaf of ['ix-applications', '.system']) {
         expect(() => normalize({ new_name: `tank/${leaf}` })).toThrow(`"${leaf}" is a name TrueNAS reserves`);
       }

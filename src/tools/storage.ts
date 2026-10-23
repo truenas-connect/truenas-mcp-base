@@ -2282,6 +2282,9 @@ function parseRenameRequest(args: Record<string, unknown>): RenameRequest {
         '".", ":" and space',
     );
   }
+  if (leaf === '.' || leaf === '..') {
+    throw new Error(`"${leaf}" names a directory, not a dataset, and ZFS does not accept it as a dataset name`);
+  }
   if (RESERVED_DATASET_NAMES.includes(leaf)) {
     throw new Error(`"${leaf}" is a name TrueNAS reserves for its own datasets, so this tool does not rename to it`);
   }
@@ -2477,7 +2480,9 @@ export const datasetRename: MutatingTool = {
     'root dataset, the system dataset or a dataset that holds it or sits inside it (as `systemdataset.config` ' +
     'names it — a configuration that could not be read refuses too), a new name in another pool, a new name ' +
     'that already exists or that sits beneath the dataset itself, a new parent that does not exist or is a ' +
-    'volume, a name ZFS does not accept, and `ix-applications` and `.system`. EVERY DESCENDANT MOVES WITH IT: ' +
+    'volume, a new last part that is `.` or `..` or holds a character other than letters, digits, `_`, `-`, ' +
+    '`.`, `:` and space, and `ix-applications` and `.system`. Name length is not checked here, and ZFS ' +
+    'rejects a name that is too long. EVERY DESCENDANT MOVES WITH IT: ' +
     `"tank/a/b" becomes "tank/new/b". The plan names them, the first ${RENAME_DESCENDANTS_LIMIT} by name and ` +
     'the rest by count. THE PLAN LISTS WHAT `pool.dataset.attachments` REPORTS REFERS TO THE DATASET — ' +
     'shares, tasks, apps, VMs, whatever the system reports — by type and name. THIS TOOL DOES NOT UPDATE ' +
