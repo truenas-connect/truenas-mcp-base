@@ -3014,6 +3014,24 @@ serves, and the surface states what none of them change. `ix-applications` and
 lists, typed over the create's unions, so a value only the create declares fails
 to compile.
 
+### A rename lists what refers to the dataset, and promises nothing about it (#192)
+
+`dataset_rename`'s plan lists what `pool.dataset.attachments` reports, by type
+and name, and says that what happens to each reference is not established here.
+It never says a reference "will be updated". Names are read through
+`strictTextList`, and an entry that cannot be read is counted, because a
+shorter list says fewer things refer to the dataset (#93). A failed read is
+stated, not silent. **The system dataset check refuses when
+`systemdataset.config` cannot be read**, which is #193's direction: a check
+that defaults to "safe" lets the one rename that matters most reach approval
+unchecked. `renamed` comes from one `pool.dataset.query` over both names after
+the call, because the method answers `null` (#161). That read is a plan step,
+and it does not repeat any plan step, so it is not named "runs again". The
+plan-time reads are not steps (#119). The tests have their own spec,
+`dataset-rename.spec.ts`, with a local fake that honours the `id =` and `id in`
+filters. `fakeSystem` answers every read from one list, so it cannot tell "the
+dataset exists" from "the new name is free".
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

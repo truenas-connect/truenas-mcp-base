@@ -99,6 +99,7 @@ describe('createDefaultCatalog', () => {
       'pool_device_set_online',
       'dataset_set_property',
       'dataset_create',
+      'dataset_rename',
     ]);
   });
 
@@ -116,8 +117,8 @@ describe('createDefaultCatalog', () => {
     }
   });
 
-  it('advertises dataset_set_quota, dataset_set_property and dataset_create to a full-access credential only', () => {
-    for (const name of ['dataset_set_quota', 'dataset_set_property', 'dataset_create']) {
+  it('advertises dataset_set_quota, dataset_set_property, dataset_create and dataset_rename to a full-access credential only', () => {
+    for (const name of ['dataset_set_quota', 'dataset_set_property', 'dataset_create', 'dataset_rename']) {
       expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain(name);
       expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain(name);
       expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(name);

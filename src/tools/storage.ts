@@ -7,8 +7,10 @@ import {
   booleanOrNull,
   errorText,
   numberOrNull,
+  plural,
   recordOrNull,
   refuseArgs,
+  strictTextList,
   textList,
   textOrNull,
 } from '@/tools/common';
@@ -2209,6 +2211,375 @@ export const datasetCreate: MutatingTool = {
       name: request.name,
       requested: createArgs(request),
       created: held === null ? null : createdDataset(held),
+    };
+  },
+};
+
+/**
+ * The most descendants `dataset_rename`'s plan names. Every descendant moves
+ * with the dataset, and a pool can hold hundreds, so the list is capped and the
+ * count is stated beside it (#168): a cap may drop the line naming a dataset,
+ * never the fact that it moves.
+ */
+const RENAME_DESCENDANTS_LIMIT = 50;
+
+interface RenameRequest {
+  dataset: string;
+  newName: string;
+  /** The parent the dataset will sit under once renamed. */
+  newParent: string;
+}
+
+function parseRenameRequest(args: Record<string, unknown>): RenameRequest {
+  refuseArgs(
+    args,
+    ['recursive'],
+    'what it means on a dataset rename is not established (ZFS applies `rename -r` to snapshots), so it is not sent',
+  );
+  refuseArgs(
+    args,
+    ['force'],
+    'a busy dataset is left for the system to refuse, not unmounted from under what holds it open',
+  );
+  const dataset = args['dataset'];
+  if (typeof dataset !== 'string' || dataset === '') {
+    throw new Error('"dataset" is required and must be the dataset\'s full name, such as "tank/projects"');
+  }
+  const segments = dataset.split('/');
+  if (segments.includes('')) {
+    throw new Error(`"${dataset}" is not a dataset name: write its full name with no empty part, such as "tank/projects"`);
+  }
+  if (segments.length === 1) {
+    throw new Error(
+      `"${dataset}" is a pool's root dataset, whose name is the pool's own; this tool does not rename a pool`,
+    );
+  }
+  const newName = args['new_name'];
+  if (typeof newName !== 'string' || newName === '') {
+    throw new Error('"new_name" is required and must be the dataset\'s new full name, such as "tank/archive"');
+  }
+  const newSegments = newName.split('/');
+  if (newSegments.length < 2 || newSegments.includes('')) {
+    throw new Error(
+      `"${newName}" is not a dataset name under a parent: write the parent's full name, a slash and the new name, ` +
+        'with no empty part, such as "tank/archive"',
+    );
+  }
+  if (newSegments[0] !== segments[0]) {
+    throw new Error(
+      `"${newName}" is in pool "${newSegments[0]}" and "${dataset}" is in pool "${segments[0]}"; a rename stays ` +
+        'in its pool, and moving a dataset to another pool is a replication, which this tool does not do',
+    );
+  }
+  if (newName === dataset) throw new Error(`"${newName}" is already the dataset's name`);
+  if (newName.startsWith(`${dataset}/`)) {
+    throw new Error(`"${newName}" is beneath "${dataset}" itself, and ZFS does not move a dataset beneath itself`);
+  }
+  const leaf = newSegments[newSegments.length - 1] as string;
+  if (!DATASET_NAME_CHARS.test(leaf)) {
+    throw new Error(
+      `"${leaf}" has a character ZFS does not accept in a dataset name; it accepts letters, digits, "_", "-", ` +
+        '".", ":" and space',
+    );
+  }
+  if (RESERVED_DATASET_NAMES.includes(leaf)) {
+    throw new Error(`"${leaf}" is a name TrueNAS reserves for its own datasets, so this tool does not rename to it`);
+  }
+  return { dataset, newName, newParent: newSegments.slice(0, -1).join('/') };
+}
+
+/** The rename's params, built in one place so the plan step names exactly the call `execute` makes. */
+function renameParams(request: RenameRequest): CallParams<ApiSurface, 'pool.dataset.rename'> {
+  return [request.dataset, { new_name: request.newName }];
+}
+
+/**
+ * The options the read after the rename is made with: both names in the filter,
+ * so the walk is off, and no property, because only `id` is read.
+ *
+ * The FILTER is written twice — inlined in {@link readBothNames}, because
+ * written to a `const` it widens out of the filter tuple, and again in
+ * {@link bothNamesParams} for the plan step — so a test takes the step back out
+ * of the plan and asserts `execute` made its read with it (#153).
+ */
+const BOTH_NAMES_OPTIONS = { extra: { retrieve_children: false, properties: [] } };
+
+function bothNamesParams(request: RenameRequest): unknown {
+  return [[['id', 'in', [request.dataset, request.newName]]], BOTH_NAMES_OPTIONS];
+}
+
+/** Which of the two names the system lists, matched by id on the response (#153). */
+async function readBothNames(
+  ctx: ToolContext,
+  request: RenameRequest,
+): Promise<{ oldListed: boolean; newListed: boolean }> {
+  const rows = await firstValueFrom(
+    ctx.system.client.api.query(
+      'pool.dataset.query',
+      [['id', 'in', [request.dataset, request.newName]]],
+      BOTH_NAMES_OPTIONS,
+    ),
+  );
+  const ids = rows.map((row) => textOrNull(recordOrNull(row)?.['id']));
+  return { oldListed: ids.includes(request.dataset), newListed: ids.includes(request.newName) };
+}
+
+/**
+ * Refuses a dataset that is, holds or sits inside the system dataset.
+ *
+ * `systemdataset.config` names it in `basename`. A configuration that could not
+ * be read refuses too: a check that defaults to "safe" is the costly direction
+ * (#193), and moving the dataset middleware keeps its own state on is the one
+ * rename this tool must not reach approval with unchecked.
+ */
+async function refuseSystemDataset(ctx: ToolContext, dataset: string): Promise<void> {
+  let basename: string | null;
+  try {
+    const config = recordOrNull(await firstValueFrom(ctx.system.client.api.call('systemdataset.config')));
+    basename = config === null ? null : textOrNull(config['basename']);
+  } catch (reason) {
+    throw new Error(
+      `Whether "${dataset}" is or holds the system dataset could not be read (systemdataset.config failed: ` +
+        `${errorText(reason)}), so nothing is planned`,
+    );
+  }
+  if (basename === null) {
+    throw new Error(
+      `Whether "${dataset}" is or holds the system dataset could not be read (systemdataset.config named no ` +
+        'dataset), so nothing is planned',
+    );
+  }
+  if (basename === dataset || basename.startsWith(`${dataset}/`) || dataset.startsWith(`${basename}/`)) {
+    throw new Error(
+      `"${dataset}" ${basename === dataset ? 'is' : basename.startsWith(`${dataset}/`) ? 'holds' : 'is inside'} ` +
+        `the system dataset "${basename}", where middleware keeps its own state, so this tool does not rename it ` +
+        '— `system_dataset_config` reports which pool holds it',
+    );
+  }
+}
+
+/** What the plan says about the descendants that move with the dataset. */
+async function descendantsSentence(ctx: ToolContext, request: RenameRequest): Promise<string> {
+  const { dataset, newName } = request;
+  let rows: Record<string, unknown>[];
+  try {
+    // Every dataset, through the walk, and the prefix matched on the response:
+    // `dataset_permissions`' descendant read, for its reasons (#168).
+    rows = await firstValueFrom(
+      ctx.system.client.api.query('pool.dataset.query', [], { extra: { retrieve_children: true, properties: [] } }),
+    );
+  } catch (reason) {
+    return (
+      ` Its descendants could not be read (pool.dataset.query failed: ${errorText(reason)}), so which datasets ` +
+      'move with it is not stated here; every one of them does.'
+    );
+  }
+  const descendants = rows
+    .map(datasetId)
+    .filter((id) => id.startsWith(`${dataset}/`))
+    .sort((left, right) => left.localeCompare(right));
+  if (descendants.length === 0) {
+    return ' No descendant of it was listed, so it moves alone.';
+  }
+  const named = descendants
+    .slice(0, RENAME_DESCENDANTS_LIMIT)
+    .map((id) => `"${id}" becomes "${newName}${id.slice(dataset.length)}"`);
+  const rest = descendants.length - named.length;
+  return (
+    ` ${plural(descendants.length, 'descendant')} ${descendants.length === 1 ? 'moves' : 'move'} with it: ` +
+    `${named.join('; ')}${rest > 0 ? `; and ${rest} more, not named here (the first ${RENAME_DESCENDANTS_LIMIT} are)` : ''}.`
+  );
+}
+
+/**
+ * What the plan says refers to the dataset, as `pool.dataset.attachments`
+ * reports it.
+ *
+ * Each entry is named by its type and its names, through an allowlist. The
+ * names are read with `strictTextList` (#93): a list one name shorter says one
+ * fewer thing refers to the dataset, which is the claim an approver acts on. An
+ * entry that could not be read is counted, for the same reason. A failed read
+ * does not fail the plan, and says so, because silence there reads as
+ * "nothing refers to it".
+ */
+async function attachmentsSentence(ctx: ToolContext, dataset: string): Promise<string> {
+  const unknownFate =
+    ' WHAT HAPPENS TO EACH OF THESE ON RENAME IS NOT ESTABLISHED HERE: this tool does not update them, and does ' +
+    'not state that the system will.';
+  let answer: unknown;
+  try {
+    answer = await firstValueFrom(ctx.system.client.api.call('pool.dataset.attachments', [dataset]));
+  } catch (reason) {
+    return (
+      ` WHAT REFERS TO "${dataset}" COULD NOT BE ESTABLISHED (pool.dataset.attachments failed: ` +
+      `${errorText(reason)}); shares, tasks, apps and VMs may refer to it by name or path.`
+    );
+  }
+  if (!Array.isArray(answer)) {
+    return (
+      ` WHAT REFERS TO "${dataset}" COULD NOT BE ESTABLISHED (pool.dataset.attachments did not answer with a ` +
+      'list); shares, tasks, apps and VMs may refer to it by name or path.'
+    );
+  }
+  if (answer.length === 0) {
+    return (
+      ` The system reports nothing referring to "${dataset}" (pool.dataset.attachments listed none); whether ` +
+      'that read covers everything that can refer to a dataset is not stated by the API (unconfirmed).'
+    );
+  }
+  let unreadable = 0;
+  const parts: string[] = [];
+  for (const entry of answer) {
+    const held = recordOrNull(entry);
+    if (held === null) {
+      unreadable += 1;
+      continue;
+    }
+    const type = textOrNull(held['type']);
+    const service = textOrNull(held['service']);
+    const names = strictTextList(held['attachments']);
+    parts.push(
+      `${type === null ? 'an entry of a type that could not be read' : type}` +
+        `${service === null ? '' : ` (service ${service})`}: ` +
+        `${names === null ? 'names that could not be read' : names.length === 0 ? 'no name listed' : names.map((name) => `"${name}"`).join(', ')}`,
+    );
+  }
+  if (unreadable > 0) parts.push(`${plural(unreadable, 'entry')} that could not be read`);
+  return ` The system reports these referring to "${dataset}": ${parts.join('; ')}.${unknownFate}`;
+}
+
+const DATASET_RENAME_GUIDANCE =
+  '`dataset` and `new_name` are the names passed. `renamed` is read off `pool.dataset.query` made after the ' +
+  'call, NEVER from the call returning, since the call answers with nothing: true is the old name no longer ' +
+  'listed and the new one listed; false is that read completing and showing anything else, which ' +
+  '`old_name_listed` and `new_name_listed` spell out; null is that read failing, with `read_error` naming ' +
+  'why. NULL IS NOT "NOT RENAMED" — the call had already been accepted, and `storage_list_datasets` is how ' +
+  'to check. `lookup` is `READ` or `UNREADABLE`, and both listed fields are null under the second.';
+
+export const datasetRename: MutatingTool = {
+  name: 'dataset_rename',
+  description:
+    'Renames one ZFS dataset within its pool on this TrueNAS system, after a plan naming what refers to it. ' +
+    'Two-phase: called without a confirmation_token it returns a plan for user approval; called with one it ' +
+    'sends the rename. `dataset` is the full name as `storage_list_datasets` reports it in `id`, and ' +
+    '`new_name` the full new name; the new name may sit under a different parent, which must already exist ' +
+    'in the same pool. THE PLAN FAILS, NAMING THE REASON, for a dataset the system does not list, a pool\'s ' +
+    'root dataset, the system dataset or a dataset that holds it or sits inside it (as `systemdataset.config` ' +
+    'names it — a configuration that could not be read refuses too), a new name in another pool, a new name ' +
+    'that already exists or that sits beneath the dataset itself, a new parent that does not exist or is a ' +
+    'volume, a name ZFS does not accept, and `ix-applications` and `.system`. EVERY DESCENDANT MOVES WITH IT: ' +
+    `"tank/a/b" becomes "tank/new/b". The plan names them, the first ${RENAME_DESCENDANTS_LIMIT} by name and ` +
+    'the rest by count. THE PLAN LISTS WHAT `pool.dataset.attachments` REPORTS REFERS TO THE DATASET — ' +
+    'shares, tasks, apps, VMs, whatever the system reports — by type and name. THIS TOOL DOES NOT UPDATE ' +
+    'THOSE REFERENCES AND DOES NOT CLAIM THE SYSTEM WILL: what happens to each kind on rename is ' +
+    '(unconfirmed), and a reference left pointing at the old name or path breaks. Where that read fails the ' +
+    'plan says what refers to the dataset could not be established; it does not say "nothing". `recursive` ' +
+    'and `force` are not taken. A BUSY DATASET — open files, a running VM — IS REJECTED BY THE SYSTEM, and ' +
+    'that rejection is passed through naming the dataset. Everything is read when the plan is made and not ' +
+    "again. `destructiveness` is `reversible`: renaming back restores the name, BUT NOT WHAT BROKE IN " +
+    'BETWEEN — a share, task, app or VM that failed while its reference pointed at a name that did not ' +
+    'exist. ' +
+    DATASET_RENAME_GUIDANCE,
+  resultGuidance: DATASET_RENAME_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      dataset: {
+        type: 'string',
+        description: 'The dataset\'s full name, e.g. "tank/projects", as `storage_list_datasets` reports it in `id`.',
+      },
+      new_name: {
+        type: 'string',
+        description: 'The new full name in the same pool, e.g. "tank/archive"; its parent must already exist.',
+      },
+    },
+    required: ['dataset', 'new_name'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // Renaming back undoes the name; what broke while it was gone is not undone,
+  // which the description says (#153).
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const { dataset, newName } = parseRenameRequest(rawArgs);
+    return { dataset, new_name: newName };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const request = parseRenameRequest(rawArgs);
+    const { dataset, newName, newParent } = request;
+    await readPlannedDataset(ctx, dataset, []);
+    await refuseSystemDataset(ctx, dataset);
+    let existing: Record<string, unknown> | null;
+    try {
+      existing = await datasetRow(ctx, newName, []);
+    } catch (reason) {
+      throw new Error(
+        `Whether dataset "${newName}" already exists could not be read (pool.dataset.query failed: ` +
+          `${errorText(reason)}), so nothing is planned`,
+      );
+    }
+    if (existing !== null) throw new Error(`Dataset "${newName}" already exists on this system`);
+    // ZFS renames under an existing parent only; this tool creates none.
+    let parentRow: Record<string, unknown> | null;
+    try {
+      parentRow = await datasetRow(ctx, newParent, []);
+    } catch (reason) {
+      throw new Error(
+        `New parent dataset "${newParent}" could not be read (pool.dataset.query failed: ${errorText(reason)}), ` +
+          'so nothing is planned',
+      );
+    }
+    if (parentRow === null) {
+      throw new Error(`New parent dataset "${newParent}" does not exist on this system, and this tool does not create it`);
+    }
+    if (textOrNull(parentRow['type']) === 'VOLUME') {
+      throw new Error(`New parent dataset "${newParent}" is a volume, and ZFS does not hold a dataset under one`);
+    }
+    const descendants = await descendantsSentence(ctx, request);
+    const attachments = await attachmentsSentence(ctx, dataset);
+    return [
+      {
+        method: 'pool.dataset.rename',
+        params: renameParams(request),
+        description:
+          `Rename dataset "${dataset}" to "${newName}".${descendants}${attachments} A busy dataset is rejected ` +
+          'by the system, since `force` is not sent. Everything above was read when this plan was made and is ' +
+          'not read again.',
+      },
+      {
+        method: 'pool.dataset.query',
+        params: bothNamesParams(request),
+        description:
+          `After the rename, read whether "${dataset}" and "${newName}" are listed, to report whether the ` +
+          'rename took effect. Changes nothing.',
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const request = parseRenameRequest(rawArgs);
+    const { dataset, newName } = request;
+    try {
+      await firstValueFrom(ctx.system.client.api.call('pool.dataset.rename', renameParams(request)));
+    } catch (reason) {
+      throw new Error(`Renaming dataset "${dataset}" to "${newName}" failed: ${errorText(reason)}`);
+    }
+    // The call answers `null`, so the outcome is read rather than assumed
+    // (#161). The rename has landed by here, so this read may not fail the tool.
+    let reading: { oldListed: boolean; newListed: boolean } | null = null;
+    let readError: string | null = null;
+    try {
+      reading = await readBothNames(ctx, request);
+    } catch (reason) {
+      readError = errorText(reason);
+    }
+    return {
+      dataset,
+      new_name: newName,
+      lookup: reading === null ? 'UNREADABLE' : 'READ',
+      read_error: readError,
+      old_name_listed: reading?.oldListed ?? null,
+      new_name_listed: reading?.newListed ?? null,
+      renamed: reading === null ? null : !reading.oldListed && reading.newListed,
     };
   },
 };

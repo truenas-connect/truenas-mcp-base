@@ -97,6 +97,7 @@ export {
   datasetSetQuota,
   datasetSetProperty,
   datasetCreate,
+  datasetRename,
   datasetPermissions,
   systemDatasetConfig,
   disksList,
