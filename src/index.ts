@@ -173,6 +173,7 @@ export {
   vmCreate,
   vmDiskImageImport,
   systemUpdateApply,
+  systemReboot,
   serviceControl,
   containerStart,
   containerStop,

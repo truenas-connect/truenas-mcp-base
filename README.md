@@ -52,12 +52,12 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `user_set_locked`, `dataset_set_quota`, `pool_device_set_online`,
   `dataset_set_property`, `dataset_create`, `dataset_rename`, `disk_identify`,
   `certificate_csr_create`, `alert_class_set`, `app_upgrade`, `app_rollback`,
-  `vm_create`, `vm_disk_image_import`, `system_update_apply` —
+  `vm_create`, `vm_disk_image_import`, `system_update_apply`, `system_reboot` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop`, `container_restart`,
   `certificate_csr_create`, `app_upgrade`, `app_rollback`,
-  `vm_disk_image_import` and `system_update_apply` the twelve that start a
-  background job,
+  `vm_disk_image_import`, `system_update_apply` and `system_reboot` the
+  thirteen that start a background job,
   which each watches for a bounded time and then reports on rather than waiting
   out — and `container_start` the one whose answer depends on the version it is
   talking to, a job on TrueNAS 25.10 and a synchronous call on 26 and later,
@@ -113,6 +113,18 @@ confirmation UX, audit sinks) enters through injected interfaces.
   for the next boot is not established from here, so the result reads the boot
   environments back after the watch rather than assuming it. Pool feature flags
   are not upgraded, and no tool here activates the previous boot environment.
+  `system_reboot` reboots a system with a required reason, passed to
+  `system.reboot` unmodified; `delay` is refused. Its plan names what the
+  reboot interrupts — VMs and apps not reported stopped, connected NFS clients
+  and jobs not reported as ended, read through `vms_list`, `apps_list`,
+  `nfs_clients` and `tasks_recent_runs` — and names any of those reads that
+  failed as not established. Incus containers and SMB, iSCSI, NVMe-oF and Fibre
+  Channel sessions are not read, and the plan says so. On an HA system it reboots the connected node
+  and points at `ha_status`. The connection dropping mid-job is the ordinary
+  outcome, so `ended: false` is not a failed reboot; the result carries the
+  `system.boot_id` read just before the call, to compare against
+  `system_reboot_info`'s `boot_id` once the system is back — on the same node,
+  which after an HA failover it may not be.
   `snapshot_clone` is the additive route
   back to a snapshot's data: it deletes nothing and modifies no dataset that
   exists, which is what lets the catalog decline the rollback that answers the

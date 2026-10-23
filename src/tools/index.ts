@@ -82,6 +82,7 @@ import {
   systemGeneralConfig,
   systemInfo,
   systemNtpStatus,
+  systemReboot,
   systemUpdateApply,
   updateStatus,
   upsConfig,
@@ -215,6 +216,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(vmCreate);
   catalog.register(vmDiskImageImport);
   catalog.register(systemUpdateApply);
+  catalog.register(systemReboot);
   return catalog;
 }
 
@@ -306,6 +308,7 @@ export {
   systemHealthReport,
   systemInfo,
   systemNtpStatus,
+  systemReboot,
   systemUpdateApply,
   tasksRecentRuns,
   updateStatus,

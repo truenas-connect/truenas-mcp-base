@@ -3203,6 +3203,42 @@ refusals. Keeping this tool off HA pairs is this catalog's scope line, and an
 unreadable `failover.licensed` has not put the system outside that line, so
 the plan fails as #198's plan-time checks do.
 
+### A plan names what a mutation interrupts by composing the listings (#201)
+
+`system_reboot`'s plan says what the reboot interrupts. It gets that from the
+`vms_list`, `apps_list`, `nfs_clients` and `tasks_recent_runs` handlers, not
+from the API, under #44, so "running" in the plan means what those tools
+report. Each composed read is caught, and one that failed is named in the plan
+as not established. **A plan must never say "nothing is interrupted" about a
+read it did not make.** Each kind also keeps a row whose state could not be
+read. The list is written as the states that are NOT interrupted (`STOPPED`
+for a VM, `STOPPED`/`CRASHED` for an app, the five ended job states), so a
+state this tool does not know counts as interrupted (#93's direction).
+`tasks_recent_runs` is called with `since` set to the epoch. Its default day
+would drop the long-running job that most needs naming.
+
+**HA is stated, not refused, unlike in #200.** Rebooting the connected node of
+a pair is something this tool does, so the plan says it is doing that and
+points at `ha_status`. `system_update_apply` refuses an HA system because
+updating one is outside the catalog's scope. Rebooting one is not.
+
+**The confirming read is a join this repository cannot check.** The result
+carries `boot_id_before` from `system.boot_id`, and the guidance tells the
+caller to compare it with `system_reboot_info`'s `boot_id`, which comes from
+`system.reboot.info`. The TrueNAS implementation builds the second from the
+first. The surface does not say so, so the guidance marks it `(unconfirmed)`
+rather than adding a second boot id read to `system_info`. The comparison also
+assumes that the same node answers both reads. After an HA failover the
+catalog may be talking to the peer, whose boot id differs either way, so the
+guidance points at `ha_status`.
+
+**Name what the composed reads leave out.** Incus containers, which
+`vms_list` excludes, and SMB, iSCSI, NVMe-oF and Fibre Channel clients are not
+read, and they are interrupted too. The plan says so
+in a sentence shared with the description. Otherwise a plan where all four
+reads come back empty reads as "nothing is interrupted", which is the
+reassuring silence #154 rules out.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
