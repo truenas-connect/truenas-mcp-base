@@ -514,6 +514,11 @@ export async function watchJob<Extra extends object = Record<never, never>>(
  * outcome is derived — so it is here rather than copied into a second family
  * (#182). What each tool names the thing it switches, and where its ids come
  * from, stays in its own file and is passed in.
+ *
+ * `user_set_locked` in `accounts.ts` moves a different boolean, `locked`,
+ * through the same shape of call (#188), so {@link switchOutcome} takes the
+ * field's name. {@link switchSentence} does not: its words are "enabled" and
+ * "disabled", and the words are the tool's own.
  */
 
 /**
@@ -602,12 +607,16 @@ export function readStep(method: string, noun: string, id: number): PlanStep {
  * unconditionally, whatever the read said — skipping it for a row the read no
  * longer lists would be `execute` branching on state read at execution time,
  * which is what the confirmation token cannot bind.
+ *
+ * `field` is the boolean switched, and names the two readings
+ * `previously_<field>` and `resulting_<field>`.
  */
 export async function switchOutcome(
   read: () => Promise<unknown>,
   update: () => Promise<unknown>,
   id: number,
-  enabled: boolean,
+  wanted: boolean,
+  field = 'enabled',
 ): Promise<Record<string, unknown>> {
   let row: Record<string, unknown> | null = null;
   let lookupError: string | null = null;
@@ -617,21 +626,21 @@ export async function switchOutcome(
     lookupError = errorText(reason);
   }
   const updated = await update();
-  const previous = row === null ? null : booleanOrNull(row['enabled']);
+  const previous = row === null ? null : booleanOrNull(row[field]);
   // The update methods answer with the updated entity, so what the response
-  // says about `enabled` is the state that actually resulted — read back
+  // says about the field is the state that actually resulted — read back
   // through the same guard rather than echoing what was asked for.
-  const resulting = booleanOrNull(recordOrNull(updated)?.['enabled']);
+  const resulting = booleanOrNull(recordOrNull(updated)?.[field]);
   return {
     lookup: lookupError !== null ? 'UNREADABLE' : row === null ? 'NOT_FOUND' : 'FOUND',
     lookup_error: lookupError,
-    previously_enabled: previous,
-    resulting_enabled: resulting,
+    [`previously_${field}`]: previous,
+    [`resulting_${field}`]: resulting,
     // Both readings or nothing. A `changed` derived from the request rather
     // than from the response would report a call the system did not apply as
     // having changed something.
     changed: previous === null || resulting === null ? null : previous !== resulting,
-    confirmed: resulting === null ? null : resulting === enabled,
+    confirmed: resulting === null ? null : resulting === wanted,
   };
 }
 

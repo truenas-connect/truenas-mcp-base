@@ -1,5 +1,11 @@
 import { ToolCatalog } from '@/catalog/catalog';
-import { directoryServicesStatus, privilegesList, userCreate, usersList } from '@/tools/accounts';
+import {
+  directoryServicesStatus,
+  privilegesList,
+  userCreate,
+  userSetLocked,
+  usersList,
+} from '@/tools/accounts';
 import { alertsDismiss, alertSettings, alertsList, alertsRestore } from '@/tools/alerts';
 import { appEngineStatus, appsList, appsUpdateSummary } from '@/tools/apps';
 import {
@@ -179,6 +185,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(nvmeofSubsystemCreate);
   catalog.register(nvmeofSubsystemUpdate);
   catalog.register(userCreate);
+  catalog.register(userSetLocked);
   return catalog;
 }
 
@@ -264,6 +271,7 @@ export {
   updateStatus,
   upsConfig,
   userCreate,
+  userSetLocked,
   usersList,
   vmClone,
   vmDevices,

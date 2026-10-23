@@ -907,7 +907,8 @@ describe('user_create', () => {
   it('names privileges_list as where the privileged-group boundary is read', () => {
     expect(userCreate.description).toContain('A GROUP THAT HOLDS A PRIVILEGE IS REFUSED');
     expect(userCreate.description).toContain('`privileges_list`');
-    expect(userCreate.description).toContain('NO TOOL IN THIS CATALOG DELETES OR DISABLES A USER');
+    expect(userCreate.description).toContain('NO TOOL IN THIS CATALOG DELETES A USER');
+    expect(userCreate.description).toContain('`user_set_locked`');
   });
 
   describe('argument validation', () => {
