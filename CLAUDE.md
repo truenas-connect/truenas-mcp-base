@@ -3135,10 +3135,12 @@ devices are still attempted, and nothing is rolled back. No tool here deletes a
 VM or a zvol, and a cleanup that can itself fail would leave two unknowns
 instead of one partial result.
 
-**The plan-time checks exist to keep that partial case rare.** Anything a device
-call would be refused for that can be read beforehand fails the PLAN, including
-where the read itself fails: a zvol name that is taken, a missing parent, an
-interface `interface.query` does not list, an ISO that does not stat. A refusal
+**The plan-time checks exist to keep that partial case rare, not to rule it
+out.** Four refusals that can be read beforehand fail the PLAN, including where
+the read itself fails: a zvol name that is taken, a missing parent, an interface
+`interface.query` does not list, an ISO that does not stat. The middleware may
+refuse a device for other reasons this tool does not check, and those still
+arrive as partial results. A refusal
 at plan time costs a retry. The same refusal at execute time leaves a half-made
 machine. The pool's free space is the exception. It is a supporting read
 (#154), and a zvol larger than the free space is warned about rather than
