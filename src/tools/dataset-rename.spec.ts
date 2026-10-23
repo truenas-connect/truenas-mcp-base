@@ -41,7 +41,7 @@ function renameSystem(
     if (filter === undefined) return of(datasets);
     const [, op, value] = filter;
     const wanted = op === 'in' ? (value as unknown[]) : [value];
-    return of(datasets.filter((row) => wanted.includes(row['id'])));
+    return of(datasets.filter((row) => wanted.includes(row?.['id'])));
   });
   const system = { name: 'nas', client: { api: { call, query } } } as unknown as SystemHandle;
   return { ctx: { system }, call, query };
@@ -236,6 +236,20 @@ describe('dataset_rename', () => {
       expect(await describeRename({}, alone)).toContain('No descendant of it was listed, so it moves alone.');
       const one = renameSystem({ datasets: [{ id: 'tank/projects' }, { id: 'tank/projects/a' }, { id: 'tank/archive' }] });
       expect(await describeRename({}, one)).toContain('1 descendant moves with it: "tank/projects/a" becomes');
+    });
+
+    it('counts a listed dataset whose id could not be read, and never says it moves alone beside one', async () => {
+      const alone = renameSystem({ datasets: [{ id: 'tank/projects' }, { id: 'tank/archive' }, { id: 7 }, null as never] });
+      const text = await describeRename({}, alone);
+      expect(text).toContain(
+        'No descendant of it was listed by name. 2 listed datasets could not be read by name, and any of them ' +
+          'may move with it too.',
+      );
+      expect(text).not.toContain('moves alone');
+      const some = renameSystem({ datasets: [{ id: 'tank/projects' }, { id: 'tank/projects/a' }, { id: 'tank/archive' }, { id: 7 }] });
+      expect(await describeRename({}, some)).toContain(
+        '"tank/projects/a" becomes "tank/archive/projects/a". 1 listed dataset could not be read by name',
+      );
     });
 
     it('caps the descendants it names and counts the rest', async () => {

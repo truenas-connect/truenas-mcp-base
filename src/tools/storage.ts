@@ -2361,7 +2361,7 @@ async function refuseSystemDataset(ctx: ToolContext, dataset: string): Promise<v
 /** What the plan says about the descendants that move with the dataset. */
 async function descendantsSentence(ctx: ToolContext, request: RenameRequest): Promise<string> {
   const { dataset, newName } = request;
-  let rows: Record<string, unknown>[];
+  let rows: unknown[];
   try {
     // Every dataset, through the walk, and the prefix matched on the response:
     // `dataset_permissions`' descendant read, for its reasons (#168).
@@ -2374,12 +2374,21 @@ async function descendantsSentence(ctx: ToolContext, request: RenameRequest): Pr
       'move with it is not stated here; every one of them does.'
     );
   }
-  const descendants = rows
-    .map(datasetId)
-    .filter((id) => id.startsWith(`${dataset}/`))
+  // A row whose id cannot be read is counted, not dropped (#183): it may be a
+  // descendant, and dropping it moves the sentence towards "moves alone" (#93).
+  const ids = rows.map((row) => textOrNull(recordOrNull(row)?.['id']));
+  const unreadable = ids.filter((id) => id === null).length;
+  const unreadSentence =
+    unreadable === 0
+      ? ''
+      : ` ${plural(unreadable, 'listed dataset')} could not be read by name, and any of them may move with it too.`;
+  const descendants = ids
+    .filter((id): id is string => id !== null && id.startsWith(`${dataset}/`))
     .sort((left, right) => left.localeCompare(right));
   if (descendants.length === 0) {
-    return ' No descendant of it was listed, so it moves alone.';
+    return unreadable === 0
+      ? ' No descendant of it was listed, so it moves alone.'
+      : ` No descendant of it was listed by name.${unreadSentence}`;
   }
   const named = descendants
     .slice(0, RENAME_DESCENDANTS_LIMIT)
@@ -2387,7 +2396,8 @@ async function descendantsSentence(ctx: ToolContext, request: RenameRequest): Pr
   const rest = descendants.length - named.length;
   return (
     ` ${plural(descendants.length, 'descendant')} ${descendants.length === 1 ? 'moves' : 'move'} with it: ` +
-    `${named.join('; ')}${rest > 0 ? `; and ${rest} more, not named here (the first ${RENAME_DESCENDANTS_LIMIT} are)` : ''}.`
+    `${named.join('; ')}${rest > 0 ? `; and ${rest} more, not named here (the first ${RENAME_DESCENDANTS_LIMIT} are)` : ''}.` +
+    unreadSentence
   );
 }
 
