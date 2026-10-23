@@ -151,6 +151,20 @@ describe('dataset_set_property', () => {
       expect(await describeUpdate({ property: 'atime', value: 'OFF' })).not.toContain('REWRITTEN');
     });
 
+    it('says an inherited or default recordsize cannot be put back, since INHERIT is refused for it', async () => {
+      expect(await describeUpdate({ property: 'recordsize', value: '1M' })).toContain(
+        'NOTHING IN THIS CATALOG CAN PUT BACK ITS SOURCE DEFAULT: INHERIT is refused for `recordsize`, and ' +
+          'setting the old size again sets it on this dataset.',
+      );
+      const local = { 'pool.dataset.query': [logs({ recordsize: { value: '128K', source: 'LOCAL' } })] };
+      expect(await describeUpdate({ property: 'recordsize', value: '1M' }, local)).not.toContain('PUT BACK');
+      const unread = { 'pool.dataset.query': [logs({ recordsize: { value: '128K' } })] };
+      expect(await describeUpdate({ property: 'recordsize', value: '1M' }, unread)).not.toContain('PUT BACK');
+      expect(datasetSetProperty.description).toContain(
+        'CANNOT BE PUT BACK TO INHERITING BY ANY TOOL HERE',
+      );
+    });
+
     it('says readonly ON makes writes fail, and that INHERIT may', async () => {
       expect(await describeUpdate({ property: 'readonly', value: 'ON' })).toContain(
         'WRITES TO THE DATASET WILL FAIL once this is applied — every application, share and client writing to ' +
@@ -281,6 +295,20 @@ describe('dataset_set_property', () => {
       expect(
         await datasetSetProperty.execute(inherited.ctx, { dataset: 'tank/logs', property: 'compression', value: 'LZ4' }),
       ).toMatchObject({ resulting_value: 'lz4', changed: false, confirmed: false });
+    });
+
+    it('settles nothing for a value read back under a source other than local, inherited or default', async () => {
+      for (const source of ['RECEIVED', 'TEMPORARY']) {
+        const { ctx } = system({ 'pool.dataset.update': logs({ compression: { value: 'zstd', source } }) });
+        expect(
+          await datasetSetProperty.execute(ctx, { dataset: 'tank/logs', property: 'compression', value: 'ZSTD' }),
+        ).toMatchObject({ resulting_source: source, confirmed: null });
+      }
+      // A different value is still not a success, whatever the source.
+      const other = system({ 'pool.dataset.update': logs({ compression: { value: 'gzip', source: 'RECEIVED' } }) });
+      expect(
+        await datasetSetProperty.execute(other.ctx, { dataset: 'tank/logs', property: 'compression', value: 'ZSTD' }),
+      ).toMatchObject({ confirmed: false });
     });
 
     it('leaves changed and confirmed unestablished where a reading is missing', async () => {

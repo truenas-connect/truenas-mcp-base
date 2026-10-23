@@ -1535,8 +1535,10 @@ function readingMatches(requested: string, reading: PropertyReading): boolean | 
   // ZFS reports these values in lower case where the API takes upper case, so
   // the comparison ignores letter case; the value is still reported as spelled.
   if (reading.value !== null && reading.value.toUpperCase() !== requested.toUpperCase()) return false;
-  if (source !== null && source !== 'LOCAL') return false;
-  return reading.value === null || source === null ? null : true;
+  if (source !== null && NOT_LOCAL_SOURCES.has(source)) return false;
+  // Any other source — `RECEIVED`, `TEMPORARY` — is neither the setting landing
+  // nor plainly its absence, so it settles nothing.
+  return reading.value === null || source !== 'LOCAL' ? null : true;
 }
 
 function readingText(reading: PropertyReading): string {
@@ -1587,6 +1589,11 @@ function propertyEffect(request: PropertyRequest, current: PropertyReading): str
       value === 'INHERIT'
         ? ' It already inherits, so this changes nothing and is not an error.'
         : ' It is already set to that on this dataset, so this changes nothing and is not an error.';
+  }
+  if (property === 'recordsize' && current.source !== null && NOT_LOCAL_SOURCES.has(current.source.toUpperCase())) {
+    effect +=
+      ` NOTHING IN THIS CATALOG CAN PUT BACK ITS SOURCE ${current.source}: INHERIT is refused for \`recordsize\`, ` +
+      'and setting the old size again sets it on this dataset.';
   }
   if (NEW_WRITES_ONLY.has(property)) {
     effect +=
@@ -1644,13 +1651,15 @@ export const datasetSetProperty: MutatingTool = {
     '`atime`, `recordsize`, `snapdir` and `exec` are filesystem properties, and a volume fails the plan ' +
     'for them. THE PLAN STATES THE CURRENT VALUE AND SOURCE AND THE VALUE REQUESTED, so wherever the ' +
     'current value could be read the call that undoes this is in the plan — a value whose source was ' +
-    'INHERITED or DEFAULT is put back by INHERIT, not by setting that value, which would set it locally. ' +
+    'INHERITED or DEFAULT is put back by INHERIT, not by setting that value, which would set it locally — ' +
+    'EXCEPT FOR `recordsize`, where INHERIT is refused, so a record size that was inherited or default ' +
+    'CANNOT BE PUT BACK TO INHERITING BY ANY TOOL HERE, and its plan says so. ' +
     '`compression` and `recordsize` DO NOT REWRITE EXISTING DATA: only blocks written afterwards use the ' +
     'new setting. `readonly` ON MAKES EVERY WRITE TO THE DATASET FAIL until it is set back. The current ' +
     'value is read when the plan is made and again immediately before the call, for the result; the ' +
     'call is made whatever that second read finds. Setting a value the dataset already holds locally, or ' +
     'INHERIT on one that already inherits, is not an error. `destructiveness` is `reversible`: nothing is ' +
-    'deleted, and setting the property back undoes the setting — but blocks written while a ' +
+    'deleted, and setting the property back undoes the setting, `recordsize`\'s source aside — but blocks written while a ' +
     '`compression` or `recordsize` was in force keep it, and nothing here rewrites them. ' +
     DATASET_SET_PROPERTY_GUIDANCE,
   resultGuidance: DATASET_SET_PROPERTY_GUIDANCE,
