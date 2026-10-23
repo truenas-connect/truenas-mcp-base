@@ -243,7 +243,8 @@ Where the line falls, since "shared" is not the same as "generic":
   `readStep`, `switchOutcome` and `NONE_REPORTED` — moved out of `tasks.ts`
   when `share_set_enabled` became the first switching tool in a second family.
   A tool that moves one row's `enabled` through an `(id, { enabled })` update
-  answering with the row reads through those, and adds only its own naming.
+  answering with the row reads through those, and adds only its own naming;
+  since #188 `switchOutcome` also takes another boolean field by name.
 - **What does not is anything whose meaning is a family's own**: a limit's
   default, a state vocabulary, a field name. `effectiveLimit` is shared and
   takes its two bounds as arguments precisely because the bounding is common
@@ -2867,6 +2868,34 @@ for the same kind of reason: the middleware's own default is SMB on, and it
 refuses SMB beside a disabled password (also read from the implementation).
 Neither is left to be discovered as a rejection at `execute`. Neither has been
 checked against a live system.
+
+### Locking an account refuses the catalog's own, and promises nothing past the password (#188)
+
+`user_set_locked` is a switching tool over `locked` rather than `enabled`, so
+`switchOutcome` in `common.ts` now takes the field's name (default `enabled`)
+and names its two readings after it. `switchSentence` was NOT generalised: its
+words are "enabled" and "disabled", and the words are each tool's own (#86).
+
+**The catalog will not lock the account it is signed in as.** `auth.me` names
+the session's user by `pw_name` and `pw_uid`, not by the record id the tool
+takes, so the target is matched on username OR uid — matching more refuses
+more. Whether a lock ends a session already using it is `(unconfirmed)`, and
+that is the reason it is refused rather than warned about: if it does, nothing
+here could unlock it again. A failed or empty `auth.me` refuses too. Only a
+lock is checked; an unlock cannot lock the catalog out.
+
+**What a lock stops is stated, not settled (#120).** It is understood to bar
+password login; whether it revokes API keys or ends open sessions is not on the
+surface. The description and the lock plan share one text (`LOCK_REACH`) saying
+so, and the result carries `api_key_count` so a caller can see access that may
+remain. An admin offboarding someone acts on "disabled", so over-promising is
+the costly direction.
+
+The local / `builtin` / `immutable` and own-account refusals are plan-time only
+— the id cannot come to name a different account, and `execute` re-reading
+would branch on state the token cannot bind. The privileges the account's
+groups hold are a supporting read (#154): a failure is stated, and "holds
+none" is said only where every group and privilege entry was read.
 
 ### A limit below current usage is refused, because ZFS refuses it (#189)
 

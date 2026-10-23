@@ -94,14 +94,17 @@ describe('createDefaultCatalog', () => {
       'nvmeof_subsystem_create',
       'nvmeof_subsystem_update',
       'user_create',
+      'user_set_locked',
       'dataset_set_quota',
     ]);
   });
 
-  it('advertises user_create to a full-access credential only', () => {
-    expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain('user_create');
-    expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain('user_create');
-    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain('user_create');
+  it('advertises user_create and user_set_locked to a full-access credential only', () => {
+    for (const name of ['user_create', 'user_set_locked']) {
+      expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain(name);
+      expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain(name);
+      expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(name);
+    }
   });
 
   it('advertises dataset_set_quota to a full-access credential only', () => {
