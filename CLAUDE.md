@@ -3100,6 +3100,27 @@ unreadable list refuses too (#190). A reset removes the key rather than writing
 default values. That also drops a stored `proactive_support`, which no tool here
 sets, so the plan names it and the description narrows `reversible` (#153).
 
+### An excluded flag is sent as false, and a job's answer sits beside a read (#197)
+
+`app_rollback` refuses `rollback_snapshot` as an argument and SENDS it as
+`false`, because the surface does not state the middleware's default and an
+omitted field would leave that decision to it. Leaving a field out is not the
+same as refusing it. `app_upgrade` refuses `values` (#179) and defaults
+`snapshot_hostpaths` to true, as the ticket recommended.
+
+Both jobs answer with an `AppEntry`, whose `config` holds install-time secrets.
+That answer is read by named field into `answered`, gated on `ended` (#195).
+The ticket also asks for the state read after the job, so `app.query` is read
+again when the watch ends, into `resulting_*`. That read is a plan step after
+the mutation (#153). These are two readings at two moments, and neither is
+used to correct the other. A `DEPLOYING` state at the end of the watch is an
+app still coming up.
+
+The engine check refuses only an engine READ as not running. A failed read, or
+a status word this catalog does not know, adds a sentence saying the call may
+be rejected (#161). A rollback version list that could not be read refuses
+instead, because the version would otherwise reach approval unchecked (#190).
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

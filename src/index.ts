@@ -106,6 +106,8 @@ export {
   appsList,
   appEngineStatus,
   appsUpdateSummary,
+  appUpgrade,
+  appRollback,
   vmsList,
   vmLogs,
   vmDevices,

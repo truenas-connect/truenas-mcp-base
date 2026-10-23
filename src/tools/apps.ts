@@ -1,8 +1,18 @@
-import type { CallResponse } from '@truenas/api-client';
+import type { CallResponse, JobParams } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
+import type { MutatingTool, PlanStep, ToolContext } from '@/catalog/tool';
 import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
-import { booleanOrNull, errorText, recordOrNull, textOrNull } from '@/tools/common';
+import {
+  booleanOrNull,
+  errorText,
+  recordOrNull,
+  refuseArgs,
+  strictTextList,
+  textOrNull,
+  watchJob,
+  type WatchedJob,
+} from '@/tools/common';
 
 /**
  * The applications family. Three tools, and they are three rather than one
@@ -29,8 +39,11 @@ import { booleanOrNull, errorText, recordOrNull, textOrNull } from '@/tools/comm
  * misreading this family is most likely to produce, and it is only avoidable if
  * a caller reading one tool knows the other exists.
  *
- * Nothing here mutates. Upgrading, starting and stopping an app all exist on
- * the middleware and none of them is in this catalog.
+ * Two tools here mutate: `app_upgrade` and `app_rollback` move one application
+ * between catalog versions, and ship together so the upgrade's reversal is a
+ * tool rather than a call a reader has to go elsewhere for (#197). Installing,
+ * starting and stopping an app exist on the middleware and are not in this
+ * catalog.
  */
 
 /** Applications installed on a system: what is deployed, what is running, and
@@ -533,5 +546,549 @@ export const appsUpdateSummary: ReadOnlyTool = {
       candidates.map((candidate) => readSummary(system, candidate)),
     );
     return { unavailable: null, entries };
+  },
+};
+
+/*
+ * `app_upgrade` and `app_rollback`: moving one installed application between
+ * catalog versions (#197).
+ *
+ * THEY SHIP TOGETHER for the reason #161 gave `vm_start` and `vm_stop`: an
+ * upgrade whose reversal is an obvious, already-typed API call that no tool
+ * offers would be a `reversible` mutation the catalog cannot reverse. Together
+ * they make the field true for the VERSION — and only for the version, which is
+ * the account of the data both descriptions and both plans carry (#122, #153):
+ * an upgrade can migrate the application's own data, and rolling the version
+ * back does not migrate it back.
+ *
+ * WHAT IS NOT SENT. `values` on an upgrade routinely carries passwords and
+ * tokens, held on #179; `rollback_snapshot: true` restores the app's ix-volume
+ * snapshot and discards data written since the upgrade, which is a destruction
+ * this tool would author (#122, #128), held on #178. Both are refused by name,
+ * and the rollback SENDS `rollback_snapshot: false` rather than leaving it out,
+ * because the surface does not state the middleware's default and an omitted
+ * field would hand that decision to it.
+ *
+ * THE JOB ANSWERS WITH AN `AppEntry`, AND ITS `config` HOLDS INSTALL-TIME
+ * VALUES THAT ROUTINELY INCLUDE SECRETS (#115). It is read by named field, in
+ * `extra`, as `certificate_csr_create` reads its entry (#195); so is the
+ * listing read after the watch, since a projected row can arrive padded.
+ */
+
+/** The middleware's name for one application, as both tools take it. */
+function parseAppName(args: Record<string, unknown>): string {
+  const name = args['app_name'];
+  if (typeof name !== 'string' || name === '') {
+    throw new Error('"app_name" is required and must be the application\'s `name` as `apps_list` reports it');
+  }
+  return name;
+}
+
+/** One application as these two tools read it, by named field. */
+interface AppReading {
+  name: string | null;
+  version: string | null;
+  human_version: string | null;
+  state: string | null;
+  upgrade_available: boolean | null;
+}
+
+/** An application's fields where nothing was read, spelled out for `boot.ts`'s reason. */
+const UNREAD_APP: AppReading = {
+  name: null,
+  version: null,
+  human_version: null,
+  state: null,
+  upgrade_available: null,
+};
+
+/** One `AppEntry`-shaped record read through the allowlist, and nothing else of it. */
+function appReading(record: Record<string, unknown> | null): AppReading {
+  if (record === null) return UNREAD_APP;
+  return {
+    name: textOrNull(record['name']),
+    version: textOrNull(record['version']),
+    human_version: textOrNull(record['human_version']),
+    state: textOrNull(record['state']),
+    upgrade_available: booleanOrNull(record['upgrade_available']),
+  };
+}
+
+/**
+ * The params the listing read reaches the middleware with, for the plan step
+ * that names it. The filter and the `select` are written here AND inlined in
+ * {@link readApp}, because hoisted to a `const` they widen out of the client's
+ * tuple and the rows degrade (#115, #153); a test asserts each half against the
+ * literal it expects.
+ */
+function appReadParams(name: string): unknown {
+  return [
+    [['name', '=', name]],
+    { select: ['name', 'version', 'human_version', 'state', 'upgrade_available'] },
+  ];
+}
+
+/**
+ * The application the system lists under this name, or null where it lists
+ * none that is. Matched on the RESPONSE, not only in the filter: a dropped
+ * filter returns every application, and the first of those is another one
+ * (#121).
+ */
+async function readApp(ctx: ToolContext, name: string): Promise<AppReading | null> {
+  const rows: unknown = await firstValueFrom(
+    ctx.system.client.api.query('app.query', [['name', '=', name]], {
+      select: ['name', 'version', 'human_version', 'state', 'upgrade_available'],
+    }),
+  );
+  if (!Array.isArray(rows)) throw new Error(NOT_A_LIST);
+  for (const row of rows) {
+    const reading = appReading(recordOrNull(row));
+    if (reading.name === name) return reading;
+  }
+  return null;
+}
+
+/**
+ * The checks both plans make before anything is planned: the application is
+ * listed, and the app engine is not reported as down.
+ *
+ * An engine whose status could not be read, or whose word this catalog does not
+ * know, does NOT refuse — a state that could not be read refuses nothing (#161)
+ * — and the returned sentence says the call may be rejected instead. An engine
+ * READ as not running refuses, because the middleware cannot deploy an app
+ * there and a plan promising the call would promise more than it delivers.
+ */
+async function planPreconditions(ctx: ToolContext, name: string): Promise<{ app: AppReading; engine: string }> {
+  let app: AppReading | null;
+  try {
+    app = await readApp(ctx, name);
+  } catch (reason) {
+    throw new Error(
+      `Whether an application named "${name}" is installed could not be read (app.query failed: ` +
+        `${errorText(reason)}), so nothing is planned`,
+    );
+  }
+  if (app === null) {
+    throw new Error(`No application named "${name}" is installed on this system; \`apps_list\` reports every name`);
+  }
+  let status: string | null = null;
+  let failure: string | null = null;
+  try {
+    status = textOrNull(recordOrNull(await firstValueFrom(ctx.system.client.api.call('docker.status')))?.['status']);
+  } catch (reason) {
+    failure = errorText(reason);
+  }
+  const running = engineRunning(status);
+  if (running === false) {
+    throw new Error(
+      `The app engine on this system reports ${status}, not RUNNING, so no application can be deployed; ` +
+        '`app_engine_status` reports it',
+    );
+  }
+  const engine =
+    running === true
+      ? 'The app engine reads as RUNNING.'
+      : failure !== null
+        ? `Whether the app engine is running could not be read (${failure}), so the call may be rejected; ` +
+          '`app_engine_status` reports it.'
+        : `The app engine reported ${status === null ? 'no status this tool could read' : `the status ${status}, which this catalog does not know`}, ` +
+          'so the call may be rejected; `app_engine_status` reports it.';
+  return { app, engine };
+}
+
+/** A version as a plan states it, naming an absence rather than dropping it. */
+function versionPhrase(version: string | null, human: string | null): string {
+  if (version === null) return 'a version the system reported no value for';
+  return human === null ? `version ${version}` : `version ${version} (${human})`;
+}
+
+/**
+ * The account of the data, in the one wording both descriptions and both plans
+ * carry (#122): `reversible` is about the version, and this is the half the
+ * field cannot say.
+ */
+const DATA_CAVEAT =
+  'AN UPGRADE CAN MIGRATE THE APPLICATION\'S OWN DATA, AND A ROLLBACK RESTORES THE VERSION AND NOT THE ' +
+  'DATA: an application whose new version migrated its data may not start on the old one. This catalog never ' +
+  "restores the application's ix-volume snapshot on rollback, which would discard data written since the upgrade.";
+
+/** The step for the read `execute` makes after the watch, in one wording for both tools. */
+function appReadStep(name: string, seconds: number): PlanStep {
+  return {
+    method: 'app.query',
+    params: appReadParams(name),
+    description:
+      `Read the application "${name}" again WHEN THE WATCH ENDS — UP TO ${seconds} SECONDS AFTER THE CALL IS ` +
+      'MADE, AND NOT WHEN THE OPERATION FINISHES — to report the version and state reached by then. A ' +
+      '`DEPLOYING` state there is an application still coming up, not a failed call. Changes nothing.',
+  };
+}
+
+/** What the plan says about the watch, in the one wording both tools use. */
+function appWatchSentence(seconds: number): string {
+  return (
+    "This starts a background job; the job is then followed through the client's own tracking, which reads " +
+    `\`core.get_jobs\` and changes nothing, for at most ${seconds} seconds. The operation continues after that ` +
+    'whether or not it has finished.'
+  );
+}
+
+/**
+ * The job states these two tools read as a run that worked. This family's own
+ * (#86, #161), passed to `watchJob` rather than shared.
+ */
+const APP_JOB_SUCCESS_STATES = new Set(['SUCCESS', 'FINISHED']);
+
+/** How long `app_upgrade` watches its job: a ceiling on its patience, not an estimate (#122). */
+const APP_UPGRADE_WATCH_MS = 30_000;
+const APP_UPGRADE_WATCH_SECONDS = APP_UPGRADE_WATCH_MS / 1000;
+
+/** How long `app_rollback` watches its job. Its own number, equal though they are (#154). */
+const APP_ROLLBACK_WATCH_MS = 30_000;
+const APP_ROLLBACK_WATCH_SECONDS = APP_ROLLBACK_WATCH_MS / 1000;
+
+/** The job's answer, through the allowlist, read only where the job ended (#195). */
+interface AppJobAnswer {
+  answered: AppReading | null;
+}
+
+function appJobAnswer(record: Record<string, unknown> | null, ended: boolean): AppJobAnswer {
+  if (!ended) return { answered: null };
+  const entry = recordOrNull(record?.['result']);
+  return { answered: entry === null ? null : appReading(entry) };
+}
+
+/**
+ * The listing read after the watch, with its failure caught: the call has
+ * already been made, and a failed read must not report it as a failed call
+ * (#161).
+ */
+async function resultingApp(ctx: ToolContext, name: string): Promise<Record<string, unknown>> {
+  let reading: AppReading | null = null;
+  let error: string | null = null;
+  try {
+    reading = await readApp(ctx, name);
+  } catch (reason) {
+    error = errorText(reason);
+  }
+  const held = reading ?? UNREAD_APP;
+  return {
+    resulting_lookup: error !== null ? 'UNREADABLE' : reading === null ? 'NOT_FOUND' : 'FOUND',
+    resulting_read_error: error,
+    resulting_version: held.version,
+    resulting_human_version: held.human_version,
+    resulting_state: held.state,
+    resulting_upgrade_available: held.upgrade_available,
+  };
+}
+
+/** The half of both results' guidance that is about the job and the read after it. */
+const APP_JOB_GUIDANCE =
+  '`ended` is whether the job was ESTABLISHED to have reached a state it will not move out of. FALSE MEANS ' +
+  'NOTHING WAS ESTABLISHED: the job may still be running, the watch may have been cut short by a dropped ' +
+  'connection, or no job was seen at all — `job_state` and `job_id` narrow that and do not partition it, and ' +
+  'in none of them has anything failed. `succeeded` is true where the job ended in `SUCCESS` or `FINISHED`, ' +
+  'false where it ended in any other state, and null wherever `ended` is false. `error` is the text the job ' +
+  'recorded, null where it recorded none. `finished_at` is when the job ended, as an ISO 8601 UTC timestamp, ' +
+  "and null wherever `ended` is false. `job_id` is the job's numeric identity, taken from the job event that " +
+  'named this request; it is null where no such event was seen, which does not mean nothing started. ' +
+  '`watched_seconds` is the ceiling that applied, not how long the watch lasted. `answered` is the ' +
+  "application as the job's own answer describes it — `name`, `version`, `human_version`, `state` and " +
+  '`upgrade_available` and nothing else — read only where `ended` is true and null everywhere else, and also ' +
+  'null where the job ended without answering with an application. THE APPLICATION\'S `config` IS NEVER IN ' +
+  'THIS RESULT, in any form. `resulting_version`, `resulting_human_version`, `resulting_state` and ' +
+  '`resulting_upgrade_available` are a fresh read of `app.query` made WHEN THE WATCH ENDS, NOT WHEN THE ' +
+  'OPERATION DOES, so a `DEPLOYING` state there is an application still coming up and not a failed call. ' +
+  '`resulting_lookup` says what that read did: `FOUND`, `NOT_FOUND`, or `UNREADABLE` with ' +
+  '`resulting_read_error` naming why, and the four fields are null under the last two. A `FOUND` beside a null ' +
+  'field is the system having reported no value for it. `answered` and the `resulting_*` fields are two ' +
+  'readings at two moments and may disagree; neither is the other corrected.';
+
+/** `app_upgrade`'s arguments. */
+interface AppUpgradeArgs {
+  name: string;
+  version: string | null;
+  snapshotHostpaths: boolean;
+}
+
+function parseAppUpgradeArgs(args: Record<string, unknown>): AppUpgradeArgs {
+  refuseArgs(
+    args,
+    ['values'],
+    "an application's values routinely carry passwords and tokens, which this catalog does not take as " +
+      'arguments; the upgrade keeps the values the application already has',
+  );
+  const name = parseAppName(args);
+  const version = args['app_version'];
+  if (version != null && (typeof version !== 'string' || version === '')) {
+    throw new Error('"app_version" must be a catalog version, such as one `apps_update_summary` names');
+  }
+  const snapshot = args['snapshot_hostpaths'];
+  if (snapshot != null && typeof snapshot !== 'boolean') {
+    throw new Error('"snapshot_hostpaths" must be a boolean');
+  }
+  return { name, version: version ?? null, snapshotHostpaths: snapshot !== false };
+}
+
+/** The upgrade's params, in one place so the plan names exactly the call `execute` makes. */
+function appUpgradeParams(args: AppUpgradeArgs): JobParams<ApiSurface, 'app.upgrade'> {
+  return args.version === null
+    ? [args.name, { snapshot_hostpaths: args.snapshotHostpaths }]
+    : [args.name, { app_version: args.version, snapshot_hostpaths: args.snapshotHostpaths }];
+}
+
+/**
+ * What the plan says the upgrade moves to, read off `app.upgrade_summary`.
+ *
+ * A supporting read (#154): a failure is stated, not refused, since the
+ * middleware decides the target and the summary only describes it. No
+ * changelog is quoted, for `apps_update_summary`'s reason (#101).
+ */
+async function upgradeTargetSentence(ctx: ToolContext, args: AppUpgradeArgs): Promise<string> {
+  const asked = args.version === null ? 'the version the system treats as latest' : `version ${args.version}`;
+  try {
+    const answer: unknown = await firstValueFrom(
+      args.version === null
+        ? ctx.system.client.api.call('app.upgrade_summary', [args.name])
+        : ctx.system.client.api.call('app.upgrade_summary', [args.name, { app_version: args.version }]),
+    );
+    const summary = recordOrNull(answer);
+    const target = textOrNull(summary?.['upgrade_version']);
+    if (target === null) {
+      return `It moves to ${asked}; the upgrade summary named no target version this tool could read.`;
+    }
+    return (
+      `It moves to ${versionPhrase(target, textOrNull(summary?.['upgrade_human_version']))}, as the system's ` +
+      'upgrade summary names it. `apps_update_summary` reports the same summary; no changelog is quoted here.'
+    );
+  } catch (reason) {
+    return (
+      `It moves to ${asked}; the upgrade summary could not be read (${errorText(reason)}), so the target ` +
+      'version is not established here, and the call may be rejected.'
+    );
+  }
+}
+
+/** Whether host paths are snapshotted, in the plan's words. */
+function hostpathSentence(snapshot: boolean): string {
+  return snapshot
+    ? "A snapshot of the application's host-path volumes is taken before upgrading (`snapshot_hostpaths` is " +
+        'true); exactly which paths it covers is (unconfirmed) here, and no tool in this catalog restores it.'
+    : 'NO SNAPSHOT OF HOST-PATH VOLUMES IS TAKEN (`snapshot_hostpaths` is false), so data a migration changes ' +
+        'there has no copy made by this call.';
+}
+
+const APP_UPGRADE_GUIDANCE =
+  '`app_name` is the application named, and `requested_version` and `requested_snapshot_hostpaths` are what ' +
+  'was sent — a null `requested_version` is the version the system treats as latest. ' +
+  APP_JOB_GUIDANCE;
+
+export const appUpgrade: MutatingTool = {
+  name: 'app_upgrade',
+  description:
+    'Upgrades one installed application on a TrueNAS system to a named catalog version, or to the one the ' +
+    'system treats as latest. Two-phase: called without a confirmation_token it returns a plan for user ' +
+    'approval; called with one it starts the upgrade. `app_name` is the `name` `apps_list` reports; AN ' +
+    'APPLICATION THE SYSTEM DOES NOT LIST FAILS THE PLAN, naming it, and so does an app engine reported as ' +
+    'not running, naming `app_engine_status`. `app_version` is optional; `apps_update_summary` names the ' +
+    'version an upgrade would move to. `snapshot_hostpaths` defaults to TRUE: a snapshot of the ' +
+    "application's host-path volumes is taken first, though exactly which paths it covers is (unconfirmed). " +
+    'The plan states the current version, the target version as the system\'s upgrade summary names it, and ' +
+    "whether host paths will be snapshotted. NO `values` ARE TAKEN — the application's install-time values " +
+    'routinely hold secrets — so the upgrade keeps the values it has. `destructiveness` is `reversible`: ' +
+    '`app_rollback` moves the application back to a version it previously ran. ' +
+    DATA_CAVEAT +
+    ' THE RESULT IS ABOUT THE JOB THIS CALL STARTED: the tool watches it for at most `watched_seconds` and ' +
+    'then returns what it has, leaving the upgrade going. ' +
+    APP_UPGRADE_GUIDANCE,
+  resultGuidance: APP_UPGRADE_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      app_name: { type: 'string', description: "The application's `name` as `apps_list` reports it." },
+      app_version: {
+        type: 'string',
+        description: 'The catalog version to move to. Omitted, the system chooses its latest.',
+      },
+      snapshot_hostpaths: {
+        type: 'boolean',
+        default: true,
+        description: "Snapshot the application's host-path volumes before upgrading. Default true.",
+      },
+    },
+    required: ['app_name'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // The version can be moved back, and `app_rollback` is in this catalog. What
+  // a migration did to the data cannot, and the description says so (#122, #153).
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const args = parseAppUpgradeArgs(rawArgs);
+    return { app_name: args.name, app_version: args.version, snapshot_hostpaths: args.snapshotHostpaths };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const args = parseAppUpgradeArgs(rawArgs);
+    const { app, engine } = await planPreconditions(ctx, args.name);
+    const waiting =
+      args.version === null && app.upgrade_available === false
+        ? ' THE SYSTEM REPORTS NO UPGRADE WAITING for it; whether the middleware rejects this call or does ' +
+          'nothing is (unconfirmed) here.'
+        : '';
+    return [
+      {
+        method: 'app.upgrade',
+        params: appUpgradeParams(args),
+        description:
+          `Upgrade the application "${args.name}", now at ${versionPhrase(app.version, app.human_version)}. ` +
+          `${await upgradeTargetSentence(ctx, args)}${waiting} ${hostpathSentence(args.snapshotHostpaths)} ` +
+          `${engine} ${DATA_CAVEAT} ${appWatchSentence(APP_UPGRADE_WATCH_SECONDS)} What was read for this ` +
+          'plan is not read again before the call.',
+      },
+      appReadStep(args.name, APP_UPGRADE_WATCH_SECONDS),
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const args = parseAppUpgradeArgs(rawArgs);
+    const api = ctx.system.client.api;
+    const job: WatchedJob & AppJobAnswer = await watchJob(
+      api,
+      api.callAndGetJobId('app.upgrade', appUpgradeParams(args)),
+      { watchMs: APP_UPGRADE_WATCH_MS, successStates: APP_JOB_SUCCESS_STATES, extra: appJobAnswer },
+    );
+    return {
+      app_name: args.name,
+      requested_version: args.version,
+      requested_snapshot_hostpaths: args.snapshotHostpaths,
+      watched_seconds: APP_UPGRADE_WATCH_SECONDS,
+      ...job,
+      ...(await resultingApp(ctx, args.name)),
+    };
+  },
+};
+
+/** `app_rollback`'s arguments. */
+interface AppRollbackArgs {
+  name: string;
+  version: string;
+}
+
+function parseAppRollbackArgs(args: Record<string, unknown>): AppRollbackArgs {
+  refuseArgs(
+    args,
+    ['rollback_snapshot'],
+    "restoring the application's ix-volume snapshot discards data written since the upgrade, which this " +
+      'catalog does not author; this tool always sends rollback_snapshot false',
+  );
+  const name = parseAppName(args);
+  const version = args['app_version'];
+  if (typeof version !== 'string' || version === '') {
+    throw new Error('"app_version" is required and must be one of the versions `app.rollback_versions` lists');
+  }
+  return { name, version };
+}
+
+/** The rollback's params. `rollback_snapshot` is SENT as false, never left out. */
+function appRollbackParams(args: AppRollbackArgs): JobParams<ApiSurface, 'app.rollback'> {
+  return [args.name, { app_version: args.version, rollback_snapshot: false }];
+}
+
+const APP_ROLLBACK_GUIDANCE =
+  '`app_name` is the application named and `requested_version` the version it was asked to move back to. ' +
+  APP_JOB_GUIDANCE;
+
+export const appRollback: MutatingTool = {
+  name: 'app_rollback',
+  description:
+    'Moves one installed application on a TrueNAS system back to a catalog version it previously ran. ' +
+    'Two-phase: called without a confirmation_token it returns a plan for user approval; called with one it ' +
+    'starts the rollback. `app_name` is the `name` `apps_list` reports and `app_version` is required; AN ' +
+    'APPLICATION THE SYSTEM DOES NOT LIST FAILS THE PLAN, naming it, as does an app engine reported as not ' +
+    'running, naming `app_engine_status`, and A VERSION THE SYSTEM DOES NOT LIST AMONG THE ONES IT CAN ROLL ' +
+    'BACK TO FAILS IT TOO, naming the ones it does — as does a list that could not be read. ' +
+    DATA_CAVEAT +
+    ' This tool always sends `rollback_snapshot: false` and takes no argument to change that, so the ' +
+    "application's data is left as the newer version left it. `destructiveness` is `reversible`: `app_upgrade` " +
+    'moves the version forward again. THE RESULT IS ABOUT THE JOB THIS CALL STARTED: the tool watches it for ' +
+    'at most `watched_seconds` and then returns what it has, leaving the rollback going. ' +
+    APP_ROLLBACK_GUIDANCE,
+  resultGuidance: APP_ROLLBACK_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      app_name: { type: 'string', description: "The application's `name` as `apps_list` reports it." },
+      app_version: {
+        type: 'string',
+        description: 'The catalog version to move back to; the plan fails on one the system cannot roll back to.',
+      },
+    },
+    required: ['app_name', 'app_version'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // The version can be moved forward again with `app_upgrade`. The data is the
+  // newer version's and is not rolled back, which the description says (#153).
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const args = parseAppRollbackArgs(rawArgs);
+    return { app_name: args.name, app_version: args.version };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const args = parseAppRollbackArgs(rawArgs);
+    const { app, engine } = await planPreconditions(ctx, args.name);
+    let versions: string[] | null;
+    try {
+      versions = strictTextList(
+        await firstValueFrom(ctx.system.client.api.call('app.rollback_versions', [args.name])),
+      );
+    } catch (reason) {
+      throw new Error(
+        `The versions "${args.name}" can roll back to could not be read (app.rollback_versions failed: ` +
+          `${errorText(reason)}), so nothing is planned`,
+      );
+    }
+    // Unreadable refuses as well as failed, so a version never reaches approval
+    // unchecked (#190).
+    if (versions === null) {
+      throw new Error(
+        `The system did not answer with a list of versions "${args.name}" can roll back to, so nothing is planned`,
+      );
+    }
+    if (!versions.includes(args.version)) {
+      throw new Error(
+        `"${args.name}" cannot roll back to version ${args.version}; the system lists ` +
+          (versions.length === 0 ? 'no version it can roll back to' : versions.join(', ')),
+      );
+    }
+    return [
+      {
+        method: 'app.rollback',
+        params: appRollbackParams(args),
+        description:
+          `Roll the application "${args.name}" back from ${versionPhrase(app.version, app.human_version)} to ` +
+          `version ${args.version}, which the system lists among the versions it can roll back to. ` +
+          "`rollback_snapshot` is sent as false: the application's ix-volume snapshot is NOT restored, so its " +
+          `data stays as the newer version left it. ${engine} ${DATA_CAVEAT} ` +
+          `${appWatchSentence(APP_ROLLBACK_WATCH_SECONDS)} What was read for this plan is not read again before ` +
+          'the call.',
+      },
+      appReadStep(args.name, APP_ROLLBACK_WATCH_SECONDS),
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const args = parseAppRollbackArgs(rawArgs);
+    const api = ctx.system.client.api;
+    const job: WatchedJob & AppJobAnswer = await watchJob(
+      api,
+      api.callAndGetJobId('app.rollback', appRollbackParams(args)),
+      { watchMs: APP_ROLLBACK_WATCH_MS, successStates: APP_JOB_SUCCESS_STATES, extra: appJobAnswer },
+    );
+    return {
+      app_name: args.name,
+      requested_version: args.version,
+      watched_seconds: APP_ROLLBACK_WATCH_SECONDS,
+      ...job,
+      ...(await resultingApp(ctx, args.name)),
+    };
   },
 };

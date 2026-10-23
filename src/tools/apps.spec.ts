@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Observable, from, of, throwError } from 'rxjs';
+import { concat, NEVER, Observable, from, of, throwError } from 'rxjs';
+import { Role } from '@/interfaces';
 import { SystemHandle, ToolContext } from '@/catalog/tool';
 import { failingSystem, fakeSystem } from '@/testing/fake-systems';
-import { appEngineStatus, appsList, appsUpdateSummary } from '@/tools/index';
+import { appEngineStatus, appRollback, appsList, appsUpdateSummary, appUpgrade } from '@/tools/index';
 
 describe('apps_list', () => {
   // Every property the middleware's app row carries, so the assertions below
@@ -568,5 +569,351 @@ describe('apps_update_summary', () => {
     };
     expect(unavailable).not.toBeNull();
     expect(entries).toBeNull();
+  });
+});
+
+/*
+ * `app_upgrade` and `app_rollback`. The fake system is local, as the job-backed
+ * specs' are: a job is a stream rather than a response, and these tools also
+ * make three different calls a method→response map has to answer separately.
+ */
+
+const SECRET = 'SEEDED-CLAIM-TOKEN';
+
+/** An application row as `app.query` or the job answers with one, secret-carrying `config` and all. */
+const appRow = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+  name: 'plex',
+  id: 'plex',
+  version: '1.2.3',
+  human_version: '1.41.0_1.2.3',
+  state: 'RUNNING',
+  upgrade_available: true,
+  config: { plex_claim_token: SECRET },
+  metadata: { app_version: '1.41.0' },
+  ...extra,
+});
+
+/** A job as the client's tracking emits one. */
+const appJob = (state: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+  id: 77,
+  state,
+  result: state === 'SUCCESS' ? appRow({ version: '1.3.0', human_version: '1.42.0_1.3.0' }) : null,
+  error: null,
+  time_finished: { $date: 1_756_000_000_000 },
+  ...extra,
+});
+
+type Answer = { value: unknown } | { fails: unknown };
+
+const answer = (a: Answer): Observable<unknown> => ('fails' in a ? throwError(() => a.fails) : of(a.value));
+
+function appJobSystem(
+  options: {
+    rows?: Answer | Answer[];
+    engine?: Answer;
+    summary?: Answer;
+    versions?: Answer;
+    started?: Observable<number>;
+    job?: Observable<unknown>;
+  } = {},
+): {
+  ctx: ToolContext;
+  query: ReturnType<typeof vi.fn>;
+  call: ReturnType<typeof vi.fn>;
+  start: ReturnType<typeof vi.fn>;
+  track: ReturnType<typeof vi.fn>;
+} {
+  // One answer per `app.query` read, in order; the last repeats.
+  const reads = Array.isArray(options.rows) ? options.rows : [options.rows ?? { value: [appRow()] }];
+  let read = 0;
+  const query = vi.fn(() => answer(reads[Math.min(read++, reads.length - 1)]));
+  const call = vi.fn((method: string) => {
+    if (method === 'docker.status') return answer(options.engine ?? { value: { status: 'RUNNING' } });
+    if (method === 'app.upgrade_summary') {
+      return answer(options.summary ?? { value: { upgrade_version: '1.3.0', upgrade_human_version: '1.42.0_1.3.0' } });
+    }
+    if (method === 'app.rollback_versions') return answer(options.versions ?? { value: ['1.2.0', '1.1.0'] });
+    return throwError(() => new Error(`unexpected ${method}`));
+  });
+  const start = vi.fn(() => options.started ?? of(77));
+  const track = vi.fn(() => options.job ?? of(appJob('SUCCESS')));
+  const system = {
+    name: 'nas',
+    client: { api: { query, call, callAndGetJobId: start, trackJob: track } },
+  } as unknown as SystemHandle;
+  return { ctx: { system }, query, call, start, track };
+}
+
+const SELECT = { select: ['name', 'version', 'human_version', 'state', 'upgrade_available'] };
+
+describe.each([
+  ['app_upgrade', appUpgrade, { app_name: 'plex' }],
+  ['app_rollback', appRollback, { app_name: 'plex', app_version: '1.2.0' }],
+] as const)('%s, what both tools share', (name, tool, args) => {
+  it('is a reversible mutating tool needing the full role', () => {
+    expect(tool).toMatchObject({ name, mutating: true, destructiveness: 'reversible', requiredRole: Role.Full });
+  });
+
+  it('says in its description that a rollback restores the version and not the data', () => {
+    expect(tool.description).toContain('A ROLLBACK RESTORES THE VERSION AND NOT THE DATA');
+  });
+
+  it('requires an application name', () => {
+    expect(() => tool.normalizeArgs?.({ ...args, app_name: '' })).toThrow('"app_name" is required');
+  });
+
+  it('fails the plan on an application the system does not list, naming it', async () => {
+    const { ctx } = appJobSystem({ rows: { value: [appRow({ name: 'other' })] } });
+    await expect(tool.plan(ctx, args)).rejects.toThrow('No application named "plex" is installed');
+  });
+
+  it('fails the plan where the listing could not be read', async () => {
+    const { ctx } = appJobSystem({ rows: { fails: new Error('socket closed') } });
+    await expect(tool.plan(ctx, args)).rejects.toThrow('app.query failed: socket closed');
+    await expect(tool.plan(appJobSystem({ rows: { value: null } }).ctx, args)).rejects.toThrow(
+      'the system did not answer with a list of applications',
+    );
+  });
+
+  it('fails the plan where the app engine is not running, naming app_engine_status', async () => {
+    const { ctx } = appJobSystem({ engine: { value: { status: 'STOPPED' } } });
+    await expect(tool.plan(ctx, args)).rejects.toThrow(/reports STOPPED, not RUNNING.*`app_engine_status`/);
+  });
+
+  it('does not refuse an engine it could not read, and says the call may be rejected', async () => {
+    const failed = await tool.plan(appJobSystem({ engine: { fails: new Error('no docker') } }).ctx, args);
+    expect(failed[0].description).toContain('could not be read (no docker), so the call may be rejected');
+    const unknown = await tool.plan(appJobSystem({ engine: { value: { status: 'MIGRATING' } } }).ctx, args);
+    expect(unknown[0].description).toContain('the status MIGRATING, which this catalog does not know');
+    const none = await tool.plan(appJobSystem({ engine: { value: {} } }).ctx, args);
+    expect(none[0].description).toContain('no status this tool could read');
+  });
+
+  it('names the read after the watch as a step, with the params the read is made with', async () => {
+    const { ctx, query } = appJobSystem();
+    const steps = await tool.plan(ctx, args);
+    expect(steps[1]).toMatchObject({ method: 'app.query', params: [[['name', '=', 'plex']], SELECT] });
+    expect(steps[1].description).toContain('WHEN THE WATCH ENDS');
+    expect(query).toHaveBeenCalledWith('app.query', [['name', '=', 'plex']], SELECT);
+  });
+
+  it('keeps config out of the result where the job answers with it and the read is padded', async () => {
+    const result = await tool.execute(appJobSystem().ctx, args);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+    expect(JSON.stringify(result)).not.toContain('config');
+    const failed = await tool.execute(
+      appJobSystem({ job: of(appJob('FAILED', { result: appRow(), error: 'pull failed' })) }).ctx,
+      args,
+    );
+    expect(JSON.stringify(failed)).not.toContain(SECRET);
+  });
+
+  it('reports the job, its allowlisted answer and the state read after the watch', async () => {
+    const { ctx, track } = appJobSystem({ rows: [{ value: [appRow()] }, { value: [appRow({ state: 'DEPLOYING' })] }] });
+    await tool.plan(ctx, args);
+    const result = (await tool.execute(ctx, args)) as Record<string, unknown>;
+    expect(track).toHaveBeenCalledWith(77);
+    expect(result).toMatchObject({
+      app_name: 'plex',
+      watched_seconds: 30,
+      job_id: 77,
+      ended: true,
+      succeeded: true,
+      job_state: 'SUCCESS',
+      finished_at: new Date(1_756_000_000_000).toISOString(),
+      answered: {
+        name: 'plex',
+        version: '1.3.0',
+        human_version: '1.42.0_1.3.0',
+        state: 'RUNNING',
+        upgrade_available: true,
+      },
+      resulting_lookup: 'FOUND',
+      resulting_read_error: null,
+      resulting_state: 'DEPLOYING',
+      resulting_version: '1.2.3',
+    });
+  });
+
+  it('reports ended false, the job id and no answer where the watch ends first', async () => {
+    vi.useFakeTimers();
+    try {
+      const job = concat(of(appJob('RUNNING', { result: appRow() })), NEVER);
+      const pending = tool.execute(appJobSystem({ job }).ctx, args);
+      await vi.advanceTimersByTimeAsync(30_000);
+      const result = (await pending) as Record<string, unknown>;
+      expect(result).toMatchObject({ ended: false, succeeded: null, job_id: 77, answered: null, finished_at: null });
+      expect(JSON.stringify(result)).not.toContain(SECRET);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports a null answer where the job ended without answering with an application', async () => {
+    const result = (await tool.execute(appJobSystem({ job: of(appJob('SUCCESS', { result: 'done' })) }).ctx, args)) as Record<
+      string,
+      unknown
+    >;
+    expect(result).toMatchObject({ ended: true, answered: null });
+  });
+
+  it('does not fail a call that landed where the read after it fails, or lists no such app', async () => {
+    const failed = (await tool.execute(
+      appJobSystem({ rows: { fails: new Error('socket closed') } }).ctx,
+      args,
+    )) as Record<string, unknown>;
+    expect(failed).toMatchObject({
+      ended: true,
+      resulting_lookup: 'UNREADABLE',
+      resulting_read_error: 'socket closed',
+      resulting_state: null,
+      resulting_version: null,
+    });
+    const gone = (await tool.execute(appJobSystem({ rows: { value: [] } }).ctx, args)) as Record<string, unknown>;
+    expect(gone).toMatchObject({ resulting_lookup: 'NOT_FOUND', resulting_read_error: null, resulting_state: null });
+  });
+
+  it('fails where the call fails before any job was named', async () => {
+    const started = throwError(() => new Error('[EINVAL] app_name: not found'));
+    await expect(tool.execute(appJobSystem({ started }).ctx, args)).rejects.toThrow('EINVAL');
+  });
+});
+
+describe('app_upgrade', () => {
+  it('has no field for values', () => {
+    const schema = appUpgrade.inputSchema as { properties: Record<string, unknown>; required: string[] };
+    expect(Object.keys(schema.properties)).not.toContain('values');
+    expect(schema.required).toEqual(['app_name']);
+  });
+
+  it('refuses values by name, without quoting them back', () => {
+    expect(() => appUpgrade.normalizeArgs?.({ app_name: 'plex', values: { token: SECRET } })).toThrow(
+      expect.objectContaining({ message: expect.stringContaining('"values" is not accepted') }),
+    );
+    expect(() => appUpgrade.normalizeArgs?.({ app_name: 'plex', values: { token: SECRET } })).toThrow(
+      expect.objectContaining({ message: expect.not.stringContaining(SECRET) }),
+    );
+  });
+
+  it('defaults snapshot_hostpaths to true and drops executor arguments', () => {
+    expect(appUpgrade.normalizeArgs?.({ app_name: 'plex', systems: 'all' })).toEqual({
+      app_name: 'plex',
+      app_version: null,
+      snapshot_hostpaths: true,
+    });
+    expect(appUpgrade.normalizeArgs?.({ app_name: 'plex', app_version: '1.3.0', snapshot_hostpaths: false })).toEqual({
+      app_name: 'plex',
+      app_version: '1.3.0',
+      snapshot_hostpaths: false,
+    });
+  });
+
+  it('refuses a malformed version or snapshot flag', () => {
+    expect(() => appUpgrade.normalizeArgs?.({ app_name: 'plex', app_version: '' })).toThrow('"app_version" must be');
+    expect(() => appUpgrade.normalizeArgs?.({ app_name: 'plex', snapshot_hostpaths: 'yes' })).toThrow(
+      '"snapshot_hostpaths" must be a boolean',
+    );
+  });
+
+  it('states the current and target versions and that host paths are snapshotted', async () => {
+    const { ctx, call } = appJobSystem();
+    const steps = await appUpgrade.plan(ctx, { app_name: 'plex' });
+    expect(steps[0]).toMatchObject({ method: 'app.upgrade', params: ['plex', { snapshot_hostpaths: true }] });
+    expect(steps[0].description).toContain('now at version 1.2.3 (1.41.0_1.2.3)');
+    expect(steps[0].description).toContain('It moves to version 1.3.0 (1.42.0_1.3.0)');
+    expect(steps[0].description).toContain("A snapshot of the application's host-path volumes is taken");
+    expect(steps[0].description).toContain('A ROLLBACK RESTORES THE VERSION AND NOT THE DATA');
+    expect(call).toHaveBeenCalledWith('app.upgrade_summary', ['plex']);
+  });
+
+  it('sends a named version, asks the summary about it, and says where no snapshot is taken', async () => {
+    const { ctx, call } = appJobSystem();
+    const steps = await appUpgrade.plan(ctx, { app_name: 'plex', app_version: '1.3.0', snapshot_hostpaths: false });
+    expect(steps[0].params).toEqual(['plex', { app_version: '1.3.0', snapshot_hostpaths: false }]);
+    expect(steps[0].description).toContain('NO SNAPSHOT OF HOST-PATH VOLUMES IS TAKEN');
+    expect(call).toHaveBeenCalledWith('app.upgrade_summary', ['plex', { app_version: '1.3.0' }]);
+  });
+
+  it('states a summary it could not read rather than failing the plan', async () => {
+    const failed = await appUpgrade.plan(appJobSystem({ summary: { fails: new Error('no upgrade') } }).ctx, {
+      app_name: 'plex',
+    });
+    expect(failed[0].description).toContain('the upgrade summary could not be read (no upgrade)');
+    const empty = await appUpgrade.plan(appJobSystem({ summary: { value: {} } }).ctx, { app_name: 'plex' });
+    expect(empty[0].description).toContain('named no target version this tool could read');
+  });
+
+  it('says where the system reports no upgrade waiting, and states an unreported version as that', async () => {
+    const { ctx } = appJobSystem({ rows: { value: [appRow({ upgrade_available: false, version: null })] } });
+    const [step] = await appUpgrade.plan(ctx, { app_name: 'plex' });
+    expect(step.description).toContain('THE SYSTEM REPORTS NO UPGRADE WAITING');
+    expect(step.description).toContain('now at a version the system reported no value for');
+  });
+
+  it('passes over a row it cannot read, and names a version reported without a human version', async () => {
+    const { ctx } = appJobSystem({ rows: { value: [null, appRow({ human_version: null })] } });
+    const [step] = await appUpgrade.plan(ctx, { app_name: 'plex' });
+    expect(step.description).toContain('now at version 1.2.3.');
+  });
+
+  it('starts the job with the planned params and reports what was requested', async () => {
+    const { ctx, start } = appJobSystem();
+    const result = (await appUpgrade.execute(ctx, { app_name: 'plex' })) as Record<string, unknown>;
+    expect(start).toHaveBeenCalledWith('app.upgrade', ['plex', { snapshot_hostpaths: true }]);
+    expect(result).toMatchObject({ requested_version: null, requested_snapshot_hostpaths: true });
+  });
+});
+
+describe('app_rollback', () => {
+  it('has no field for rollback_snapshot, and requires a version', () => {
+    const schema = appRollback.inputSchema as { properties: Record<string, unknown>; required: string[] };
+    expect(Object.keys(schema.properties)).not.toContain('rollback_snapshot');
+    expect(schema.required).toEqual(['app_name', 'app_version']);
+    expect(() => appRollback.normalizeArgs?.({ app_name: 'plex' })).toThrow('"app_version" is required');
+  });
+
+  it.each([true, false])('refuses rollback_snapshot %s by name', (value) => {
+    expect(() => appRollback.normalizeArgs?.({ app_name: 'plex', app_version: '1.2.0', rollback_snapshot: value })).toThrow(
+      '"rollback_snapshot" is not accepted',
+    );
+  });
+
+  it('sends rollback_snapshot false, in the plan and in the call', async () => {
+    const { ctx, start } = appJobSystem();
+    const steps = await appRollback.plan(ctx, { app_name: 'plex', app_version: '1.2.0' });
+    expect(steps[0]).toMatchObject({
+      method: 'app.rollback',
+      params: ['plex', { app_version: '1.2.0', rollback_snapshot: false }],
+    });
+    expect(steps[0].description).toContain('from version 1.2.3 (1.41.0_1.2.3) to version 1.2.0');
+    expect(steps[0].description).toContain("ix-volume snapshot is NOT restored");
+    await appRollback.execute(ctx, { app_name: 'plex', app_version: '1.2.0' });
+    expect(start).toHaveBeenCalledWith('app.rollback', ['plex', { app_version: '1.2.0', rollback_snapshot: false }]);
+  });
+
+  it('fails the plan on a version the system cannot roll back to, naming the ones it can', async () => {
+    const { ctx, call } = appJobSystem();
+    await expect(appRollback.plan(ctx, { app_name: 'plex', app_version: '0.9.0' })).rejects.toThrow(
+      '"plex" cannot roll back to version 0.9.0; the system lists 1.2.0, 1.1.0',
+    );
+    expect(call).toHaveBeenCalledWith('app.rollback_versions', ['plex']);
+    await expect(
+      appRollback.plan(appJobSystem({ versions: { value: [] } }).ctx, { app_name: 'plex', app_version: '1.2.0' }),
+    ).rejects.toThrow('the system lists no version it can roll back to');
+  });
+
+  it('fails the plan where the versions could not be read, or were not a list of names', async () => {
+    await expect(
+      appRollback.plan(appJobSystem({ versions: { fails: new Error('boom') } }).ctx, {
+        app_name: 'plex',
+        app_version: '1.2.0',
+      }),
+    ).rejects.toThrow('app.rollback_versions failed: boom');
+    await expect(
+      appRollback.plan(appJobSystem({ versions: { value: ['1.2.0', 3] } }).ctx, {
+        app_name: 'plex',
+        app_version: '1.2.0',
+      }),
+    ).rejects.toThrow('did not answer with a list of versions');
   });
 });

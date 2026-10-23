@@ -7,7 +7,7 @@ import {
   usersList,
 } from '@/tools/accounts';
 import { alertClassSet, alertsDismiss, alertSettings, alertsList, alertsRestore } from '@/tools/alerts';
-import { appEngineStatus, appsList, appsUpdateSummary } from '@/tools/apps';
+import { appEngineStatus, appRollback, appsList, appsUpdateSummary, appUpgrade } from '@/tools/apps';
 import {
   fcList,
   iscsiList,
@@ -199,6 +199,8 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(diskIdentify);
   catalog.register(certificateCsrCreate);
   catalog.register(alertClassSet);
+  catalog.register(appUpgrade);
+  catalog.register(appRollback);
   return catalog;
 }
 
@@ -209,8 +211,10 @@ export {
   alertsList,
   alertsRestore,
   appEngineStatus,
+  appRollback,
   appsList,
   appsUpdateSummary,
+  appUpgrade,
   auditConfig,
   auditLogQuery,
   automatedTaskSetEnabled,
