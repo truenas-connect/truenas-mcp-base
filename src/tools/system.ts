@@ -1872,10 +1872,17 @@ const APP_NOT_RUNNING = new Set(['STOPPED', 'CRASHED']);
 /** How many names of one kind the plan spells out. Counts are over everything (#44). */
 const REBOOT_NAMED_MAX = 10;
 
-/** `system.boot_id`, or the failure that stopped it being read. */
-async function readBootId(system: SystemHandle): Promise<{ value: string | null; error: string | null }> {
+/**
+ * `system.boot_id`, or why it was not read — a rejection, or an answer that is
+ * not an identifier. Exactly one of the two is null, so a null boot id always
+ * carries its reason.
+ */
+async function readBootId(
+  system: SystemHandle,
+): Promise<{ value: string; error: null } | { value: null; error: string }> {
   try {
-    return { value: textOrNull(await firstValueFrom(system.client.api.call('system.boot_id'))), error: null };
+    const value = textOrNull(await firstValueFrom(system.client.api.call('system.boot_id')));
+    return value === null ? { value, error: 'the system reported no boot id this tool could read' } : { value, error: null };
   } catch (reason) {
     return { value: null, error: errorText(reason) };
   }
@@ -2105,7 +2112,7 @@ export const systemReboot: MutatingTool = {
     ]);
     const boot =
       bootId.value === null
-        ? `The boot id could not be read when this plan was made (${bootId.error ?? 'the system reported none'}).`
+        ? `The boot id could not be read when this plan was made (${bootId.error}).`
         : `The boot id when this plan was made was ${bootId.value}.`;
     return [
       bootIdStep(),

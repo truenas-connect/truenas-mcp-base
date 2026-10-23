@@ -226,7 +226,9 @@ describe('system_reboot', () => {
 
     it('says so where the boot id came back empty, and where a job names no method or id', async () => {
       const description = await rebootStep({ bootId: { value: '' }, jobs: { value: [{ state: 'RUNNING' }] } });
-      expect(description).toContain('The boot id could not be read when this plan was made (the system reported none).');
+      expect(description).toContain(
+        'The boot id could not be read when this plan was made (the system reported no boot id this tool could read).',
+      );
       expect(description).toContain('a job naming no method (no id, RUNNING)');
     });
 
@@ -285,6 +287,10 @@ describe('system_reboot', () => {
         ended: true,
       });
       expect(start).toHaveBeenCalled();
+      expect(await run({ bootId: { value: '' } })).toMatchObject({
+        boot_id_before: null,
+        boot_id_read_error: 'the system reported no boot id this tool could read',
+      });
     });
 
     it('fails where the call is refused before any job names it', async () => {
