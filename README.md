@@ -52,7 +52,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `user_set_locked`, `dataset_set_quota`, `pool_device_set_online`,
   `dataset_set_property`, `dataset_create`, `dataset_rename`, `disk_identify`,
   `certificate_csr_create`, `alert_class_set`, `app_upgrade`, `app_rollback`,
-  `vm_create`, `vm_disk_image_import`, `system_update_apply`, `system_reboot` —
+  `vm_create`, `vm_disk_image_import`, `system_update_apply`, `system_reboot`,
+  `job_abort` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop`, `container_restart`,
   `certificate_csr_create`, `app_upgrade`, `app_rollback`,
@@ -125,6 +126,16 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `system.boot_id` read just before the call, to compare against
   `system_reboot_info`'s `boot_id` once the system is back — on the same node,
   which after an HA failover it may not be.
+  `job_abort` stops one running job by the `job_id` the job-backed tools
+  return, and only a job whose method is on a fixed list of data-movement jobs
+  — `cloudsync.sync`, `cloud_backup.sync`, `replication.run`, `rsynctask.run`,
+  `pool.snapshottask.run` and `vm.device.convert` — and that reports itself
+  abortable; its plan fails for anything else, and for a job that has already
+  ended. The plan names the job's method, description, progress and start
+  time, and what an aborted run of that method leaves behind. After the call it
+  follows the job for a bounded time and reports the state it ended in: a job
+  that finished first is not an error, and one still running is reported as
+  not confirmed. What the run already did is not undone.
   `snapshot_clone` is the additive route
   back to a snapshot's data: it deletes nothing and modifies no dataset that
   exists, which is what lets the catalog decline the rollback that answers the

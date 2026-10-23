@@ -1,5 +1,6 @@
-import type { JobParams } from '@truenas/api-client';
-import { firstValueFrom } from 'rxjs';
+import { isJobFinished } from '@truenas/api-client';
+import type { JobMethod, JobParams, JobState } from '@truenas/api-client';
+import { firstValueFrom, of } from 'rxjs';
 import { Role } from '@/interfaces';
 import { ApiSurface, MutatingTool, PlanStep, ReadOnlyTool, ToolContext } from '@/catalog/tool';
 import {
@@ -73,6 +74,11 @@ import {
  * six kinds through the same update methods, which is why it is written beside
  * that tool and reads through its kind table — and why its plan can state the
  * current and the requested schedule in the words the listings above use.
+ *
+ * `job_abort` is the sixth, and it is here because this family owns the job
+ * vocabulary `tasks_recent_runs` reads: it stops one running job, by the
+ * `job_id` the job-backed tools return, where the job's method is on a fixed
+ * list of data-movement jobs and the job reports itself abortable.
  */
 
 /**
@@ -2676,7 +2682,8 @@ export const cloudsyncRun: MutatingTool = {
     '`dry_run` what was actually sent. `watched_seconds` is the CEILING that ' +
     'applied to the watch and not how long it actually lasted — a job that ' +
     'ended in two seconds still reports the full bound. THIS TOOL CANNOT STOP ' +
-    'A RUNNING SYNC, ' +
+    'A RUNNING SYNC — `job_abort`, given this result\'s `job_id`, is how a run ' +
+    'is stopped — and it ' +
     'cannot change, create or delete a task, and cannot sync anything that is ' +
     'not already a task on the system. WHAT THE RUN DOES TO THE DATA IS THE ' +
     "TASK'S OWN `transfer_mode`, WHICH THE PLAN NAMES AND THIS TOOL DOES NOT " +
@@ -3393,7 +3400,8 @@ export const snapshotTaskRun: MutatingTool = {
     'will report it. `task_id` is the `id` that was asked for and ' +
     '`watched_seconds` the CEILING that applied to the watch, not how long it ' +
     'actually lasted — a run that ended in two seconds still reports the full ' +
-    'bound. THIS TOOL CANNOT STOP A RUNNING JOB, cannot create, change or ' +
+    'bound. THIS TOOL CANNOT STOP A RUNNING JOB — `job_abort`, given this ' +
+    "result's `job_id`, is how a run is stopped — and it cannot create, change or " +
     'delete a task, cannot snapshot anything that is not already a task on the ' +
     'system, and CANNOT UNDO THE RETENTION THE RUN APPLIES — a destroyed ' +
     'snapshot stays destroyed. Running the task again takes another snapshot; ' +
@@ -3500,6 +3508,265 @@ export const snapshotTaskRun: MutatingTool = {
       // finish time follows the claim this tool has already made and cannot
       // contradict it — {@link cloudsyncRun} spells out why the two readings
       // are not the same one.
+      finished_at: job.finished_at,
+    };
+  },
+};
+
+/**
+ * The job methods `job_abort` stops, each with what an aborted run leaves
+ * behind (#202). One constant, so the plan's refusal, the plan's account and the
+ * description cannot list different methods.
+ *
+ * DATA-MOVEMENT JOBS ONLY: runs whose partial state the next scheduled run
+ * already has to cope with. A pool replace, an update or a certificate create
+ * stopped half-way can leave state worse than either end, so it is not here.
+ * `satisfies` checks every key against the JOB directory of `ApiSurface`, so a
+ * method that is not a job there does not compile. None of the accounts was
+ * read from the middleware, so each says `(unconfirmed)`.
+ */
+const ABORTABLE_JOB_METHODS = {
+  'cloudsync.sync':
+    'a cloud sync stopped part-way has transferred some files and not others, and in `SYNC` or `MOVE` mode ' +
+    'may already have deleted some of what the run would have deleted, at the destination or at the source ' +
+    '(unconfirmed).',
+  'cloud_backup.sync':
+    'a cloud backup stopped part-way records no snapshot for the run, and what it had already uploaded may stay ' +
+    'in the repository, unreferenced, until the repository is pruned (unconfirmed).',
+  'replication.run':
+    'a replication stopped part-way leaves the snapshots it had already sent on the destination, and the one in ' +
+    'flight is not received there, or is kept as resumable state where the task allows that; the source is not ' +
+    'changed by the abort (unconfirmed).',
+  'rsynctask.run':
+    'an rsync stopped part-way has copied some files and not others, and where the task deletes files the ' +
+    'source no longer has, may already have deleted some of them at the destination (unconfirmed).',
+  'pool.snapshottask.run':
+    'a periodic snapshot run stopped part-way may or may not have taken its snapshot, and its system-wide ' +
+    'retention pass may have destroyed some of what it would have destroyed and not the rest — see ' +
+    '`snapshot_task_run` (unconfirmed).',
+  'vm.device.convert':
+    'a disk image conversion stopped part-way leaves its destination holding a partial image that will not ' +
+    'boot, and nothing here removes it — for `vm_disk_image_import` that is the zvol it created (unconfirmed).',
+} as const satisfies Partial<Record<JobMethod<ApiSurface>, string>>;
+
+type AbortableJobMethod = keyof typeof ABORTABLE_JOB_METHODS;
+
+/** `Object.hasOwn` rather than `in`, which would accept `'constructor'` (#101). */
+function isAbortableJobMethod(method: string): method is AbortableJobMethod {
+  return Object.hasOwn(ABORTABLE_JOB_METHODS, method);
+}
+
+/** The allowlist in words, for the refusal and the description. */
+const ABORTABLE_JOB_NAMES = Object.keys(ABORTABLE_JOB_METHODS)
+  .map((method) => `\`${method}\``)
+  .join(', ');
+
+/** Where the ids this tool takes come from, in the one wording used throughout. */
+const JOB_IDS_FROM =
+  'the ids this tool takes are the `job_id` a job-backed tool such as `cloudsync_run` returns, or `id` in ' +
+  '`tasks_recent_runs`';
+
+/** How long `job_abort` follows the job after the call: a ceiling on its patience (#122). */
+const ABORT_WATCH_MS = 30_000;
+const ABORT_WATCH_SECONDS = ABORT_WATCH_MS / 1000;
+
+/** The one state this tool reads as the abort having taken. Its own (#86, #161). */
+const ABORTED_JOB_STATES = new Set(['ABORTED']);
+
+/** The one argument, strictly: a coerced `"4"` or a `4.5` names no job. */
+function parseJobId(args: Record<string, unknown>): number {
+  const id = args['id'];
+  if (typeof id !== 'number' || !Number.isInteger(id)) {
+    throw new Error('"id" is required and must be a whole number');
+  }
+  return id;
+}
+
+/**
+ * The job as the plan reads it, or null where the system listed none with this
+ * id. Matched on the response (#121), and `select` keeps the job's arguments,
+ * credentials, result and logs off the wire where the middleware honours it —
+ * the named reads below are what keep them out of the plan either way (#115).
+ */
+async function readJob(ctx: ToolContext, id: number): Promise<Record<string, unknown> | null> {
+  const rows = await firstValueFrom(
+    ctx.system.client.api.query('core.get_jobs', [['id', '=', id]], {
+      select: ['id', 'method', 'state', 'abortable', 'description', 'progress', 'time_started'],
+    }),
+  );
+  return rowWithId(rows, id);
+}
+
+/** The job in human terms: its method, description, progress and start time. */
+function describeJob(job: Record<string, unknown>, id: number, method: string): string {
+  const description = textOrNull(job['description']);
+  const percent = progressPercent(job['progress']);
+  const doing = stringField(job['progress'], 'description');
+  const started = isoOrNull(jobMillis(job['time_started']));
+  return (
+    `job ${id}, a \`${method}\` run ` +
+    `${description === null ? 'with no description of its own' : `described as "${description}"`}, ` +
+    `${percent === null ? 'with no progress reported' : `${percent}% through`}` +
+    `${doing === null ? '' : ` ("${doing}")`}, ` +
+    `${started === null ? 'with no start time reported' : `started ${started}`}`
+  );
+}
+
+/**
+ * Why the plan refuses this job, or null where it does not. In the order the
+ * ticket lists them, and each names what was read.
+ *
+ * `abortable` refuses unless it is an explicit `true`: the scope is a job that
+ * REPORTS ITSELF abortable, and one that reports nothing has not. A state that
+ * could not be read refuses nothing — it is not a job read as ended, and the
+ * step says so instead (#161).
+ */
+function abortRefusal(job: Record<string, unknown>, id: number, method: string | null): string | null {
+  if (method === null) {
+    return `Job ${id} reported no method this tool could read, so it cannot be checked against the jobs this tool aborts`;
+  }
+  if (!isAbortableJobMethod(method)) {
+    return `Job ${id} runs \`${method}\`, which this tool does not abort — it aborts only ${ABORTABLE_JOB_NAMES}`;
+  }
+  const abortable = booleanOrNull(job['abortable']);
+  if (abortable !== true) {
+    return abortable === false
+      ? `Job ${id} (\`${method}\`) reports itself as not abortable`
+      : `Job ${id} (\`${method}\`) did not report whether it is abortable, and this tool aborts only a job that reports itself abortable`;
+  }
+  const state = textOrNull(job['state']);
+  if (state !== null && isJobFinished({ state: state as JobState })) {
+    return `Job ${id} (\`${method}\`) has already ended, in ${state}; there is nothing to abort`;
+  }
+  return null;
+}
+
+const ABORT_GUIDANCE =
+  '`aborted` is true where the job was read to have ENDED in `ABORTED`, false where it ended in any other state ' +
+  '— IT FINISHED FIRST, WHICH IS NOT AN ERROR, and `state` says how — and null wherever `ended` is false. ' +
+  '`ended` is whether the job was ESTABLISHED, within the watch, to have reached a state it will not move out ' +
+  'of. `confirmed` is true wherever `ended` is; FALSE WHERE THE JOB WAS LAST READ IN A STATE IT CAN STILL MOVE ' +
+  'OUT OF, so the abort was not seen to take and the job may still be running; and null where no state was read ' +
+  'at all — following the job failed, or the system listed no such job. `abort_error` is the text ' +
+  '`core.job_abort` rejected with, and null where it did not reject; a rejection beside an ended job is ' +
+  '(unconfirmed) as the job having finished first, since whether the middleware rejects or does nothing for a ' +
+  'job that has ended is not read from here. `state` is the state last read, as the system spelled it, and null ' +
+  'where none was read. `error` is the text the job recorded, null where it recorded none. `finished_at` is when ' +
+  'the job ended, as an ISO 8601 UTC timestamp, null wherever `ended` is false. `watched_seconds` is the ' +
+  'ceiling that applied to the watch, not how long it lasted. `job_id` is the `id` that was asked for, and ' +
+  '`tasks_recent_runs` reports the job under it afterwards.';
+
+export const jobAbort: MutatingTool = {
+  name: 'job_abort',
+  description:
+    'Stops one running background job on this TrueNAS system, of a kind on a fixed list, and reports the state ' +
+    'it ended in. Two-phase: called without a confirmation_token it returns a plan for user approval; called ' +
+    `with one it aborts the job. \`id\` is the job's id on the system being targeted — ${JOB_IDS_FROM}. THE ` +
+    'PLAN FAILS, naming the reason, for a job the system does not list, a job whose method is not on the list ' +
+    'below, a job that does not report itself abortable, and a job that has already ended. The plan names the ' +
+    "job's method, its description, its progress and when it started. THE JOBS THIS TOOL ABORTS, AND WHAT AN " +
+    'ABORTED RUN LEAVES BEHIND: ' +
+    Object.entries(ABORTABLE_JOB_METHODS)
+      .map(([method, leaves]) => `\`${method}\`: ${leaves}`)
+      .join(' ') +
+    ' NOTHING ELSE IS ABORTED HERE: a pool replace, a system update, a certificate create or a pool or dataset ' +
+    'operation stopped half-way can leave state worse than either end. The task-specific abort methods, which ' +
+    'take a task id rather than a job id, are not used. `destructiveness` is `reversible` because an abort ' +
+    'authors no destruction; WHAT THE RUN ALREADY DID IS NOT UNDONE, and nothing here resumes it — running the ' +
+    'task again starts a new run. The plan is NOT re-checked when the call is made, so a job that finishes ' +
+    'between the plan and its confirmation is reported in the state it finished in. After the call the tool ' +
+    'follows the job for at most `watched_seconds` and returns what it has. ' +
+    ABORT_GUIDANCE,
+  resultGuidance: ABORT_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'integer',
+        description:
+          "The job's id on the system being targeted: the `job_id` a job-backed tool returned, or `id` in " +
+          '`tasks_recent_runs`.',
+      },
+    },
+    required: ['id'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // It stops an operation an operator authored and authors no destruction of
+  // its own (#122's test). What the run already did is not undone, which the
+  // description says beside the field (#153).
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    return { id: parseJobId(rawArgs) };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const id = parseJobId(rawArgs);
+    const job = await readJob(ctx, id);
+    if (job === null) {
+      throw new Error(`No job with id ${id} on this system — ${JOB_IDS_FROM}`);
+    }
+    const method = textOrNull(job['method']);
+    const refusal = abortRefusal(job, id, method);
+    if (refusal !== null) throw new Error(refusal);
+    // `abortRefusal` has refused every method off the list.
+    const abortable = method as AbortableJobMethod;
+    const state = textOrNull(job['state']);
+    const stateSentence =
+      state === null
+        ? 'Its state could not be read, so whether it is still running is not established here.'
+        : `It was ${state} when this plan was made.`;
+    return [
+      {
+        method: 'core.job_abort',
+        params: [id],
+        description:
+          `Abort ${describeJob(job, id, abortable)}. ${stateSentence} WHAT AN ABORTED \`${abortable}\` RUN ` +
+          `LEAVES BEHIND: ${ABORTABLE_JOB_METHODS[abortable]} Nothing here undoes what the run already did. ` +
+          'None of this is checked again when the call is made: a job that finishes between this plan and its ' +
+          'confirmation makes the call reject or do nothing — which of the two is (unconfirmed) — and the ' +
+          'result reports the state it finished in, which is not an error.',
+      },
+      {
+        method: 'core.get_jobs',
+        params: [[['id', '=', id]]],
+        description:
+          `Read job ${id} — the read this plan was made from, which RUNS AGAIN after the abort call — ` +
+          "through the client's own tracking, which follows the job until it reaches a state it will not " +
+          `move out of, or for at most ${ABORT_WATCH_SECONDS} seconds, to report the state it ended in. ` +
+          'Changes nothing.',
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const id = parseJobId(rawArgs);
+    const api = ctx.system.client.api;
+    // Nothing from the plan is re-checked (#119). A rejection is data rather
+    // than a failure: a job that finished first may be why, and the read
+    // below is what says how the job ended.
+    let abortError: string | null = null;
+    try {
+      await firstValueFrom(api.call('core.job_abort', [id]));
+    } catch (reason) {
+      abortError = errorText(reason);
+    }
+    // The abort is followed rather than read once: whether the job is already
+    // `ABORTED` when the call answers is (unconfirmed), and one read made too
+    // early would report a working abort as `confirmed: false`. The job
+    // exists already, so the id goes straight to the tracking, and an error
+    // while following it ends the watch rather than failing the call (#166).
+    const job = await watchJob(api, of(id), {
+      watchMs: ABORT_WATCH_MS,
+      successStates: ABORTED_JOB_STATES,
+    });
+    return {
+      job_id: id,
+      abort_error: abortError,
+      watched_seconds: ABORT_WATCH_SECONDS,
+      ended: job.ended,
+      aborted: job.succeeded,
+      confirmed: job.ended ? true : job.job_state === null ? null : false,
+      state: job.job_state,
+      error: job.error,
       finished_at: job.finished_at,
     };
   },

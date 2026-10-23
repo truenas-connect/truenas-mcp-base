@@ -174,6 +174,7 @@ export {
   vmDiskImageImport,
   systemUpdateApply,
   systemReboot,
+  jobAbort,
   serviceControl,
   containerStart,
   containerStop,

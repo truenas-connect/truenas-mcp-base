@@ -3239,6 +3239,32 @@ in a sentence shared with the description. Otherwise a plan where all four
 reads come back empty reads as "nothing is interrupted", which is the
 reassuring silence #154 rules out.
 
+### An abort is followed, not read once, and its rejection is data (#202)
+
+`job_abort` calls `core.job_abort` and then passes the job id straight to
+`watchJob` as `of(id)`, so the read after the call is the client's tracking
+rather than one `core.get_jobs`. The ticket asked for one read. Whether a job
+is already `ABORTED` when `core.job_abort` answers is `(unconfirmed)`. If it is
+not, a single read made at once would report a working abort as
+`confirmed: false`. Following the job until it ends, within the bound, reports
+the state it actually ended in. The job already exists, so the call is made
+before the watch and no error from the watch can fail the tool (#166).
+
+**A rejected `core.job_abort` is reported as `abort_error`, and the job is
+still read.** A job that finished between the plan and the confirmation may be
+why it was rejected, and the ticket calls that case "not an error". The read
+says how the job ended either way. This is the opposite of #198's rule for a
+first mutating call. Here the call creates nothing, so there is no partial
+state for a thrown error to protect.
+
+**The allowlist is checked with `satisfies` against `JobMethod<ApiSurface>`**,
+so a method that is not a job on the surface does not compile. `abortable`
+refuses unless it is an explicit `true`: the scope is a job that reports itself
+abortable, and a job that reports nothing has not. That is this catalog's scope
+line, not a middleware refusal, so #161's "an unread state refuses nothing"
+does not apply to it. An unreadable `state` does follow #161: it refuses
+nothing, and the plan says the state was not read.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

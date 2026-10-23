@@ -92,6 +92,7 @@ import {
   automatedTasksList,
   cloudsyncRun,
   cloudsyncTasksList,
+  jobAbort,
   scheduledTaskSetEnabled,
   scheduledTaskSetSchedule,
   snapshotTaskRun,
@@ -110,7 +111,7 @@ import {
   vmStop,
 } from '@/tools/vms';
 
-/** The sketch's catalog: fifty-nine read-only tools plus forty-four mutating tools. */
+/** The sketch's catalog: fifty-nine read-only tools plus forty-six mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -217,6 +218,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(vmDiskImageImport);
   catalog.register(systemUpdateApply);
   catalog.register(systemReboot);
+  catalog.register(jobAbort);
   return catalog;
 }
 
@@ -262,6 +264,7 @@ export {
   iscsiList,
   iscsiTargetCreate,
   iscsiTargetUpdate,
+  jobAbort,
   listDatasets,
   networkConfig,
   networkInterfaces,

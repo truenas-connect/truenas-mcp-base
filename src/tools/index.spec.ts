@@ -109,11 +109,12 @@ describe('createDefaultCatalog', () => {
       'vm_disk_image_import',
       'system_update_apply',
       'system_reboot',
+      'job_abort',
     ]);
   });
 
-  it('advertises system_update_apply and system_reboot to a full-access credential only', () => {
-    for (const name of ['system_update_apply', 'system_reboot']) {
+  it('advertises system_update_apply, system_reboot and job_abort to a full-access credential only', () => {
+    for (const name of ['system_update_apply', 'system_reboot', 'job_abort']) {
       expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain(name);
       expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain(name);
       expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(name);
