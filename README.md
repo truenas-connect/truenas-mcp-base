@@ -50,7 +50,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `nfs_share_update`, `iscsi_target_create`, `iscsi_target_update`,
   `nvmeof_subsystem_create`, `nvmeof_subsystem_update`, `user_create`,
   `user_set_locked`, `dataset_set_quota`, `pool_device_set_online`,
-  `dataset_set_property`, `dataset_create` —
+  `dataset_set_property`, `dataset_create`, `dataset_rename` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop` and `container_restart` the seven that
   start a background job,
@@ -235,6 +235,12 @@ confirmation UX, audit sinks) enters through injected interfaces.
   a `share_type` of GENERIC, SMB or NFS, and the plan names each one sent. The
   result reports the new dataset through `storage_list_datasets`' fields. No
   tool here deletes a dataset, so undoing a create is a person's job.
+  `dataset_rename` renames one dataset within its pool, children included,
+  and refuses a pool's root dataset, the system dataset, another pool, a name
+  that exists and a parent that does not. Its plan lists what
+  `pool.dataset.attachments` reports refers to the dataset, by type and name,
+  and does not claim those references will be updated. The result reports
+  `renamed` from a read of both names after the call.
   `container_list` and the three container power tools are the first family
   written against the client's `ops` layer rather than `api.call`, because every
   one of these operations changes SHAPE between TrueNAS versions and not just
