@@ -97,6 +97,7 @@ describe('createDefaultCatalog', () => {
       'user_set_locked',
       'dataset_set_quota',
       'pool_device_set_online',
+      'dataset_set_property',
     ]);
   });
 
@@ -114,10 +115,12 @@ describe('createDefaultCatalog', () => {
     }
   });
 
-  it('advertises dataset_set_quota to a full-access credential only', () => {
-    expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain('dataset_set_quota');
-    expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain('dataset_set_quota');
-    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain('dataset_set_quota');
+  it('advertises dataset_set_quota and dataset_set_property to a full-access credential only', () => {
+    for (const name of ['dataset_set_quota', 'dataset_set_property']) {
+      expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain(name);
+      expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain(name);
+      expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(name);
+    }
   });
 
   it('advertises the SMB, NFS, iSCSI target and NVMe-oF subsystem mutations to a sharing credential, and not to a read-only one', () => {

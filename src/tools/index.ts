@@ -66,6 +66,7 @@ import {
 } from '@/tools/snapshots';
 import {
   datasetPermissions,
+  datasetSetProperty,
   datasetSetQuota,
   listDatasets,
   poolStatus,
@@ -95,7 +96,7 @@ import {
 } from '@/tools/tasks';
 import { vmClone, vmDevices, vmLogs, vmRestart, vmsList, vmStart, vmStop } from '@/tools/vms';
 
-/** The sketch's catalog: fifty-nine read-only tools plus thirty-one mutating tools. */
+/** The sketch's catalog: fifty-nine read-only tools plus thirty-three mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -190,6 +191,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(userSetLocked);
   catalog.register(datasetSetQuota);
   catalog.register(poolDeviceSetOnline);
+  catalog.register(datasetSetProperty);
   return catalog;
 }
 
@@ -216,6 +218,7 @@ export {
   containerStop,
   createSnapshot,
   datasetPermissions,
+  datasetSetProperty,
   datasetSetQuota,
   directoryServicesStatus,
   disksList,
