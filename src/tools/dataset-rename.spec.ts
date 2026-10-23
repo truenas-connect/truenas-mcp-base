@@ -217,6 +217,16 @@ describe('dataset_rename', () => {
       );
     });
 
+    it('reads the descendants through the walk, every dataset with no property', async () => {
+      // The fake answers an empty filter with every dataset whatever the
+      // options, so this assertion is what holds the walk on (#168).
+      const { ctx, query } = renameSystem();
+      await datasetRename.plan(ctx, ARGS);
+      expect(query).toHaveBeenCalledWith('pool.dataset.query', [], {
+        extra: { retrieve_children: true, properties: [] },
+      });
+    });
+
     it('names the descendants that move, with their new names', async () => {
       expect(await describeRename()).toContain(
         '2 descendants move with it: "tank/projects/a" becomes "tank/archive/projects/a"; ' +
