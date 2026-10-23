@@ -18,7 +18,7 @@ import {
   nvmeofSubsystemUpdate,
 } from '@/tools/block';
 import { bootPoolStatus } from '@/tools/boot';
-import { certificatesList } from '@/tools/certificates';
+import { certificateCsrCreate, certificatesList } from '@/tools/certificates';
 import {
   containerList,
   containerRestart,
@@ -197,6 +197,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(datasetCreate);
   catalog.register(datasetRename);
   catalog.register(diskIdentify);
+  catalog.register(certificateCsrCreate);
   return catalog;
 }
 
@@ -213,6 +214,7 @@ export {
   automatedTaskSetEnabled,
   automatedTasksList,
   bootPoolStatus,
+  certificateCsrCreate,
   certificatesList,
   cloudCredentialsList,
   cloudsyncRun,

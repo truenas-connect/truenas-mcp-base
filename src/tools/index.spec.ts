@@ -101,11 +101,12 @@ describe('createDefaultCatalog', () => {
       'dataset_create',
       'dataset_rename',
       'disk_identify',
+      'certificate_csr_create',
     ]);
   });
 
-  it('advertises pool_device_set_online and disk_identify to a full-access credential only', () => {
-    for (const name of ['pool_device_set_online', 'disk_identify']) {
+  it('advertises pool_device_set_online, disk_identify and certificate_csr_create to a full-access credential only', () => {
+    for (const name of ['pool_device_set_online', 'disk_identify', 'certificate_csr_create']) {
       expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain(name);
       expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain(name);
       expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(name);
