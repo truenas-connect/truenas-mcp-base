@@ -118,8 +118,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
   reboot interrupts — VMs and apps not reported stopped, connected NFS clients
   and jobs not reported as ended, read through `vms_list`, `apps_list`,
   `nfs_clients` and `tasks_recent_runs` — and names any of those reads that
-  failed as not established. SMB, iSCSI, NVMe-oF and Fibre Channel sessions are
-  not read, and the plan says so. On an HA system it reboots the connected node
+  failed as not established. Incus containers and SMB, iSCSI, NVMe-oF and Fibre
+  Channel sessions are not read, and the plan says so. On an HA system it reboots the connected node
   and points at `ha_status`. The connection dropping mid-job is the ordinary
   outcome, so `ended: false` is not a failed reboot; the result carries the
   `system.boot_id` read just before the call, to compare against

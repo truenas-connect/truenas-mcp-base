@@ -2018,8 +2018,9 @@ function haSentence(licensed: { value: unknown; error: string | null }): string 
  * "nothing is interrupted" (#154).
  */
 const UNREAD_SESSIONS =
-  'THIS IS NOT EVERYTHING THE REBOOT INTERRUPTS: SMB sessions, iSCSI initiators, NVMe-oF hosts and Fibre ' +
-  'Channel clients are NOT READ here, and every one of them loses the server while the system is down.';
+  'THIS IS NOT EVERYTHING THE REBOOT INTERRUPTS: running incus containers (`container_list` lists them), SMB ' +
+  'sessions, iSCSI initiators (`iscsi_list` reports its sessions), NVMe-oF hosts and Fibre Channel clients are ' +
+  'NOT READ here, and every one of them is stopped or loses the server while the system is down.';
 
 /** The step for the boot id read `execute` makes immediately before the call (#119). */
 function bootIdStep(): PlanStep {

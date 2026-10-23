@@ -3232,8 +3232,9 @@ assumes that the same node answers both reads. After an HA failover the
 catalog may be talking to the peer, whose boot id differs either way, so the
 guidance points at `ha_status`.
 
-**Name what the composed reads leave out.** SMB, iSCSI, NVMe-oF and Fibre
-Channel clients are not read, and they lose the server too. The plan says so
+**Name what the composed reads leave out.** Incus containers, which
+`vms_list` excludes, and SMB, iSCSI, NVMe-oF and Fibre Channel clients are not
+read, and they are interrupted too. The plan says so
 in a sentence shared with the description. Otherwise a plan where all four
 reads come back empty reads as "nothing is interrupted", which is the
 reassuring silence #154 rules out.

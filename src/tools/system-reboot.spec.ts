@@ -129,7 +129,9 @@ describe('system_reboot', () => {
   });
 
   it('says in the description and the plan which sessions it does not read', async () => {
-    const unread = 'SMB sessions, iSCSI initiators, NVMe-oF hosts and Fibre Channel clients are NOT READ';
+    const unread =
+      'running incus containers (`container_list` lists them), SMB sessions, iSCSI initiators (`iscsi_list` ' +
+      'reports its sessions), NVMe-oF hosts and Fibre Channel clients are NOT READ';
     expect(systemReboot.description).toContain(unread);
     expect(await rebootStep()).toContain(`THIS IS NOT EVERYTHING THE REBOOT INTERRUPTS: ${unread}`);
   });
