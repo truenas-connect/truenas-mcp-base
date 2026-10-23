@@ -142,6 +142,7 @@ export {
   networkInterfaces,
   networkConfig,
   certificatesList,
+  certificateCsrCreate,
   cloudCredentialsList,
   reportingUtilisation,
   reportingDiskIo,

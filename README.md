@@ -50,7 +50,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `nfs_share_update`, `iscsi_target_create`, `iscsi_target_update`,
   `nvmeof_subsystem_create`, `nvmeof_subsystem_update`, `user_create`,
   `user_set_locked`, `dataset_set_quota`, `pool_device_set_online`,
-  `dataset_set_property`, `dataset_create`, `dataset_rename`, `disk_identify` —
+  `dataset_set_property`, `dataset_create`, `dataset_rename`, `disk_identify`,
+  `certificate_csr_create` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop` and `container_restart` the seven that
   start a background job,
@@ -247,6 +248,15 @@ confirmation UX, audit sinks) enters through injected interfaces.
   enclosure. The plan names the disk's serial, model and pool beside the
   enclosure and slot. The result reads the slot's locate state back where the
   slot reports one, and otherwise says no state was read.
+  `certificate_csr_create` has the system generate a private key and a
+  certificate signing request, and returns the CSR to send to a certificate
+  authority. The key never leaves the system: no key, passphrase or certificate
+  is taken, and the job's answer is read by named field so the key it carries
+  is never returned. A name already in use fails the plan, and `key_length` and
+  `ec_curve` are each accepted only beside the key type they describe. The plan
+  states the subject and alternative names the request will carry. Its job is
+  watched for a bounded time; where that ends first the CSR is not returned,
+  and no tool here returns it later. Nothing here deletes a certificate.
   `container_list` and the three container power tools are the first family
   written against the client's `ops` layer rather than `api.call`, because every
   one of these operations changes SHAPE between TrueNAS versions and not just

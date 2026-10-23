@@ -1,11 +1,23 @@
+import type { JobParams } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
+import type { ApiSurface, MutatingTool, PlanStep, ToolContext } from '@/catalog/tool';
 import { ReadOnlyTool } from '@/catalog/tool';
-import { textList, textOrNull } from '@/tools/common';
+import {
+  errorText,
+  numberOrNull,
+  recordOrNull,
+  refuseArgs,
+  textList,
+  textOrNull,
+  watchJob,
+  type WatchedJob,
+} from '@/tools/common';
 
 /**
  * Certificates family: which certificates this system holds, and when each one
- * stops being valid.
+ * stops being valid — and, through `certificate_csr_create`, a signing request
+ * whose private key the system generates and keeps.
  *
  * `certificate.query` answers all of it in one call and carries an `entity` in
  * the client's own call directory for the version this is written against, so
@@ -280,5 +292,377 @@ export const certificatesList: ReadOnlyTool = {
     // not known to be inside it. The description says so, and says which call
     // finds them.
     return rows.filter((row) => row.days_until_expiry !== null && row.days_until_expiry <= threshold);
+  },
+};
+
+/** The create's argument, typed off the job method (#91). */
+type CertificateCreateArgs = JobParams<ApiSurface, 'certificate.create'>[0];
+
+/**
+ * The values `certificate_csr_create` accepts for its enumerated fields, as a
+ * `Record` over the create's declared unions (#190): a value the client adds or
+ * drops fails to compile rather than being silently refused or accepted.
+ */
+const KEY_TYPES: Record<NonNullable<CertificateCreateArgs['key_type']>, true> = { RSA: true, EC: true };
+const KEY_LENGTHS: Record<NonNullable<CertificateCreateArgs['key_length']>, true> = { 2048: true, 4096: true };
+const EC_CURVES: Record<NonNullable<CertificateCreateArgs['ec_curve']>, true> = {
+  SECP256R1: true,
+  SECP384R1: true,
+  SECP521R1: true,
+  ed25519: true,
+};
+const DIGESTS: Record<NonNullable<CertificateCreateArgs['digest_algorithm']>, true> = {
+  SHA224: true,
+  SHA256: true,
+  SHA384: true,
+  SHA512: true,
+};
+
+/** The subject fields, by argument name, in the order the plan states them. */
+const SUBJECT_FIELDS = ['country', 'state', 'city', 'organization', 'organizational_unit', 'email'] as const;
+
+type SubjectField = (typeof SUBJECT_FIELDS)[number];
+
+/** How the create's arguments are named in the plan, which an approver reads. */
+const SUBJECT_LABELS: Record<SubjectField, string> = {
+  country: 'country',
+  state: 'state or province',
+  city: 'city',
+  organization: 'organization',
+  organizational_unit: 'organizational unit',
+  email: 'email',
+};
+
+interface CsrRequest {
+  name: string;
+  common: string | null;
+  san: string[] | null;
+  keyType: NonNullable<CertificateCreateArgs['key_type']> | null;
+  keyLength: NonNullable<CertificateCreateArgs['key_length']> | null;
+  ecCurve: NonNullable<CertificateCreateArgs['ec_curve']> | null;
+  digest: NonNullable<CertificateCreateArgs['digest_algorithm']> | null;
+  /** Only the subject fields passed; one not passed is absent and is not sent. */
+  subject: Partial<Record<SubjectField, string>>;
+}
+
+/** A text argument that is optional, and non-empty where given. */
+function optionalText(args: Record<string, unknown>, key: string): string | null {
+  const value = args[key];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || value === '') throw new Error(`"${key}" must be non-empty text`);
+  return value;
+}
+
+/** An enumerated argument, checked against the `Record` of the values the create declares. */
+function optionalChoice<T extends string | number>(
+  args: Record<string, unknown>,
+  key: string,
+  choices: Record<T, true>,
+): T | null {
+  const value = args[key];
+  if (value === undefined || value === null) return null;
+  if ((typeof value !== 'string' && typeof value !== 'number') || !Object.hasOwn(choices, value)) {
+    throw new Error(`"${String(value)}" is not a value of \`${key}\`; it accepts ${Object.keys(choices).join(', ')}`);
+  }
+  return value as T;
+}
+
+function parseCsrRequest(args: Record<string, unknown>): CsrRequest {
+  refuseArgs(
+    args,
+    ['privatekey', 'passphrase'],
+    'a private key or its passphrase is a secret argument, which this catalog does not take; the system ' +
+      'generates the key for the request and keeps it',
+  );
+  refuseArgs(
+    args,
+    ['create_type', 'certificate', 'CSR', 'csr_id', 'add_to_trusted_store'],
+    'this tool only creates a certificate signing request, and always sends CERTIFICATE_CREATE_CSR',
+  );
+  refuseArgs(
+    args,
+    ['acme_directory_uri', 'tos', 'dns_mapping', 'renew_days', 'cert_extensions'],
+    'ACME and certificate extensions are not sent by this tool',
+  );
+  const name = args['name'];
+  if (typeof name !== 'string' || name === '') {
+    throw new Error('"name" is required and must be the name the system will hold the signing request under');
+  }
+  const rawSan = args['san'];
+  let san: string[] | null = null;
+  if (rawSan !== undefined && rawSan !== null) {
+    if (!Array.isArray(rawSan) || rawSan.some((entry) => typeof entry !== 'string' || entry === '')) {
+      throw new Error('"san" must be a list of names, such as ["nas.example.com"], each one non-empty');
+    }
+    san = rawSan as string[];
+  }
+  const keyType = optionalChoice(args, 'key_type', KEY_TYPES);
+  const keyLength = optionalChoice(args, 'key_length', KEY_LENGTHS);
+  const ecCurve = optionalChoice(args, 'ec_curve', EC_CURVES);
+  // Refused rather than left to the middleware, which would otherwise pick a
+  // default for whichever of the two it ignores. Each is accepted only beside
+  // the key type it describes, NAMED — the default key type is not stated by
+  // the surface, so an omitted one cannot be read as either.
+  if (keyLength !== null && keyType !== 'RSA') {
+    throw new Error('"key_length" applies to an RSA key only, and is accepted only beside "key_type": "RSA"');
+  }
+  if (ecCurve !== null && keyType !== 'EC') {
+    throw new Error('"ec_curve" applies to an EC key only, and is accepted only beside "key_type": "EC"');
+  }
+  const subject: CsrRequest['subject'] = {};
+  for (const field of SUBJECT_FIELDS) {
+    const value = optionalText(args, field);
+    if (value !== null) subject[field] = value;
+  }
+  return {
+    name,
+    common: optionalText(args, 'common'),
+    san,
+    keyType,
+    keyLength,
+    ecCurve,
+    digest: optionalChoice(args, 'digest_algorithm', DIGESTS),
+    subject,
+  };
+}
+
+/** The arguments as passed, under their own names, for the confirmation token and the result. */
+function csrArgs(request: CsrRequest): Record<string, unknown> {
+  const args: Record<string, unknown> = { name: request.name };
+  if (request.common !== null) args['common'] = request.common;
+  if (request.san !== null) args['san'] = request.san;
+  if (request.keyType !== null) args['key_type'] = request.keyType;
+  if (request.keyLength !== null) args['key_length'] = request.keyLength;
+  if (request.ecCurve !== null) args['ec_curve'] = request.ecCurve;
+  if (request.digest !== null) args['digest_algorithm'] = request.digest;
+  return { ...args, ...request.subject };
+}
+
+/**
+ * The create's params, built in one place so the plan step names exactly the
+ * call `execute` makes. `create_type` is always `CERTIFICATE_CREATE_CSR`, and
+ * nothing but the fields named here is ever sent.
+ */
+function csrParams(request: CsrRequest): JobParams<ApiSurface, 'certificate.create'> {
+  const create: CertificateCreateArgs = { name: request.name, create_type: 'CERTIFICATE_CREATE_CSR' };
+  if (request.common !== null) create.common = request.common;
+  if (request.san !== null) create.san = request.san;
+  if (request.keyType !== null) create.key_type = request.keyType;
+  if (request.keyLength !== null) create.key_length = request.keyLength;
+  if (request.ecCurve !== null) create.ec_curve = request.ecCurve;
+  if (request.digest !== null) create.digest_algorithm = request.digest;
+  return [{ ...create, ...request.subject }];
+}
+
+/**
+ * Whether the system already holds a certificate under this name, read through
+ * an allowlist of the two fields this check needs.
+ *
+ * A `certificate.query` row carries the private key of every certificate on the
+ * system, so `select` asks for `id` and `name` alone — and the row is still read
+ * by name rather than forwarded, because a projected row comes back padded where
+ * the system is a version ahead of the client (#115). The name is checked on the
+ * response and not only asked for in the filter, since a filter that did not
+ * apply comes back as the whole table (#121).
+ */
+async function nameInUse(ctx: ToolContext, name: string): Promise<boolean> {
+  const rows: unknown = await firstValueFrom(
+    ctx.system.client.api.query('certificate.query', [['name', '=', name]], { select: ['id', 'name'] }),
+  );
+  if (!Array.isArray(rows)) throw new Error('the response was not a list');
+  return rows.some((row) => textOrNull(recordOrNull(row)?.['name']) === name);
+}
+
+/** What the plan says the request will carry, field by field, claiming nothing for what is not sent. */
+function subjectSentence(request: CsrRequest): string {
+  const parts = [
+    `common name ${request.common === null ? 'not set' : JSON.stringify(request.common)}`,
+    ...SUBJECT_FIELDS.map((field) => {
+      const value = request.subject[field];
+      return `${SUBJECT_LABELS[field]} ${value === undefined ? 'not set' : JSON.stringify(value)}`;
+    }),
+  ];
+  const san =
+    request.san === null
+      ? 'No subject alternative name is sent.'
+      : request.san.length === 0
+        ? 'An empty subject alternative name list is sent.'
+        : `Subject alternative names: ${request.san.map((entry) => JSON.stringify(entry)).join(', ')}.`;
+  return ` Subject: ${parts.join('; ')}. ${san}`;
+}
+
+/** What the plan says about the key and digest, naming the default only as unstated. */
+function keySentence(request: CsrRequest): string {
+  const unstated = "not sent, so the system's default applies, which this API surface does not state";
+  const key =
+    request.keyType === null
+      ? `Key type ${unstated}.`
+      : request.keyType === 'RSA'
+        ? `An RSA key, ${request.keyLength === null ? `length ${unstated}` : `${request.keyLength} bits`}.`
+        : `An EC key, ${request.ecCurve === null ? `curve ${unstated}` : `curve ${request.ecCurve}`}.`;
+  const digest = request.digest === null ? `Digest ${unstated}.` : `Digest ${request.digest}.`;
+  return ` ${key} ${digest}`;
+}
+
+/**
+ * The states this tool reads as a job having succeeded. Its own, as every
+ * job-backed tool's is (#161), and passed to `watchJob` rather than shared.
+ */
+const CSR_JOB_SUCCESS_STATES = new Set(['SUCCESS', 'FINISHED']);
+
+/** How long `certificate_csr_create` watches its job: a ceiling on its patience, not an estimate (#122). */
+const CSR_WATCH_MS = 30_000;
+
+/** The same bound in the unit the result reports it in. */
+const CSR_WATCH_SECONDS = CSR_WATCH_MS / 1000;
+
+/**
+ * What the result reads off the job's answer. THE ENTRY IS READ BY NAMED FIELD
+ * AND NEVER SPREAD: the job answers with the whole new certificate entry, and
+ * that entry carries `privatekey` — the key this tool exists to keep on the
+ * system — and `privatekey_path` beside the CSR.
+ */
+interface CsrResult {
+  certificate_id: number | null;
+  certificate_name: string | null;
+  csr: string | null;
+}
+
+type WatchedCsrJob = WatchedJob & CsrResult;
+
+/** The three fields, read only where the job was established to have ended. */
+function csrResult(record: Record<string, unknown> | null, ended: boolean): CsrResult {
+  const entry = ended ? recordOrNull(record?.['result']) : null;
+  return {
+    certificate_id: numberOrNull(entry?.['id']),
+    certificate_name: textOrNull(entry?.['name']),
+    csr: textOrNull(entry?.['CSR']),
+  };
+}
+
+const CERTIFICATE_CSR_CREATE_GUIDANCE =
+  '`name` is the name passed and `requested` is exactly what was passed, under the arguments\' own names. ' +
+  '`csr` is the certificate signing request in PEM form, as the system produced it, and is what to send to a ' +
+  'certificate authority. It is public material. `certificate_id` and `certificate_name` are the new entry ' +
+  'as the job\'s own answer names it. ALL THREE ARE READ ONLY WHERE `ended` IS TRUE, and are null everywhere ' +
+  'else; each is also null where the job ended and its answer did not carry that field in a form this tool ' +
+  'reads, which is NOT evidence the request was not created. THE PRIVATE KEY IS NEVER IN THIS RESULT, in ' +
+  'any form, and neither is its path on the system. `ended` is whether the job was ESTABLISHED to have ' +
+  'reached a state it will not move out of. FALSE MEANS NOTHING WAS ESTABLISHED: the job may still be ' +
+  'running, the watch may have been cut short by a dropped connection, or no job was seen at all — ' +
+  '`job_state` and `job_id` narrow that and do not partition it. `succeeded` is true where the job ended in ' +
+  '`SUCCESS` or `FINISHED`, false where it ended in any other state, and null wherever `ended` is false. ' +
+  '`error` is the text the job recorded, null where it recorded none. `finished_at` is when the job ended, ' +
+  'as an ISO 8601 UTC timestamp, and null wherever `ended` is false. `job_id` is the job\'s numeric ' +
+  'identity, taken from the job event that named this request; null there does not mean nothing started. ' +
+  '`watched_seconds` is the ceiling that applied, not how long the watch lasted. WHERE THE WATCH ENDED ' +
+  'FIRST, THE CSR IS NOT IN HAND AND NO TOOL IN THIS CATALOG RETURNS IT LATER: `certificates_list` lists ' +
+  'the entry by name once it exists, with null validity dates, and does not say it is a signing request or ' +
+  'return its PEM. The web UI is where it is read then.';
+
+export const certificateCsrCreate: MutatingTool = {
+  name: 'certificate_csr_create',
+  description:
+    'Has this TrueNAS system generate a private key and a certificate signing request (CSR) for it, and ' +
+    'returns the CSR to send to a certificate authority. Two-phase: called without a confirmation_token it ' +
+    'returns a plan for user approval; called with one it starts the job. THE PRIVATE KEY NEVER LEAVES THE ' +
+    'SYSTEM: it is generated there, it is not returned, and no key, passphrase or certificate is taken as an ' +
+    'argument — importing a key or a signed certificate, and ACME, are not done here. This is the first step ' +
+    'in replacing a self-signed certificate. `name` is what the system holds the request under; A NAME ' +
+    'ALREADY IN USE BY ANY CERTIFICATE FAILS THE PLAN, as does one whose use could not be read. `common` and ' +
+    '`san` are the names the certificate will be valid for — modern clients match on `san` — and `country`, ' +
+    '`state`, `city`, `organization`, `organizational_unit` and `email` are the rest of the subject; each ' +
+    'one not passed is not set. `key_type` is RSA or EC; `key_length` (2048 or 4096) is accepted only beside ' +
+    'RSA and `ec_curve` only beside EC, both named explicitly, and `digest_algorithm` is one of SHA224, ' +
+    'SHA256, SHA384 and SHA512. Any of those not passed is the system\'s default, which this API surface does ' +
+    'not state, and the plan says so. The plan states the subject and every alternative name the request ' +
+    'will carry. THE RESULT IS ABOUT THE JOB THIS CALL STARTED: the tool watches it for at most ' +
+    '`watched_seconds` and then returns what it has, leaving the job going. `destructiveness` is ' +
+    '`reversible`: nothing is deleted or changed. BUT NO TOOL IN THIS CATALOG DELETES A CERTIFICATE OR A ' +
+    'SIGNING REQUEST, so undoing this is a deletion a person makes in the web UI. ' +
+    CERTIFICATE_CSR_CREATE_GUIDANCE,
+  resultGuidance: CERTIFICATE_CSR_CREATE_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      name: {
+        type: 'string',
+        description: 'The name the system will hold the signing request under; it must not already be in use.',
+      },
+      common: { type: 'string', description: "The certificate's common name, e.g. nas.example.com." },
+      san: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Subject alternative names: every hostname or address the certificate must be valid for.',
+      },
+      key_type: { type: 'string', enum: Object.keys(KEY_TYPES), description: 'RSA or EC.' },
+      key_length: {
+        type: 'integer',
+        enum: Object.keys(KEY_LENGTHS).map(Number),
+        description: 'The RSA key length in bits. Only beside key_type RSA.',
+      },
+      ec_curve: { type: 'string', enum: Object.keys(EC_CURVES), description: 'The EC curve. Only beside key_type EC.' },
+      digest_algorithm: { type: 'string', enum: Object.keys(DIGESTS), description: 'The signature digest.' },
+      country: { type: 'string', description: 'Two-letter country code, e.g. US.' },
+      state: { type: 'string', description: 'State or province.' },
+      city: { type: 'string', description: 'City or locality.' },
+      organization: { type: 'string', description: 'Organization.' },
+      organizational_unit: { type: 'string', description: 'Organizational unit.' },
+      email: { type: 'string', description: 'Contact email address carried in the subject.' },
+    },
+    required: ['name'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // One new entry, and nothing existing is deleted or changed. Undoing it is a
+  // deletion no tool here makes, which the description says (#153).
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    return csrArgs(parseCsrRequest(rawArgs));
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const request = parseCsrRequest(rawArgs);
+    let inUse: boolean;
+    try {
+      inUse = await nameInUse(ctx, request.name);
+    } catch (reason) {
+      throw new Error(
+        `Whether a certificate named "${request.name}" already exists could not be read (certificate.query ` +
+          `failed: ${errorText(reason)}), so nothing is planned`,
+      );
+    }
+    if (inUse) {
+      throw new Error(
+        `A certificate named "${request.name}" already exists on this system; \`certificates_list\` reports ` +
+          'every name in use',
+      );
+    }
+    return [
+      {
+        method: 'certificate.create',
+        params: csrParams(request),
+        description:
+          `Generate a private key and a certificate signing request named "${request.name}" on this system.` +
+          `${subjectSentence(request)}${keySentence(request)} The private key stays on the system and is not ` +
+          `returned. The job is watched for at most ${CSR_WATCH_SECONDS} seconds; where it has not ended by ` +
+          'then, the CSR is not returned and no tool here returns it later. Whether the name is free was read ' +
+          'when this plan was made and is not read again. No tool here deletes the request once made.',
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const request = parseCsrRequest(rawArgs);
+    const api = ctx.system.client.api;
+    const job: WatchedCsrJob = await watchJob(api, api.callAndGetJobId('certificate.create', csrParams(request)), {
+      watchMs: CSR_WATCH_MS,
+      successStates: CSR_JOB_SUCCESS_STATES,
+      extra: csrResult,
+    });
+    return {
+      name: request.name,
+      requested: csrArgs(request),
+      watched_seconds: CSR_WATCH_SECONDS,
+      ...job,
+    };
   },
 };

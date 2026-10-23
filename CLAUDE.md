@@ -3056,6 +3056,28 @@ than #98's form. None was checked against a live system with a shelf.
 says so. The tests are in `disk-identify.spec.ts`, which is named for the tool as
 the ticket asked, and `disks.spec.ts` is left as it was.
 
+### A job's answer carrying a secret is read by named field, in `extra` (#195)
+
+`certificate_csr_create` is the first job-backed tool whose job ANSWERS with an
+entity, and that entity — the new certificate entry — carries `privatekey` and
+`privatekey_path` beside the `CSR` the tool exists to return. #97's credential
+rule reaches a job result here: `csrResult` is `watchJob`'s `extra` callback and
+reads `id`, `name` and `CSR` by name, gated on `ended`, and nothing else of the
+record leaves. Its spec seeds a key in a successful, a failed and a still-running
+job and asserts it is in no result.
+
+**A key parameter is accepted only beside the key type it describes, NAMED.**
+`key_length` needs `key_type: RSA` and `ec_curve` needs `key_type: EC`; with no
+`key_type` both are refused, because the surface does not state the default key
+type and an omitted one cannot be read as either. An omitted key type, length,
+curve or digest is planned as "the system's default, which this API surface
+does not state" rather than as a guessed value (#102).
+
+**Where the watch ends first, nothing here returns the CSR later.**
+`certificates_list` lists the entry by name and returns no PEM, and does not
+say an entry is a signing request. The plan and the guidance both say so,
+rather than pointing at a tool that cannot answer (#135).
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
