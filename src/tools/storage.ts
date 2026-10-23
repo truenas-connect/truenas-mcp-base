@@ -5,6 +5,8 @@ import { ApiSurface, MutatingTool, PlanStep, ReadOnlyTool, SystemHandle, ToolCon
 import {
   agreement,
   booleanOrNull,
+  bytesText,
+  DATASET_NAME_CHARS,
   errorText,
   numberOrNull,
   plural,
@@ -1064,28 +1066,6 @@ function quotaArgs(limits: QuotaRequest['limits']): Record<string, number | null
   );
 }
 
-const BYTE_UNITS = ['KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB'];
-
-/**
- * A byte count as the plan states it: the exact number, then the same size in
- * binary units so an approver does not have to count digits. The exact number
- * comes first because it is what is sent; the rendering is marked "about"
- * wherever rounding it to two places changed it.
- */
-function bytesText(bytes: number): string {
-  const exact = `${bytes} ${bytes === 1 ? 'byte' : 'bytes'}`;
-  if (bytes < 1024) return exact;
-  let value = bytes;
-  let unit = -1;
-  while (value >= 1024 && unit < BYTE_UNITS.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  const rounded = Number(value.toFixed(2));
-  const approximate = rounded * 1024 ** (unit + 1) === bytes ? '' : 'about ';
-  return `${exact} (${approximate}${rounded} ${BYTE_UNITS[unit]})`;
-}
-
 /** A limit as {@link quotaLimit} reads it, in words: `0` is no limit, null unreadable. */
 function limitText(limit: number | null): string {
   if (limit === null) return 'a value that could not be read';
@@ -1844,9 +1824,6 @@ const SHARE_TYPES = ['GENERIC', 'SMB', 'NFS'] as const satisfies readonly NonNul
 >[];
 
 type ShareType = (typeof SHARE_TYPES)[number];
-
-/** ZFS's dataset-name character set: letters, digits, `_`, `-`, `.`, `:` and space. */
-const DATASET_NAME_CHARS = /^[A-Za-z0-9_.: -]+$/;
 
 /**
  * Names TrueNAS keeps for its own datasets. Whether the middleware refuses a

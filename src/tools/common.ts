@@ -290,6 +290,37 @@ export function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? '' : 's'}`;
 }
 
+const BYTE_UNITS = ['KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB'];
+
+/**
+ * A byte count as a plan states it: the exact number, then the same size in
+ * binary units so an approver does not have to count digits. The exact number
+ * comes first because it is what is sent; the rendering is marked "about"
+ * wherever rounding it to two places changed it. Here since #198, when
+ * `vm_create`'s zvol size became the second family to state bytes in a plan
+ * after the dataset quotas (#189).
+ */
+export function bytesText(bytes: number): string {
+  const exact = `${bytes} ${bytes === 1 ? 'byte' : 'bytes'}`;
+  if (bytes < 1024) return exact;
+  let value = bytes;
+  let unit = -1;
+  while (value >= 1024 && unit < BYTE_UNITS.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const rounded = Number(value.toFixed(2));
+  const approximate = rounded * 1024 ** (unit + 1) === bytes ? '' : 'about ';
+  return `${exact} (${approximate}${rounded} ${BYTE_UNITS[unit]})`;
+}
+
+/**
+ * ZFS's dataset-name character set: letters, digits, `_`, `-`, `.`, `:` and
+ * space. Here since #198, when `vm_create` became the second family to name a
+ * new dataset — a zvol — after `dataset_create` (#191).
+ */
+export const DATASET_NAME_CHARS = /^[A-Za-z0-9_.: -]+$/;
+
 /**
  * The largest instant `Date` accepts, in milliseconds since the epoch.
  *

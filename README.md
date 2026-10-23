@@ -51,7 +51,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `nvmeof_subsystem_create`, `nvmeof_subsystem_update`, `user_create`,
   `user_set_locked`, `dataset_set_quota`, `pool_device_set_online`,
   `dataset_set_property`, `dataset_create`, `dataset_rename`, `disk_identify`,
-  `certificate_csr_create`, `alert_class_set`, `app_upgrade`, `app_rollback` —
+  `certificate_csr_create`, `alert_class_set`, `app_upgrade`, `app_rollback`,
+  `vm_create` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop`, `container_restart`,
   `certificate_csr_create`, `app_upgrade` and `app_rollback` the ten that start
@@ -60,7 +61,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   out — and `container_start` the one whose answer depends on the version it is
   talking to, a job on TrueNAS 25.10 and a synchronous call on 26 and later,
   which its result says rather than flattening.
-  The three VM power tools and `vm_clone` are the catalog's only mutations
+  The three VM power tools, `vm_clone` and `vm_create` are the catalog's only mutations
   over the older libvirt-backed `vm` stack, and the power tools between them are
   what makes
   `destructiveness: 'reversible'` true in the strong sense for the first time
@@ -84,6 +85,16 @@ confirmation UX, audit sinks) enters through injected interfaces.
   again after it and taking the id that appeared — and where no name was given,
   the name the middleware derives is read back rather than predicted, since the
   rule it derives by is not on this API surface.
+  `vm_create` makes a new machine with one disk on a new zvol, one NIC and an
+  optional installer CDROM, and leaves it stopped: `autostart` and
+  `ensure_display_device` are always sent as false. It is `vm.create` followed
+  by one `vm.device.create` per device, and the plan names each call. Its plan
+  fails on a zvol name that is taken, a parent dataset that is not there, a NIC
+  interface the system does not list and an ISO path that does not stat, and
+  states the zvol's size against the pool's free space. A device that fails
+  after the machine is made is reported, with `complete` false, rather than
+  thrown or rolled back, since nothing here deletes a VM or a zvol. The NIC's
+  MAC is read back off the answer.
   `snapshot_clone` is the additive route
   back to a snapshot's data: it deletes nothing and modifies no dataset that
   exists, which is what lets the catalog decline the rollback that answers the
