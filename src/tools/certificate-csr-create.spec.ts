@@ -143,15 +143,16 @@ describe('certificate_csr_create', () => {
         key_type: 'RSA',
         key_length: 4096,
       });
-      expect(certificateCsrCreate.normalizeArgs?.(args({ key_type: 'EC', ec_curve: 'ed25519' }))).toMatchObject({
-        key_type: 'EC',
-        ec_curve: 'ed25519',
-      });
+      expect(
+        certificateCsrCreate.normalizeArgs?.(args({ key_type: 'EC', ec_curve: 'ed25519', digest_algorithm: 'SHA384' })),
+      ).toMatchObject({ key_type: 'EC', ec_curve: 'ed25519', digest_algorithm: 'SHA384' });
     });
 
     it.each([
       ['key_type', 'DSA'],
       ['key_length', 1024],
+      ['key_length', '4096'],
+      ['key_type', 0],
       ['ec_curve', 'P-256'],
       ['digest_algorithm', 'MD5'],
       ['digest_algorithm', true],

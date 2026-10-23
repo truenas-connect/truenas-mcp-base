@@ -353,15 +353,21 @@ function optionalText(args: Record<string, unknown>, key: string): string | null
   return value;
 }
 
-/** An enumerated argument, checked against the `Record` of the values the create declares. */
+/**
+ * An enumerated argument, checked against the `Record` of the values the create
+ * declares. `kind` is the type the values are: a `Record`'s keys are strings, so
+ * `Object.hasOwn` alone would accept `"4096"` for a numeric choice and send the
+ * string.
+ */
 function optionalChoice<T extends string | number>(
   args: Record<string, unknown>,
   key: string,
   choices: Record<T, true>,
+  kind: 'string' | 'number',
 ): T | null {
   const value = args[key];
   if (value === undefined || value === null) return null;
-  if ((typeof value !== 'string' && typeof value !== 'number') || !Object.hasOwn(choices, value)) {
+  if (typeof value !== kind || !Object.hasOwn(choices, value as PropertyKey)) {
     throw new Error(`"${String(value)}" is not a value of \`${key}\`; it accepts ${Object.keys(choices).join(', ')}`);
   }
   return value as T;
@@ -396,9 +402,9 @@ function parseCsrRequest(args: Record<string, unknown>): CsrRequest {
     }
     san = rawSan as string[];
   }
-  const keyType = optionalChoice(args, 'key_type', KEY_TYPES);
-  const keyLength = optionalChoice(args, 'key_length', KEY_LENGTHS);
-  const ecCurve = optionalChoice(args, 'ec_curve', EC_CURVES);
+  const keyType = optionalChoice(args, 'key_type', KEY_TYPES, 'string');
+  const keyLength = optionalChoice(args, 'key_length', KEY_LENGTHS, 'number');
+  const ecCurve = optionalChoice(args, 'ec_curve', EC_CURVES, 'string');
   // Refused rather than left to the middleware, which would otherwise pick a
   // default for whichever of the two it ignores. Each is accepted only beside
   // the key type it describes, NAMED — the default key type is not stated by
@@ -421,7 +427,7 @@ function parseCsrRequest(args: Record<string, unknown>): CsrRequest {
     keyType,
     keyLength,
     ecCurve,
-    digest: optionalChoice(args, 'digest_algorithm', DIGESTS),
+    digest: optionalChoice(args, 'digest_algorithm', DIGESTS, 'string'),
     subject,
   };
 }

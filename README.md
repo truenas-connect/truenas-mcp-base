@@ -53,8 +53,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `dataset_set_property`, `dataset_create`, `dataset_rename`, `disk_identify`,
   `certificate_csr_create` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
-  `service_control`, `container_stop` and `container_restart` the seven that
-  start a background job,
+  `service_control`, `container_stop`, `container_restart` and
+  `certificate_csr_create` the eight that start a background job,
   which each watches for a bounded time and then reports on rather than waiting
   out — and `container_start` the one whose answer depends on the version it is
   talking to, a job on TrueNAS 25.10 and a synchronous call on 26 and later,
