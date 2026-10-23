@@ -3265,6 +3265,19 @@ line, not a middleware refusal, so #161's "an unread state refuses nothing"
 does not apply to it. An unreadable `state` does follow #161: it refuses
 nothing, and the plan says the state was not read.
 
+**The scope is checked again in `execute`, because the token binds the id and
+not the job.** The system numbers its jobs, and whether an id can name a
+different job after a middleware restart or an HA failover is `(unconfirmed)`.
+If it can, a plan approved for a cloud sync would abort whatever holds that id
+by the time the call runs, such as a pool replace. So `execute` reads the job
+first. Where the id then names no job, a job off the list, or a job that does
+not report itself abortable, it refuses before anything is sent. That is #181's
+re-resolution: a refusal, not a branch, and the read is the plan's first step
+(#119). Whether the job has ENDED is not re-checked, because a job that
+finished first is reported rather than refused. A different job that is also
+on the list, under the same id, is not told apart from the planned one, and the
+description says so.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

@@ -3583,8 +3583,8 @@ function parseJobId(args: Record<string, unknown>): number {
 }
 
 /**
- * The job as the plan reads it, or null where the system listed none with this
- * id. Matched on the response (#121), and `select` keeps the job's arguments,
+ * The job as the plan, and then `execute`, reads it, or null where the system
+ * listed none with this id. Matched on the response (#121), and `select` keeps the job's arguments,
  * credentials, result and logs off the wire where the middleware honours it —
  * the named reads below are what keep them out of the plan either way (#115).
  */
@@ -3613,32 +3613,52 @@ function describeJob(job: Record<string, unknown>, id: number, method: string): 
 }
 
 /**
- * Why the plan refuses this job, or null where it does not. In the order the
- * ticket lists them, and each names what was read.
+ * The job as {@link readJob} found it and as this tool's scope allows it, or
+ * the error naming why it is outside that scope — in the order the ticket lists
+ * them, each naming what was read. Checked at plan time AND again by `execute`,
+ * because the token binds the id and not the job: a job id can name a
+ * different job by the time the call is made (#181's re-resolution, for the
+ * same reason).
  *
  * `abortable` refuses unless it is an explicit `true`: the scope is a job that
- * REPORTS ITSELF abortable, and one that reports nothing has not. A state that
- * could not be read refuses nothing — it is not a job read as ended, and the
- * step says so instead (#161).
+ * REPORTS ITSELF abortable, and one that reports nothing has not.
  */
-function abortRefusal(job: Record<string, unknown>, id: number, method: string | null): string | null {
+function jobInScope(
+  job: Record<string, unknown> | null,
+  id: number,
+): { job: Record<string, unknown>; method: AbortableJobMethod } {
+  if (job === null) throw new Error(`No job with id ${id} on this system — ${JOB_IDS_FROM}`);
+  const method = textOrNull(job['method']);
   if (method === null) {
-    return `Job ${id} reported no method this tool could read, so it cannot be checked against the jobs this tool aborts`;
+    throw new Error(
+      `Job ${id} reported no method this tool could read, so it cannot be checked against the jobs this tool aborts`,
+    );
   }
   if (!isAbortableJobMethod(method)) {
-    return `Job ${id} runs \`${method}\`, which this tool does not abort — it aborts only ${ABORTABLE_JOB_NAMES}`;
+    throw new Error(`Job ${id} runs \`${method}\`, which this tool does not abort — it aborts only ${ABORTABLE_JOB_NAMES}`);
   }
   const abortable = booleanOrNull(job['abortable']);
   if (abortable !== true) {
-    return abortable === false
-      ? `Job ${id} (\`${method}\`) reports itself as not abortable`
-      : `Job ${id} (\`${method}\`) did not report whether it is abortable, and this tool aborts only a job that reports itself abortable`;
+    throw new Error(
+      abortable === false
+        ? `Job ${id} (\`${method}\`) reports itself as not abortable`
+        : `Job ${id} (\`${method}\`) did not report whether it is abortable, and this tool aborts only a job that reports itself abortable`,
+    );
   }
-  const state = textOrNull(job['state']);
-  if (state !== null && isJobFinished({ state: state as JobState })) {
-    return `Job ${id} (\`${method}\`) has already ended, in ${state}; there is nothing to abort`;
-  }
-  return null;
+  return { job, method };
+}
+
+/**
+ * The params {@link readJob} reaches the middleware with, for the plan step
+ * naming it. Written out a second time because a hoisted `select` widens out of
+ * the call's types (#115); the spec asserts the read was made with exactly
+ * these, which is what keeps the two copies in step (#153).
+ */
+function readJobParams(id: number): unknown {
+  return [
+    [['id', '=', id]],
+    { select: ['id', 'method', 'state', 'abortable', 'description', 'progress', 'time_started'] },
+  ];
 }
 
 const ABORT_GUIDANCE =
@@ -3673,9 +3693,13 @@ export const jobAbort: MutatingTool = {
     'operation stopped half-way can leave state worse than either end. The task-specific abort methods, which ' +
     'take a task id rather than a job id, are not used. `destructiveness` is `reversible` because an abort ' +
     'authors no destruction; WHAT THE RUN ALREADY DID IS NOT UNDONE, and nothing here resumes it — running the ' +
-    'task again starts a new run. The plan is NOT re-checked when the call is made, so a job that finishes ' +
-    'between the plan and its confirmation is reported in the state it finished in. After the call the tool ' +
-    'follows the job for at most `watched_seconds` and returns what it has. ' +
+    'task again starts a new run. THE CONFIRMATION BINDS THE id, NOT THE JOB: the system numbers its jobs, and ' +
+    'whether an id can name a different job after a middleware restart or an HA failover is (unconfirmed). So ' +
+    'the call reads the job again first and REFUSES, SENDING NOTHING, where the id then names no job, a job ' +
+    'off the list, or one that does not report itself abortable; a different job ON the list under the same id ' +
+    'is not told apart from the one the plan named. A job that finishes between the plan and its confirmation ' +
+    'is not refused, and is reported in the state it finished in. After the call the tool follows the job for ' +
+    'at most `watched_seconds` and returns what it has. ' +
     ABORT_GUIDANCE,
   resultGuidance: ABORT_GUIDANCE,
   inputSchema: {
@@ -3701,28 +3725,34 @@ export const jobAbort: MutatingTool = {
   },
   async plan(ctx, rawArgs): Promise<PlanStep[]> {
     const id = parseJobId(rawArgs);
-    const job = await readJob(ctx, id);
-    if (job === null) {
-      throw new Error(`No job with id ${id} on this system — ${JOB_IDS_FROM}`);
-    }
-    const method = textOrNull(job['method']);
-    const refusal = abortRefusal(job, id, method);
-    if (refusal !== null) throw new Error(refusal);
-    // `abortRefusal` has refused every method off the list.
-    const abortable = method as AbortableJobMethod;
+    const { job, method } = jobInScope(await readJob(ctx, id), id);
+    // A state that could not be read refuses nothing: it is not a job read as
+    // ended, and the step says so instead (#161). Plan-time only — a job that
+    // ends before the confirmation is reported, not refused.
     const state = textOrNull(job['state']);
+    if (state !== null && isJobFinished({ state: state as JobState })) {
+      throw new Error(`Job ${id} (\`${method}\`) has already ended, in ${state}; there is nothing to abort`);
+    }
     const stateSentence =
       state === null
         ? 'Its state could not be read, so whether it is still running is not established here.'
         : `It was ${state} when this plan was made.`;
     return [
       {
+        method: 'core.get_jobs',
+        params: readJobParams(id),
+        description:
+          `Read job ${id} again — the read this plan was made from — and REFUSE, SENDING NOTHING, where the ` +
+          'system then lists no such job, or lists one whose method is not on the list or that does not report ' +
+          'itself abortable: the confirmation binds the id, not the job. Changes nothing.',
+      },
+      {
         method: 'core.job_abort',
         params: [id],
         description:
-          `Abort ${describeJob(job, id, abortable)}. ${stateSentence} WHAT AN ABORTED \`${abortable}\` RUN ` +
-          `LEAVES BEHIND: ${ABORTABLE_JOB_METHODS[abortable]} Nothing here undoes what the run already did. ` +
-          'None of this is checked again when the call is made: a job that finishes between this plan and its ' +
+          `Abort ${describeJob(job, id, method)}. ${stateSentence} WHAT AN ABORTED \`${method}\` RUN ` +
+          `LEAVES BEHIND: ${ABORTABLE_JOB_METHODS[method]} Nothing here undoes what the run already did. ` +
+          'Whether the job has ended is not checked again: a job that finishes between this plan and its ' +
           'confirmation makes the call reject or do nothing — which of the two is (unconfirmed) — and the ' +
           'result reports the state it finished in, which is not an error.',
       },
@@ -3730,19 +3760,23 @@ export const jobAbort: MutatingTool = {
         method: 'core.get_jobs',
         params: [[['id', '=', id]]],
         description:
-          `Read job ${id} — the read this plan was made from, which RUNS AGAIN after the abort call — ` +
-          "through the client's own tracking, which follows the job until it reaches a state it will not " +
-          `move out of, or for at most ${ABORT_WATCH_SECONDS} seconds, to report the state it ended in. ` +
-          'Changes nothing.',
+          `Read job ${id} after the abort call, through the client's own tracking, which follows the job ` +
+          `until it reaches a state it will not move out of, or for at most ${ABORT_WATCH_SECONDS} seconds, ` +
+          'to report the state it ended in. Changes nothing.',
       },
     ];
   },
   async execute(ctx, rawArgs) {
     const id = parseJobId(rawArgs);
     const api = ctx.system.client.api;
-    // Nothing from the plan is re-checked (#119). A rejection is data rather
-    // than a failure: a job that finished first may be why, and the read
-    // below is what says how the job ended.
+    // The scope is checked again because the token binds the id and not the
+    // job. That is a refusal before anything is sent, not a branch to another
+    // call (#181); a read that fails refuses too, since nothing then shows the
+    // id still names a job on the list. Whether the job has ended is NOT
+    // re-checked — that is reported below rather than refused.
+    jobInScope(await readJob(ctx, id), id);
+    // A rejection is data rather than a failure: a job that finished first
+    // may be why, and the read below is what says how the job ended.
     let abortError: string | null = null;
     try {
       await firstValueFrom(api.call('core.job_abort', [id]));

@@ -132,7 +132,10 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `pool.snapshottask.run` and `vm.device.convert` — and that reports itself
   abortable; its plan fails for anything else, and for a job that has already
   ended. The plan names the job's method, description, progress and start
-  time, and what an aborted run of that method leaves behind. After the call it
+  time, and what an aborted run of that method leaves behind. The confirmation
+  binds the id rather than the job, so the call reads the job again first and
+  refuses, sending nothing, where the id then names a job off the list or one
+  that does not report itself abortable. After the call it
   follows the job for a bounded time and reports the state it ended in: a job
   that finished first is not an error, and one still running is reported as
   not confirmed. What the run already did is not undone.

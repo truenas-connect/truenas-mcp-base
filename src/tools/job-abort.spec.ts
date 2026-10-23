@@ -124,26 +124,30 @@ describe('job_abort', () => {
   });
 
   describe('plan', () => {
-    it('reads the job by id, naming only the fields it reports', async () => {
+    it('reads the job by id, naming only the fields it reports, with the params its step names', async () => {
       const { ctx, query } = abortSystem();
-      await jobAbort.plan(ctx, { id: 42 });
+      const steps = await jobAbort.plan(ctx, { id: 42 });
       expect(query).toHaveBeenCalledWith('core.get_jobs', [['id', '=', 42]], {
         select: ['id', 'method', 'state', 'abortable', 'description', 'progress', 'time_started'],
       });
+      // The step's params are written apart from the read; this is what holds them together.
+      expect(query).toHaveBeenCalledWith('core.get_jobs', ...(steps[0]?.params as unknown[]));
     });
 
-    it('names the abort call and then the read that runs again after it', async () => {
+    it('names the re-check read, the abort call, and the read that follows the job after it', async () => {
       const steps = await plan();
-      expect(steps.map((step) => step.method)).toEqual(['core.job_abort', 'core.get_jobs']);
-      expect(steps[0]?.params).toEqual([42]);
-      expect(steps[1]?.params).toEqual([[['id', '=', 42]]]);
-      expect(steps[1]?.description).toContain('RUNS AGAIN after the abort call');
-      expect(steps[1]?.description).toContain('for at most 30 seconds');
-      expect(steps[1]?.description).toContain('Changes nothing.');
+      expect(steps.map((step) => step.method)).toEqual(['core.get_jobs', 'core.job_abort', 'core.get_jobs']);
+      expect(steps[0]?.description).toContain('REFUSE, SENDING NOTHING');
+      expect(steps[0]?.description).toContain('the confirmation binds the id, not the job');
+      expect(steps[1]?.params).toEqual([42]);
+      expect(steps[2]?.params).toEqual([[['id', '=', 42]]]);
+      expect(steps[2]?.description).toContain('after the abort call');
+      expect(steps[2]?.description).toContain('for at most 30 seconds');
+      for (const read of [steps[0], steps[2]]) expect(read?.description).toContain('Changes nothing.');
     });
 
     it("names the job's method, description, progress and start time, and what an abort leaves", async () => {
-      const description = (await plan())[0]?.description ?? '';
+      const description = (await plan())[1]?.description ?? '';
       expect(description).toContain(
         'Abort job 42, a `cloudsync.sync` run described as "Cloud sync: offsite", 37% through ("copying"), ' +
           `started ${new Date(1_756_000_000_000).toISOString()}.`,
@@ -155,7 +159,7 @@ describe('job_abort', () => {
 
     it('says so where the description, progress, start time or state were not reported', async () => {
       const bare = { id: 42, method: 'rsynctask.run', abortable: true };
-      const description = (await plan({ jobs: { value: [bare] } }))[0]?.description ?? '';
+      const description = (await plan({ jobs: { value: [bare] } }))[1]?.description ?? '';
       expect(description).toContain(
         'Abort job 42, a `rsynctask.run` run with no description of its own, with no progress reported, ' +
           'with no start time reported.',
@@ -202,7 +206,36 @@ describe('job_abort', () => {
 
     it('plans for a job still waiting to start', async () => {
       const steps = await plan({ jobs: { value: [running({ state: 'WAITING' })] } });
-      expect(steps[0]?.description).toContain('It was WAITING when this plan was made.');
+      expect(steps[1]?.description).toContain('It was WAITING when this plan was made.');
+    });
+  });
+
+  describe('execute refuses, sending nothing, where the id no longer names a job in scope', () => {
+    const refused = async (jobs: Answer, message: string) => {
+      const { ctx, call, track } = abortSystem({ jobs });
+      await expect(jobAbort.execute(ctx, { id: 42 })).rejects.toThrow(message);
+      expect(call).not.toHaveBeenCalled();
+      expect(track).not.toHaveBeenCalled();
+    };
+
+    it('where the id now names a job off the list', async () => {
+      await refused({ value: [running({ method: 'pool.replace' })] }, 'Job 42 runs `pool.replace`');
+    });
+
+    it('where the job no longer reports itself abortable, or did not say', async () => {
+      await refused({ value: [running({ abortable: false })] }, 'reports itself as not abortable');
+      await refused({ value: [running({ abortable: undefined })] }, 'did not report whether it is abortable');
+    });
+
+    it('where the system lists no such job, or the read fails', async () => {
+      await refused({ value: [running({ id: 7 })] }, 'No job with id 42 on this system');
+      await refused({ fails: new Error('down') }, 'down');
+    });
+
+    it('but not where the job has ended since the plan', async () => {
+      const { ctx, call } = abortSystem({ jobs: { value: [running({ state: 'SUCCESS' })] } });
+      await jobAbort.execute(ctx, { id: 42 });
+      expect(call).toHaveBeenCalledWith('core.job_abort', [42]);
     });
   });
 
