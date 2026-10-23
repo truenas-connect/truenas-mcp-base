@@ -272,6 +272,24 @@ describe('vm_disk_image_import', () => {
       expect(await run({ created: { value: null } })).toMatchObject({ zvol_id: null, zvol_created: true });
     });
 
+    it('reports neither an error nor a job where no job named the request inside the watch', async () => {
+      vi.useFakeTimers();
+      try {
+        const { ctx } = importSystem({ started: NEVER });
+        const pending = vmDiskImageImport.execute(ctx, args());
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(await pending).toMatchObject({
+          zvol_created: true,
+          convert_error: null,
+          job_id: null,
+          ended: false,
+          complete: false,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('reports a conversion still going when the watch runs out', async () => {
       vi.useFakeTimers();
       try {

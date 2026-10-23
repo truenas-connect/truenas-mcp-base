@@ -3647,8 +3647,10 @@ interface VmDiskImageImportArgs {
 }
 
 /**
- * The caller's arguments, or the error naming what is wrong with them. Every
- * refusal here is one `convert_disk` makes, made before anything is created.
+ * The caller's arguments, or the error naming what is wrong with them, before
+ * anything is created. The image location and ending, and a zvol name ending
+ * like an image, are refusals `convert_disk` would make; the rest are ZFS
+ * naming and this tool's own.
  */
 function parseVmDiskImageImportArgs(args: Record<string, unknown>): VmDiskImageImportArgs {
   refuseArgs(
@@ -3780,9 +3782,10 @@ function convertResult(record: Record<string, unknown> | null, ended: boolean): 
 const VM_DISK_IMAGE_IMPORT_GUIDANCE =
   '`requested` is exactly what was asked for, under the arguments\' own names. `zvol_created` is true once ' +
   '`pool.dataset.create` has answered, and `zvol_id` is the `id` that answer named, null where it carried none ' +
-  'this tool could read. `convert_error` is set where NO JOB WAS SEEN TO START — the middleware refused the ' +
-  'call, or the connection failed before any job named it, in which case the conversion may still be running ' +
-  'unnamed — and null otherwise. `job_id`, `ended`, `succeeded`, ' +
+  'this tool could read. `convert_error` is set where an ERROR WAS RAISED BEFORE ANY JOB NAMED THE REQUEST — ' +
+  'the middleware refused the call, or the connection failed, in which case the conversion may still be ' +
+  'running unnamed — and null otherwise. A null `job_id` beside a null `convert_error` is the watch ending ' +
+  'before any job named the request: the conversion may be running, and this result cannot name it. `job_id`, `ended`, `succeeded`, ' +
   '`job_state`, `error` and `finished_at` describe the conversion job as the watch left it: `ended` is true ' +
   'only where the job was followed to its end inside `watched_seconds`, and `succeeded` is read from the ' +
   "job's state (`SUCCESS` or `FINISHED`) and is null where the job did not end inside the watch. A LARGE " +
