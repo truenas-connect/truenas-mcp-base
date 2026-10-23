@@ -172,6 +172,7 @@ export {
   vmClone,
   vmCreate,
   vmDiskImageImport,
+  systemUpdateApply,
   serviceControl,
   containerStart,
   containerStop,

@@ -52,11 +52,12 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `user_set_locked`, `dataset_set_quota`, `pool_device_set_online`,
   `dataset_set_property`, `dataset_create`, `dataset_rename`, `disk_identify`,
   `certificate_csr_create`, `alert_class_set`, `app_upgrade`, `app_rollback`,
-  `vm_create`, `vm_disk_image_import` —
+  `vm_create`, `vm_disk_image_import`, `system_update_apply` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop`, `container_restart`,
-  `certificate_csr_create`, `app_upgrade`, `app_rollback` and
-  `vm_disk_image_import` the eleven that start a background job,
+  `certificate_csr_create`, `app_upgrade`, `app_rollback`,
+  `vm_disk_image_import` and `system_update_apply` the twelve that start a
+  background job,
   which each watches for a bounded time and then reports on rather than waiting
   out — and `container_start` the one whose answer depends on the version it is
   talking to, a job on TrueNAS 25.10 and a synchronous call on 26 and later,
@@ -104,6 +105,14 @@ confirmation UX, audit sinks) enters through injected interfaces.
   plan where the image's size was read, since there the file size is the
   virtual size. A conversion that fails after the zvol is made is reported with
   the zvol named, and the zvol is not deleted.
+  `system_update_apply` installs the update `system_update_status` reports as
+  available, into a new boot environment, and never reboots: `update.run` is
+  always sent `reboot: false`, and it takes no train, version or file. Its plan
+  fails where no update is available, where availability could not be read,
+  and on a system licensed for HA. Whether the new boot environment is marked
+  for the next boot is not established from here, so the result reads the boot
+  environments back after the watch rather than assuming it. Pool feature flags
+  are not upgraded, and no tool here activates the previous boot environment.
   `snapshot_clone` is the additive route
   back to a snapshot's data: it deletes nothing and modifies no dataset that
   exists, which is what lets the catalog decline the rollback that answers the

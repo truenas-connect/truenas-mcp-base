@@ -1,6 +1,9 @@
+import type { JobParams } from '@truenas/api-client';
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
-import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+import type { MutatingTool, PlanStep, ToolContext } from '@/catalog/tool';
+import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+import { readEnvironments, type BootEnvironment } from '@/tools/boot';
 import {
   MAX_TIME_MS,
   MiddlewareDate,
@@ -9,8 +12,10 @@ import {
   errorText,
   numberOrNull,
   recordOrNull,
+  refuseArgs,
   strictTextList,
   textOrNull,
+  watchJob,
 } from '@/tools/common';
 
 /**
@@ -1540,5 +1545,270 @@ export const upsConfig: ReadOnlyTool = {
       remote_host: textOrNull(settings['remotehost']),
       remote_port: numberOrNull(settings['remoteport']),
     };
+  },
+};
+
+/**
+ * The arguments `update.run` takes and this tool does not, refused by name
+ * (#200). `reboot` above all: the restart is a separate approval, and this tool
+ * always sends it as false. The rest choose WHAT is installed, which this tool
+ * leaves to the update `system_update_status` reports as available.
+ */
+const UPDATE_RUN_REFUSED = ['reboot', 'train', 'version', 'dataset_name', 'resume'] as const;
+
+function parseUpdateApplyArgs(args: Record<string, unknown>): void {
+  refuseArgs(
+    args,
+    UPDATE_RUN_REFUSED,
+    'this tool installs the update `system_update_status` reports as available, on the configured train, and ' +
+      'never reboots',
+  );
+}
+
+/**
+ * The params the install is made with. `reboot` is SENT as false rather than
+ * left out, because the surface does not state the middleware's default and an
+ * omitted field would leave the restart to it (#197).
+ */
+function updateRunParams(): JobParams<ApiSurface, 'update.run'> {
+  return [{ reboot: false }];
+}
+
+/**
+ * Fails the plan unless `failover.licensed` reads as false.
+ *
+ * An HA pair updates through a failover-aware flow, and whether `update.run` is
+ * valid on one is (unconfirmed), so this tool stays off HA systems. That is this
+ * catalog's scope line rather than a middleware refusal, so #161's "a state that
+ * could not be read does not refuse" does not apply: an unreadable licence has
+ * not placed the system outside the line, and the plan refuses it as #198's
+ * plan-time checks refuse an unreadable precondition.
+ */
+async function refuseHaSystem(ctx: ToolContext): Promise<void> {
+  let licensed: unknown;
+  try {
+    licensed = await firstValueFrom(ctx.system.client.api.call('failover.licensed'));
+  } catch (reason) {
+    throw new Error(
+      `Whether this system is an HA pair could not be read (failover.licensed failed: ${errorText(reason)}), so ` +
+        'nothing is planned; `ha_status` reports it',
+    );
+  }
+  if (licensed === true) {
+    throw new Error(
+      'This system is licensed for HA (failover.licensed is true). An HA pair updates through a failover-aware ' +
+        'flow, and this tool does not update one; `ha_status` reports the pair',
+    );
+  }
+  if (licensed !== false) {
+    throw new Error(
+      'failover.licensed did not answer true or false, so whether this system is an HA pair is not established ' +
+        'and nothing is planned; `ha_status` reports it',
+    );
+  }
+}
+
+/** What the plan read about the update it is approving. */
+interface UpdateTarget {
+  train: string | null;
+  target: string;
+  current: VersionAttempt;
+}
+
+/**
+ * The update the system reports as available, read through
+ * `system_update_status`'s own seam — {@link readStatus}, {@link checkFailure}
+ * and {@link readVersion} — so the two tools cannot disagree about what
+ * "available" means.
+ *
+ * No update and an update that could not be established both fail the plan,
+ * and SAY WHICH: a null check is not "no update" (#93), and neither is a reason
+ * to approve an install.
+ */
+async function readUpdateTarget(ctx: ToolContext): Promise<UpdateTarget> {
+  let report: UpdateReport;
+  let current: VersionAttempt;
+  try {
+    [report, current] = await Promise.all([readStatus(ctx.system), readVersion(ctx.system)]);
+  } catch (reason) {
+    throw new Error(
+      `Whether an update is available could not be read (update.status failed: ${errorText(reason)}), so nothing ` +
+        'is planned',
+    );
+  }
+  // The same gate `system_update_status` applies: an answer exists only where
+  // the system said its own check worked and sent a status.
+  const status = report.code === 'NORMAL' ? report.status : null;
+  if (status === null) {
+    throw new Error(
+      `Whether an update is available could not be established (${checkFailure(report)}). That is not "no ` +
+        'update"; nothing is planned. `system_update_status` reports the same check',
+    );
+  }
+  const train = textOrNull(recordOrNull(status.current_version)?.['train']);
+  if (status.new_version === null) {
+    throw new Error(
+      `No update is available${train === null ? '' : ` on the train "${train}"`}: the system reports it is up to ` +
+        'date, so there is nothing to install',
+    );
+  }
+  const target = textOrNull(recordOrNull(status.new_version)?.['version']);
+  if (target === null) {
+    throw new Error(
+      'The system reports an update is available but names no version this tool could read, so the plan cannot ' +
+        'say what would be installed; nothing is planned',
+    );
+  }
+  return { train, target, current };
+}
+
+/** How long `system_update_apply` watches its job: a ceiling on its patience, not an estimate (#122). */
+const UPDATE_APPLY_WATCH_MS = 30_000;
+const UPDATE_APPLY_WATCH_SECONDS = UPDATE_APPLY_WATCH_MS / 1000;
+
+/** The job state this tool reads as an install that worked. Its own (#86, #161). */
+const UPDATE_JOB_SUCCESS_STATES = new Set(['SUCCESS']);
+
+/** The step for the read `execute` makes after the watch (#153). */
+function bootEnvironmentStep(): PlanStep {
+  return {
+    method: 'boot.environment.query',
+    params: [],
+    description:
+      `Read the boot environments WHEN THE WATCH ENDS — UP TO ${UPDATE_APPLY_WATCH_SECONDS} SECONDS AFTER THE ` +
+      'CALL IS MADE, AND NOT WHEN THE INSTALL FINISHES — to report which one the system is running and which one ' +
+      'is marked for the next boot. Changes nothing.',
+  };
+}
+
+/**
+ * The one environment the list marks with `flag`, by name, or null where that
+ * is not established: the read failed, no entry or more than one is marked, an
+ * entry's flag could not be read (it may be the marked one), or the marked
+ * entry's name could not be read.
+ */
+function soleMarked(
+  entries: BootEnvironment[] | null,
+  flag: 'active' | 'active_on_reboot',
+): string | null {
+  if (entries === null || entries.some((entry) => entry[flag] === null)) return null;
+  const marked = entries.filter((entry) => entry[flag] === true);
+  return marked.length === 1 ? (marked[0] as BootEnvironment).name : null;
+}
+
+/**
+ * Which boot environment is running and which is marked for the next boot,
+ * read after the watch. A failed read is data, not a failed call: the install
+ * has already been started (#161).
+ */
+async function nextBoot(ctx: ToolContext): Promise<Record<string, unknown>> {
+  const environments = await readEnvironments(ctx.system);
+  const running = soleMarked(environments.value, 'active');
+  const next = soleMarked(environments.value, 'active_on_reboot');
+  return {
+    environments_read_error: environments.error,
+    running_environment: running,
+    active_on_reboot: next,
+    next_boot_changes_environment: running === null || next === null ? null : running !== next,
+  };
+}
+
+const UPDATE_APPLY_GUIDANCE =
+  '`ended` is whether the install job was ESTABLISHED to have reached a state it will not move out of. FALSE ' +
+  'MEANS NOTHING WAS ESTABLISHED: the download and install may still be running — A LARGE DOWNLOAD ROUTINELY ' +
+  'OUTLIVES THE WATCH, so `ended` false with a `job_id` is the ordinary answer — the watch may have been cut ' +
+  'short by a dropped connection, or no job was seen at all, and in none of them has anything failed. ' +
+  '`tasks_recent_runs` is where the job is followed after that. `succeeded` is true where the job ended in ' +
+  '`SUCCESS`, false where it ended in any other state, and null wherever `ended` is false. `job_state` is the ' +
+  'state the watch last saw, `error` the text the job recorded (null where it recorded none), and `finished_at` ' +
+  'when it ended, as an ISO 8601 UTC timestamp, null wherever `ended` is false. `job_id` is the job\'s numeric ' +
+  'identity; null where no job event named this request, which does not mean nothing started. ' +
+  '`watched_seconds` is the ceiling that applied, not how long the watch lasted. `running_environment` and ' +
+  '`active_on_reboot` are the boot environment the system is running and the one marked for the NEXT boot, ' +
+  'read from `boot.environment.query` WHEN THE WATCH ENDS, NOT WHEN THE INSTALL DOES. Each is null where it was ' +
+  'not established — the read failed (`environments_read_error` says why), no environment or more than one was ' +
+  'marked, or an entry could not be read — and a null is never "none". `next_boot_changes_environment` is true ' +
+  'where both are known and differ, which means ONLY that the next boot runs a different environment from the ' +
+  'one running now: WHETHER THAT ENVIRONMENT IS THIS UPDATE\'S IS NOT ESTABLISHED, since nothing was read ' +
+  'before the call and an environment marked earlier reads the same, so compare `active_on_reboot` with the ' +
+  'target version the plan named. It is false where they are the same, which AFTER A JOB THAT SUCCEEDED means ' +
+  'the next boot does NOT run the update, and null wherever either is null. Read before the job has ended it ' +
+  'describes the system part-way through, not the outcome. ' +
+  '`system_reboot_info` reports whether the system says it needs restarting.';
+
+export const systemUpdateApply: MutatingTool = {
+  name: 'system_update_apply',
+  description:
+    'Downloads and installs the TrueNAS update a system reports as available, into a new boot environment, ' +
+    'WITHOUT REBOOTING. Two-phase: called without a confirmation_token it returns a plan for user approval; ' +
+    'called with one it starts the install. It takes no arguments: it installs the update ' +
+    '`system_update_status` reports as available, on the train the system is configured with, and `reboot`, ' +
+    '`train`, `version`, `dataset_name` and `resume` are refused. `update.run` is always sent `reboot: false`; ' +
+    'the system keeps running its current version until it is restarted, and THIS TOOL NEVER RESTARTS IT. The ' +
+    'plan fails where no update is available, and where availability could not be established, saying which — ' +
+    'the second is not "no update". It also fails on a system licensed for HA, naming `ha_status`: an HA pair ' +
+    'updates through a failover-aware flow this tool does not take. The plan states the current version, the ' +
+    'target version and the train. Every check is made when the plan is made and NOT AGAIN; the middleware ' +
+    'installs whichever update it finds available when the call runs. WHETHER THE MIDDLEWARE MARKS THE NEW BOOT ' +
+    'ENVIRONMENT FOR THE NEXT BOOT IS (unconfirmed) here, so the result reads it back from the boot environments ' +
+    'rather than assuming it. NOTHING ON THE POOLS IS CHANGED: a system update does NOT upgrade pool ZFS feature ' +
+    'flags, which `storage_pool_status` reports as `feature_flags_current`. Under fan-out this runs on every ' +
+    'system selected, under one confirmation, and the plan is made per system — read each system\'s. ' +
+    '`destructiveness` is `reversible` because the previous boot environment remains and can be activated from ' +
+    'the TrueNAS UI, and that MUST NOT be read as "this catalog can undo it": NO TOOL HERE ACTIVATES A BOOT ' +
+    'ENVIRONMENT. Choosing a train or a version, a manual update file, and restarting are not done here. THE ' +
+    'RESULT IS ABOUT THE JOB THIS CALL STARTED: the tool watches it for at most `watched_seconds` and then ' +
+    'returns what it has, leaving the install going. ' +
+    UPDATE_APPLY_GUIDANCE,
+  resultGuidance: UPDATE_APPLY_GUIDANCE,
+  inputSchema: { type: 'object', properties: {} },
+  requiredRole: Role.Full,
+  mutating: true,
+  // The previous boot environment stays, so the system can go back to it. No
+  // tool here activates one, which the description says beside the field (#153).
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    parseUpdateApplyArgs(rawArgs);
+    return {};
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    parseUpdateApplyArgs(rawArgs);
+    await refuseHaSystem(ctx);
+    const { train, target, current } = await readUpdateTarget(ctx);
+    const now =
+      current.value === null
+        ? `a version that could not be read (${current.error ?? 'the system reported none'})`
+        : `version ${current.value}`;
+    return [
+      {
+        method: 'update.run',
+        params: updateRunParams(),
+        description:
+          `Download and install the TrueNAS update ${target}` +
+          `${train === null ? ', on a train the system reported no name for' : ` on the train "${train}"`}, as ` +
+          `\`update.status\` reported it when this plan was made; the system is running ${now}. THE SYSTEM ` +
+          `WILL NOT REBOOT: \`reboot\` is sent as false, so it keeps running ${now} until it is restarted, and ` +
+          'this tool does not restart it. The install goes into a new boot environment; whether it is marked for ' +
+          'the next boot is (unconfirmed) and is read back below. The middleware installs whichever update it ' +
+          'finds available when the call runs, which is this one unless the train publishes another first; ' +
+          'nothing read for this plan is read again. Nothing on the pools changes, and pool ZFS feature flags ' +
+          'are not upgraded. This starts a background job; the job is then followed through the client\'s own ' +
+          `tracking, which reads \`core.get_jobs\` and changes nothing, for at most ${UPDATE_APPLY_WATCH_SECONDS} ` +
+          'seconds. The download and install continue after that whether or not they have finished, and ' +
+          '`tasks_recent_runs` is where the job is followed.',
+      },
+      bootEnvironmentStep(),
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    parseUpdateApplyArgs(rawArgs);
+    const api = ctx.system.client.api;
+    // `update.run` declares the literal `true` as its answer, which carries
+    // nothing, so no `extra` reads it; the outcome is the job's state (#164).
+    const job = await watchJob(api, api.callAndGetJobId('update.run', updateRunParams()), {
+      watchMs: UPDATE_APPLY_WATCH_MS,
+      successStates: UPDATE_JOB_SUCCESS_STATES,
+    });
+    return { watched_seconds: UPDATE_APPLY_WATCH_SECONDS, ...job, ...(await nextBoot(ctx)) };
   },
 };

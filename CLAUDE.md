@@ -3184,6 +3184,25 @@ it.**
 taken name and for a refused create. Those sentences are each tool's own, and
 the checks are shared.
 
+### An effect the source could not settle is read back, not described (#200)
+
+`system_update_apply` sends `update.run` with `reboot: false`. The middleware's
+`plugins/update_/update.py` (`run`, on `master`) confirms that false skips the
+restart and nothing else. Whether the install marks the new boot environment
+for the next boot happens inside the `truenas_install` subprocess, which was
+not readable from here, so it stays `(unconfirmed)`. The result reads
+`boot.environment.query` when the watch ends and reports `running_environment`,
+`active_on_reboot` and whether they differ. **Where the source cannot settle an
+effect and a read after the call can observe it, report the read.** That
+read goes through `boot.ts`'s `readEnvironments`, which is exported for this
+purpose, so a boot environment has one reading.
+
+**The HA refusal also refuses an unreadable licence.** #161 says a state that
+could not be read refuses nothing. That rule is about the middleware's own
+refusals. Keeping this tool off HA pairs is this catalog's scope line, and an
+unreadable `failover.licensed` has not put the system outside that line, so
+the plan fails as #198's plan-time checks do.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
