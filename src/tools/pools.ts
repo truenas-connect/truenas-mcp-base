@@ -823,27 +823,41 @@ interface ResolvedPool {
 }
 
 /**
- * The data pool named `name`, or the error naming it.
+ * The row `pool.query` listed under `name`, or null where it listed none.
  *
  * The match is made on the RESPONSE, by name, and never on the row count: an
  * unrecognised filter is dropped rather than refused, and the first row of a
- * filter that did not apply is a different pool (#121, #153). A pool listed
- * under that name with no id this tool can read is refused too — creating a
- * task needs the id, and guessing one is not an option.
+ * filter that did not apply is a different pool (#121, #153).
  */
-async function resolvePool(ctx: ToolContext, name: string): Promise<ResolvedPool> {
-  const rows: unknown = await firstValueFrom(
-    ctx.system.client.api.query('pool.query', [['name', '=', name]]),
-  );
+function poolRowNamed(rows: unknown, name: string): Record<string, unknown> | null {
   const match = (Array.isArray(rows) ? rows : [])
     .map((row) => recordOrNull(row))
     .find((row) => row !== null && textOrNull(row['name']) === name);
-  if (match === undefined || match === null) {
+  return match ?? null;
+}
+
+/** The data pool named `name` as `pool.query` lists it, or the error naming it. */
+async function readPoolNamed(ctx: ToolContext, name: string): Promise<Record<string, unknown>> {
+  const rows: unknown = await firstValueFrom(
+    ctx.system.client.api.query('pool.query', [['name', '=', name]]),
+  );
+  const match = poolRowNamed(rows, name);
+  if (match === null) {
     throw new Error(
       `No pool named "${name}" on this system — \`storage_pool_status\` lists the data ` +
         'pools by name, and the boot pool is not one of them',
     );
   }
+  return match;
+}
+
+/**
+ * The data pool named `name`, or the error naming it. A pool listed under that
+ * name with no id this tool can read is refused too — creating a task needs
+ * the id, and guessing one is not an option.
+ */
+async function resolvePool(ctx: ToolContext, name: string): Promise<ResolvedPool> {
+  const match = await readPoolNamed(ctx, name);
   const id = numberOrNull(match['id']);
   if (id === null) {
     throw new Error(`Pool "${name}" is listed with no id this tool could read, so no task can name it`);
@@ -1232,6 +1246,448 @@ export const poolScrubTaskUpdate: MutatingTool = {
       resulting,
       changed: same === null ? null : !same,
       confirmed: resulting === null ? null : agreement(wanted, comparableOfRow(resulting)),
+    };
+  },
+};
+
+/**
+ * The categories whose vdevs hold pool data, so losing one faults the pool.
+ * `log`, `cache` and `spare` hold nothing the pool cannot run without, which is
+ * why the redundancy check is made for these three alone.
+ */
+const DATA_CATEGORIES: readonly string[] = ['data', 'special', 'dedup'];
+
+/** One leaf of a pool's topology, found under the disk name asked for. */
+interface LocatedDevice {
+  category: (typeof VDEV_CATEGORIES)[number];
+  device: Record<string, unknown>;
+  /** The top-level vdev the leaf is in, which IS the leaf where it stands alone. */
+  vdev: Record<string, unknown>;
+  /** The vdev's members, every one of them a record — `[]` for a leaf on its own. */
+  members: Record<string, unknown>[];
+  /** 0 for a vdev on its own, 1 for a direct member, more for one nested deeper. */
+  depth: number;
+}
+
+/**
+ * A node's children as records, or null where they are not a list of them.
+ * Absent and null are a leaf, as `mapNode` reads them.
+ */
+function childNodes(node: Record<string, unknown>): Record<string, unknown>[] | null {
+  const children = node['children'] ?? [];
+  if (!Array.isArray(children)) return null;
+  const records = children.map((child) => recordOrNull(child));
+  return records.every((child) => child !== null) ? (records as Record<string, unknown>[]) : null;
+}
+
+/**
+ * The one leaf in `row`'s topology whose `disk` is `disk`, or the error saying
+ * why there is not exactly one.
+ *
+ * A topology any part of which could not be read refuses, whichever direction
+ * was asked for: the part not read could hold a second listing of the disk,
+ * and a second listing is what the ambiguity refusal below exists for.
+ *
+ * A disk listed TWICE is refused rather than resolved. That is a spare in use,
+ * which ZFS lists in `spare` and again inside the vdev it stands in for, and
+ * which of the two roles an offline would reach is not something the two
+ * listings say.
+ */
+function locateDevice(pool: string, row: Record<string, unknown>, disk: string): LocatedDevice {
+  const topology = recordOrNull(row['topology']);
+  const unreadable = new Error(
+    `The topology of pool "${pool}" could not be read in full, so where disk "${disk}" sits in it ` +
+      'cannot be established',
+  );
+  if (topology === null) throw unreadable;
+  const found: LocatedDevice[] = [];
+  let complete = true;
+  const walk = (
+    category: LocatedDevice['category'],
+    vdev: Record<string, unknown>,
+    members: Record<string, unknown>[],
+    node: Record<string, unknown>,
+    depth: number,
+  ): void => {
+    if (textOrNull(node['disk']) === disk) found.push({ category, device: node, vdev, members, depth });
+    const children = childNodes(node);
+    if (children === null) {
+      complete = false;
+      return;
+    }
+    for (const child of children) walk(category, vdev, members, child, depth + 1);
+  };
+  for (const category of VDEV_CATEGORIES) {
+    // An older middleware may not carry every category; a category it does
+    // carry that is not a list is a part of the topology not read.
+    const vdevs: unknown = topology[category] ?? [];
+    if (!Array.isArray(vdevs)) {
+      complete = false;
+      continue;
+    }
+    for (const value of vdevs) {
+      const vdev = recordOrNull(value);
+      if (vdev === null) {
+        complete = false;
+        continue;
+      }
+      walk(category, vdev, childNodes(vdev) ?? [], vdev, 0);
+    }
+  }
+  if (!complete) throw unreadable;
+  if (found.length > 1) {
+    throw new Error(
+      `Disk "${disk}" is listed ${found.length} times in pool "${pool}"'s topology ` +
+        `(${found.map((entry) => entry.category).join(', ')}) — a spare in use is listed as a ` +
+        'spare and again inside the vdev it stands in for — so which role a change would reach ' +
+        'cannot be said, and nothing is planned',
+    );
+  }
+  if (found.length === 0) {
+    throw new Error(
+      `No disk "${disk}" in pool "${pool}"'s topology — \`storage_pool_topology\` names each ` +
+        'device by `disk`',
+    );
+  }
+  return found[0];
+}
+
+/** What a device is called in a sentence: its disk, else the name ZFS gives its slot. */
+function memberName(node: Record<string, unknown>): string {
+  return textOrNull(node['disk']) ?? textOrNull(node['name']) ?? '(unnamed)';
+}
+
+function statusText(node: Record<string, unknown>): string {
+  return textOrNull(node['status']) ?? 'state not readable';
+}
+
+/**
+ * A RAIDZ or dRAID vdev's parity, or null where it cannot be read.
+ *
+ * RAIDZ carries it in its type. Whether a dRAID's type does is (unconfirmed),
+ * so a bare `DRAID` falls back to the vdev's ZFS name, which spells the parity
+ * first (`draid2:…`); where neither does, there is no parity to check against.
+ */
+function parityOf(vdev: Record<string, unknown>): number | null {
+  const type = textOrNull(vdev['type']) ?? '';
+  const spelled =
+    /^(?:RAIDZ|DRAID)([1-3])$/.exec(type) ??
+    (type === 'DRAID' ? /^draid([1-3]):/.exec(textOrNull(vdev['name']) ?? '') : null);
+  return spelled === null ? null : Number(spelled[1]);
+}
+
+/** The vdev's type and every member's state now, as the plan states them. */
+function vdevSentence(disk: string, located: LocatedDevice): string {
+  const { category, device, vdev, members, depth } = located;
+  if (depth === 0) {
+    return `Disk "${disk}" is a \`${category}\` vdev on its own, and is now ${statusText(device)}.`;
+  }
+  const type = textOrNull(vdev['type']);
+  return (
+    `Disk "${disk}" is in a ${type === null ? 'vdev of a type not readable' : `${type} vdev`} in ` +
+    `the \`${category}\` category, now ${statusText(device)}; its members are ` +
+    `${members.map((member) => `${memberName(member)} ${statusText(member)}`).join(', ')}.`
+  );
+}
+
+/**
+ * Why taking the device offline is refused, or null where it is not.
+ *
+ * Computed over what was read, and every case it cannot read refuses: a
+ * redundancy check that defaults to "safe" is #154's costly direction. A device
+ * already OFFLINE is not refused, because sending it offline again takes
+ * nothing more away.
+ */
+function offlineRefusal(pool: string, disk: string, located: LocatedDevice): string | null {
+  const { category, device, vdev, members, depth } = located;
+  if (!DATA_CATEGORIES.includes(category) || textOrNull(device['status']) === 'OFFLINE') return null;
+  const refuse = (reason: string) => `Refusing to take disk "${disk}" offline in pool "${pool}": ${reason}`;
+  if (depth === 0) {
+    return refuse(`it is a \`${category}\` vdev on its own — a stripe — so taking it offline faults the pool`);
+  }
+  if (depth > 1) {
+    return refuse(
+      'it sits beneath another device inside its vdev (one being replaced, or covered by a spare), ' +
+        'which the redundancy check here does not cover, so the check could not be made',
+    );
+  }
+  const others = members.filter((member) => member !== device);
+  if (others.some((member) => textOrNull(member['status']) === null)) {
+    return refuse('the state of another member of its vdev could not be read, so the check could not be made');
+  }
+  const othersOnline = others.filter((member) => textOrNull(member['status']) === 'ONLINE').length;
+  const type = textOrNull(vdev['type']);
+  if (type === 'MIRROR') {
+    return othersOnline === 0 ? refuse('no other member of its mirror is ONLINE') : null;
+  }
+  const parity = parityOf(vdev);
+  if (parity === null) {
+    return refuse(
+      `its vdev's type (${type ?? 'not readable'}) is not one whose redundancy this tool can read, so ` +
+        'the check could not be made',
+    );
+  }
+  const notOnline = others.length - othersOnline + 1;
+  return notOnline > parity
+    ? refuse(
+        `${notOnline} of its ${type}'s ${members.length} members would be not ONLINE, more than ` +
+          `its parity of ${parity} covers`,
+      )
+    : null;
+}
+
+/** What `pool_device_set_online` was asked to do. */
+interface DeviceArgs {
+  pool: string;
+  disk: string;
+  online: boolean;
+}
+
+function parseDeviceArgs(args: Record<string, unknown>): DeviceArgs {
+  const pool = textOrNull(args['pool']);
+  if (pool === null) throw new Error('"pool" is required and must be a pool name');
+  const disk = textOrNull(args['disk']);
+  if (disk === null) {
+    throw new Error('"disk" is required and must be a disk name, as `storage_pool_topology` reports it');
+  }
+  const online = args['online'];
+  if (typeof online !== 'boolean') throw new Error('"online" is required and must be a boolean');
+  return { pool, disk, online };
+}
+
+/** The device as read immediately before a call: what to send, and where it sits. */
+interface DeviceFound {
+  poolId: number;
+  guid: string;
+  located: LocatedDevice;
+}
+
+/**
+ * Reads the pool by name and finds the device in it, or fails naming which of
+ * them it could not find. Made at plan time AND again by `execute`, because the
+ * token binds the names and not the ids the plan resolved them to (#181).
+ */
+async function readDevice(ctx: ToolContext, args: DeviceArgs): Promise<DeviceFound> {
+  const row = await readPoolNamed(ctx, args.pool);
+  const poolId = numberOrNull(row['id']);
+  if (poolId === null) {
+    throw new Error(`Pool "${args.pool}" is listed with no id this tool could read, so no device in it can be named`);
+  }
+  const located = locateDevice(args.pool, row, args.disk);
+  const guid = textOrNull(located.device['guid']);
+  if (guid === null) {
+    throw new Error(
+      `Disk "${args.disk}" in pool "${args.pool}" reported no GUID this tool could read, and the GUID is ` +
+        'what the call names it by',
+    );
+  }
+  return { poolId, guid, located };
+}
+
+/**
+ * The node of `row`'s topology carrying `guid`, or null; a part not readable is
+ * passed over. Matched on the GUID alone and not on `disk`, which a device that
+ * faulted or was pulled can lose — the very outcome this read may be reporting.
+ */
+function deviceWithGuid(row: Record<string, unknown>, guid: string): Record<string, unknown> | null {
+  const topology = recordOrNull(row['topology']);
+  const search = (nodes: unknown): Record<string, unknown> | null => {
+    for (const value of Array.isArray(nodes) ? nodes : []) {
+      const node = recordOrNull(value);
+      if (node === null) continue;
+      if (textOrNull(node['guid']) === guid) return node;
+      const nested = search(node['children']);
+      if (nested !== null) return nested;
+    }
+    return null;
+  };
+  for (const category of VDEV_CATEGORIES) {
+    const node = topology === null ? null : search(topology[category]);
+    if (node !== null) return node;
+  }
+  return null;
+}
+
+const DEVICE_GUIDANCE =
+  '`pool_id` and `guid` are what the call was sent, read immediately before it, ' +
+  'and `category` is the role the device serves in the pool, as ' +
+  '`storage_pool_topology` names it. `previous_status` is the device\'s ZFS state ' +
+  'read immediately before the call, null where it reported none this tool ' +
+  'could read. `resulting_status` is its state read again immediately after the ' +
+  'call, finding the device by its GUID, and IS NEVER INFERRED FROM THE CALL ' +
+  'RETURNING. AN ONLINE THAT WORKED IS NOT A DEVICE THAT IS REPAIRED: it can read ' +
+  '`ONLINE` while the resilver of what it missed is still running — the pool\'s ' +
+  'scan, which `storage_scrub_history` reports — or still read `FAULTED` or ' +
+  '`UNAVAIL` for a disk that has failed. `resulting_lookup` says what that read ' +
+  'did: `FOUND`; `NOT_FOUND`, where the pool was not listed under its name or no ' +
+  'device in its topology carried that GUID, which includes a topology that ' +
+  'could not be read; or `UNREADABLE`, the read failing, with ' +
+  '`resulting_read_error` naming why and null otherwise. `resulting_status` is ' +
+  'null under the last two AND under `FOUND` where the device reported no state ' +
+  'this tool could read, so the lookup alone does not separate them. A read ' +
+  'after the call that failed is not a failed call: the call had already been ' +
+  'made. `changed` compares the two readings, never the request, and is null ' +
+  'wherever either reading is, which is not "nothing changed".';
+
+export const poolDeviceSetOnline: MutatingTool = {
+  name: 'pool_device_set_online',
+  description:
+    'Takes one device in a data pool offline, or brings it back online, on this ' +
+    'TrueNAS system. Two-phase: called without a confirmation_token it returns a ' +
+    'plan for user approval; called with one it sends the change. `pool` is the ' +
+    'pool\'s NAME as `storage_pool_status` reports it, and `disk` the device as ' +
+    '`storage_pool_topology` reports it in `disk`; the boot pool is not covered. ' +
+    '`online` is required: false takes the device offline, true brings it back. A ' +
+    'pool or disk this system does not list fails the plan, naming which; so does ' +
+    'a disk listed more than once — a spare in use is listed as a spare and again ' +
+    'inside the vdev it stands in for — and a topology that could not be read in ' +
+    'full. TAKING A DEVICE OFFLINE IS REFUSED, AT PLAN TIME AND AGAIN WHEN THE CALL ' +
+    'IS MADE, wherever its vdev would be left unable to serve its data: a `data`, ' +
+    '`special` or `dedup` device that is a vdev on its own (a stripe); the last ' +
+    'ONLINE member of a mirror; a RAIDZ or dRAID member where the members not ' +
+    'ONLINE, counting this one, would exceed the parity; and any device whose vdev ' +
+    'type or member states could not be read, or that sits beneath another device ' +
+    'inside its vdev (one being replaced, or covered by a spare). A device already ' +
+    'OFFLINE is not refused. A `log`, `cache` or `spare` device is not refused, ' +
+    'and the plan names which it is. The plan states the vdev\'s type and every ' +
+    'member\'s current state. dRAID parity is read from the vdev\'s type, or from ' +
+    'its name where the type does not carry it, (unconfirmed) that either does; ' +
+    'where neither does, the device is refused. Whether the system itself refuses ' +
+    'an offline that would fault the pool is (unconfirmed), and this tool does not ' +
+    'rely on it. The device is named to the system by its vdev GUID, ' +
+    '(unconfirmed) that the call takes the GUID rather than a device path. ' +
+    'BRINGING A DEVICE ONLINE DOES NOT REPAIR IT: a resilver of what it missed ' +
+    'follows, and a disk that has failed stays failed. A device already in the ' +
+    'state asked for is not an error. `destructiveness` is `reversible`: the ' +
+    'reverse call brings the device back, and destroys no data either way — but a ' +
+    'device left offline leaves its vdev with less redundancy than it had until it ' +
+    'is back and resilvered. ' +
+    DEVICE_GUIDANCE,
+  resultGuidance: DEVICE_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      pool: {
+        type: 'string',
+        description: 'The data pool\'s name, as `storage_pool_status` reports it.',
+      },
+      disk: {
+        type: 'string',
+        description: 'The device, as `storage_pool_topology` reports it in `disk`, e.g. "sdb".',
+      },
+      online: {
+        type: 'boolean',
+        description: 'false takes the device offline; true brings it back online.',
+      },
+    },
+    required: ['pool', 'disk', 'online'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const { pool, disk, online } = parseDeviceArgs(rawArgs);
+    return { pool, disk, online };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const args = parseDeviceArgs(rawArgs);
+    const found = await readDevice(ctx, args);
+    const { category, device } = found.located;
+    if (!args.online) {
+      const refusal = offlineRefusal(args.pool, args.disk, found.located);
+      if (refusal !== null) throw new Error(refusal);
+    }
+    // A device already in the state asked for is not an error (#119), and the
+    // effect sentence would then describe a change that is not being made.
+    const status = textOrNull(device['status']);
+    const target = args.online ? 'ONLINE' : 'OFFLINE';
+    const already = status === target ? ` It is already ${target}, which is not an error.` : '';
+    const effect = already !== ''
+      ? ''
+      : args.online
+      ? ' A RESILVER FOLLOWS: ZFS rewrites onto the device what it missed while it was ' +
+        'away, which reads the rest of its vdev and takes time. Bringing it online ' +
+        'does not repair it, and a disk that has failed stays failed.'
+      : DATA_CATEGORIES.includes(category)
+        ? ' Its vdev runs with less redundancy than it has now until the device is back ' +
+          'online and resilvered.'
+        : ` It is a \`${category}\` device, which holds no data the pool depends on, so ` +
+          'no data redundancy is lost; the pool runs without it until it is back.';
+    return [
+      {
+        method: 'pool.query',
+        params: queryParams([['name', '=', args.pool]]),
+        description:
+          `Read pool "${args.pool}" and its topology, to find disk "${args.disk}" and the ids the ` +
+          `call is sent — pool ${found.poolId}, GUID ${found.guid} when this plan was made. ` +
+          'Changes nothing. If the pool or the disk is not listed when this runs, nothing is sent' +
+          (args.online
+            ? '.'
+            : ', and the redundancy check is made again on what it reads: a vdev that would now ' +
+              'be left unable to serve its data refuses the call rather than sending it.') +
+          ' This same read is made again immediately after the call, to report the state that ' +
+          'resulted.',
+      },
+      {
+        method: args.online ? 'pool.online' : 'pool.offline',
+        params: [found.poolId, { label: found.guid }],
+        description:
+          `${args.online ? 'Bring' : 'Take'} disk "${args.disk}" ${args.online ? 'online' : 'offline'} ` +
+          `in pool "${args.pool}", naming it by its vdev GUID — (unconfirmed) that the call takes ` +
+          `the GUID rather than a device path. ${vdevSentence(args.disk, found.located)}` +
+          `${effect}${already}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const args = parseDeviceArgs(rawArgs);
+    // Not caught: this read is what the call's params come from, so where it
+    // fails there is nothing to send. A device whose vdev has lost a member
+    // since the plan is refused here too — a refusal, not a branch to another
+    // call (#187).
+    const found = await readDevice(ctx, args);
+    if (!args.online) {
+      const refusal = offlineRefusal(args.pool, args.disk, found.located);
+      if (refusal !== null) throw new Error(refusal);
+    }
+    const params: [number, { label: string }] = [found.poolId, { label: found.guid }];
+    await firstValueFrom(
+      args.online
+        ? ctx.system.client.api.call('pool.online', params)
+        : ctx.system.client.api.call('pool.offline', params),
+    );
+    // The call has landed by here, so this read may not fail the tool.
+    let lookup: 'FOUND' | 'NOT_FOUND' | 'UNREADABLE' = 'NOT_FOUND';
+    let readError: string | null = null;
+    let resultingStatus: string | null = null;
+    try {
+      const rows: unknown = await firstValueFrom(
+        ctx.system.client.api.query('pool.query', [['name', '=', args.pool]]),
+      );
+      const row = poolRowNamed(rows, args.pool);
+      const device = row === null ? null : deviceWithGuid(row, found.guid);
+      if (device !== null) {
+        lookup = 'FOUND';
+        resultingStatus = textOrNull(device['status']);
+      }
+    } catch (reason) {
+      lookup = 'UNREADABLE';
+      readError = errorText(reason);
+    }
+    const previousStatus = textOrNull(found.located.device['status']);
+    return {
+      pool: args.pool,
+      disk: args.disk,
+      requested_online: args.online,
+      pool_id: found.poolId,
+      guid: found.guid,
+      category: found.located.category,
+      previous_status: previousStatus,
+      resulting_lookup: lookup,
+      resulting_read_error: readError,
+      resulting_status: resultingStatus,
+      changed:
+        previousStatus === null || resultingStatus === null ? null : previousStatus !== resultingStatus,
     };
   },
 };
