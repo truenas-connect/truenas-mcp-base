@@ -6,7 +6,7 @@ import {
   userSetLocked,
   usersList,
 } from '@/tools/accounts';
-import { alertsDismiss, alertSettings, alertsList, alertsRestore } from '@/tools/alerts';
+import { alertClassSet, alertsDismiss, alertSettings, alertsList, alertsRestore } from '@/tools/alerts';
 import { appEngineStatus, appsList, appsUpdateSummary } from '@/tools/apps';
 import {
   fcList,
@@ -98,7 +98,7 @@ import {
 } from '@/tools/tasks';
 import { vmClone, vmDevices, vmLogs, vmRestart, vmsList, vmStart, vmStop } from '@/tools/vms';
 
-/** The sketch's catalog: fifty-nine read-only tools plus thirty-seven mutating tools. */
+/** The sketch's catalog: fifty-nine read-only tools plus thirty-eight mutating tools. */
 export function createDefaultCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
   catalog.register(systemInfo);
@@ -198,10 +198,12 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(datasetRename);
   catalog.register(diskIdentify);
   catalog.register(certificateCsrCreate);
+  catalog.register(alertClassSet);
   return catalog;
 }
 
 export {
+  alertClassSet,
   alertsDismiss,
   alertSettings,
   alertsList,

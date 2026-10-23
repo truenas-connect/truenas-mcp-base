@@ -3078,6 +3078,28 @@ does not state" rather than as a guessed value (#102).
 say an entry is a signing request. The plan and the guidance both say so,
 rather than pointing at a tool that cannot answer (#135).
 
+### A whole-map update is a read and a write, and the overwrite is stated (#196)
+
+`alertclasses.update` takes the per-class map, and whether one naming a single
+class merges or replaces is `(unconfirmed)`. So `alert_class_set` assumes it
+replaces. `execute` reads `alertclasses.config`, changes one entry and writes
+every entry back. That read is the plan's first step (#119). The other entries
+are written back exactly as sent, never through a guard, so a field this
+repository does not name survives the write.
+
+**The overwrite is stated, not prevented.** A change another session makes to a
+different class between the read and the write is lost. Comparing against the
+plan-time map and refusing on a difference would be `execute` branching on state
+the token cannot bind, so the plan and the description say so in capitals
+instead. A read that fails, or answers no map, refuses before anything is sent:
+writing one entry alone would delete every other class's setting under the
+assumption above. That is a refusal, not a branch (#181).
+
+The class name is checked against `alert.list_categories` at plan time, and an
+unreadable list refuses too (#190). A reset removes the key rather than writing
+default values. That also drops a stored `proactive_support`, which no tool here
+sets, so the plan names it and the description narrows `reversible` (#153).
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

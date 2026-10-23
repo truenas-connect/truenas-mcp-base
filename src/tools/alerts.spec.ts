@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { of, throwError } from 'rxjs';
 import { ToolCatalog } from '@/catalog/catalog';
 import { MutatingTool, SystemHandle } from '@/catalog/tool';
 import { ConfirmationService } from '@/execution/confirmation';
@@ -6,7 +7,7 @@ import { ToolExecutor } from '@/execution/executor';
 import { Role } from '@/interfaces';
 import { SystemRegistry } from '@/registry/system-registry';
 import { fakeSystem, failingSystem } from '@/testing/fake-systems';
-import { alertsDismiss, alertSettings, alertsList, alertsRestore } from '@/tools/index';
+import { alertClassSet, alertsDismiss, alertSettings, alertsList, alertsRestore } from '@/tools/index';
 
 describe('alerts_list', () => {
   // Every property the middleware's Alert carries, so the assertions below show
@@ -585,5 +586,306 @@ describe('alerts_dismiss and alerts_restore', () => {
     const [row] = (await alertsList.handler(ctx, {})) as Record<string, unknown>[];
     const steps = await alertsDismiss.plan(ctx, { uuid: row['uuid'] });
     expect(steps[1].params).toEqual([row['uuid']]);
+  });
+});
+
+describe('alert_class_set', () => {
+  const categories = [
+    {
+      id: 'STORAGE',
+      title: 'Storage',
+      classes: [
+        { id: 'ZpoolCapacityWarning', title: 'Pool Space Usage Is Above 80%', level: 'WARNING', proactive_support: false },
+        { id: 'SMARTError', title: 'S.M.A.R.T. Error', level: 'CRITICAL', proactive_support: true },
+      ],
+    },
+    { id: 'SYSTEM', title: 'System', classes: [{ id: 'UPSOnBattery', title: 'UPS On Battery', level: 'CRITICAL' }] },
+  ];
+
+  // A stored map with two other classes, one carrying a field this tool does
+  // not name, so the write-back assertions show it surviving untouched.
+  const stored = () => ({
+    SMARTError: { level: 'ERROR', policy: 'DAILY', proactive_support: true, future_field: 'x' },
+    UPSOnBattery: { policy: 'NEVER' },
+  });
+
+  // The rows object is read per call, so a test can change it between plan and
+  // execute and see `execute` read the map again.
+  const system = (
+    classes: unknown = stored(),
+    update?: unknown,
+    failures: Partial<Record<string, unknown>> = {},
+  ) => {
+    const rows: Record<string, unknown> = {
+      ['alert.list_categories']: categories,
+      ['alertclasses.config']: { id: 1, classes },
+    };
+    const answer = (method: string, params?: unknown[]) => {
+      if (method in failures) return throwError(() => failures[method]);
+      if (method === 'alertclasses.update') {
+        return of(update !== undefined ? update : { id: 1, ...(params?.[0] as object) });
+      }
+      return of(rows[method]);
+    };
+    const call = vi.fn(answer);
+    const ctx = { system: { name: 'nas', client: { api: { call } } } as unknown as SystemHandle };
+    return { ctx, call, rows };
+  };
+
+  const updateStep = async (args: Record<string, unknown>, classes?: unknown) =>
+    (await alertClassSet.plan(system(classes).ctx, args))[1];
+
+  it('is a full-role, reversible mutation', () => {
+    expect(alertClassSet).toMatchObject({
+      name: 'alert_class_set',
+      mutating: true,
+      destructiveness: 'reversible',
+      requiredRole: Role.Full,
+    });
+  });
+
+  it('advertises the declared Level and Policy unions as its enums', () => {
+    const properties = alertClassSet.inputSchema['properties'] as Record<string, Record<string, unknown>>;
+    expect(properties['level']['enum']).toEqual(['INFO', 'NOTICE', 'WARNING', 'ERROR', 'CRITICAL', 'ALERT', 'EMERGENCY']);
+    expect(properties['policy']['enum']).toEqual(['IMMEDIATELY', 'HOURLY', 'DAILY', 'NEVER']);
+    expect(alertClassSet.inputSchema['required']).toEqual(['class']);
+  });
+
+  it('normalizes args to what was passed, dropping unknown keys', () => {
+    expect(alertClassSet.normalizeArgs?.({ class: 'SMARTError', policy: 'HOURLY', extra: 1 })).toEqual({
+      class: 'SMARTError',
+      policy: 'HOURLY',
+    });
+    expect(alertClassSet.normalizeArgs?.({ class: 'SMARTError', reset: true })).toEqual({
+      class: 'SMARTError',
+      reset: true,
+    });
+  });
+
+  it.each([
+    [{}, /"class" is required/],
+    [{ class: '' }, /"class" is required/],
+    [{ class: 7, level: 'INFO' }, /"class" is required/],
+    [{ class: 'SMARTError' }, /Nothing to change/],
+    [{ class: 'SMARTError', level: 'LOUD' }, /"level" must be one of INFO, NOTICE/],
+    [{ class: 'SMARTError', level: 'constructor' }, /"level" must be one of/],
+    [{ class: 'SMARTError', policy: 'WEEKLY' }, /"policy" must be one of IMMEDIATELY, HOURLY, DAILY, NEVER/],
+    [{ class: 'SMARTError', reset: false }, /"reset" takes only true/],
+    [{ class: 'SMARTError', reset: true, level: 'INFO' }, /cannot be combined/],
+    [{ class: 'SMARTError', reset: true, policy: 'NEVER' }, /cannot be combined/],
+  ])('refuses %j in normalizeArgs and in plan', async (args, error) => {
+    expect(() => alertClassSet.normalizeArgs?.(args)).toThrow(error);
+    await expect(alertClassSet.plan(system().ctx, args)).rejects.toThrow(error);
+  });
+
+  it('plans the read execute makes, then the update', async () => {
+    const steps = await alertClassSet.plan(system().ctx, { class: 'ZpoolCapacityWarning', level: 'CRITICAL' });
+    expect(steps.map((step) => [step.method, step.params])).toEqual([
+      ['alertclasses.config', []],
+      [
+        'alertclasses.update',
+        [{ classes: { ...stored(), ZpoolCapacityWarning: { level: 'CRITICAL' } } }],
+      ],
+    ]);
+    expect(steps[0].description).toContain('Changes nothing');
+  });
+
+  it("names the class in words, its current and requested setting, and the system's default level", async () => {
+    const step = await updateStep({ class: 'SMARTError', level: 'CRITICAL' });
+    expect(step.description).toContain(
+      'Change alert class "SMARTError" (S.M.A.R.T. Error; category Storage; the system lists its default level as CRITICAL).',
+    );
+    expect(step.description).toContain('Now it is stored with level ERROR, policy DAILY.');
+    expect(step.description).toContain('This sets level CRITICAL. Its policy is kept as stored.');
+  });
+
+  it('says a class with no stored setting is at its defaults', async () => {
+    const step = await updateStep({ class: 'ZpoolCapacityWarning', policy: 'HOURLY' });
+    expect(step.description).toContain('Now it holds no stored setting, so it is at its defaults.');
+    expect(step.description).toContain('This sets policy HOURLY. Its level is kept as stored.');
+  });
+
+  it('says in words what NEVER means where it is requested, and only there', async () => {
+    const never = await updateStep({ class: 'SMARTError', policy: 'NEVER' });
+    expect(never.description).toContain(
+      'POLICY NEVER SILENCES THIS CLASS: its alerts are still raised and `alerts_list` still reports them, ' +
+        'but none is sent to any destination.',
+    );
+    const daily = await updateStep({ class: 'SMARTError', policy: 'HOURLY' });
+    expect(daily.description).not.toContain('NEVER SILENCES');
+  });
+
+  it('states that changes to other classes between the read and the write are overwritten', async () => {
+    for (const args of [{ class: 'SMARTError', level: 'INFO' }, { class: 'SMARTError', reset: true }]) {
+      const step = await updateStep(args);
+      expect(step.description).toContain(
+        'A CHANGE ANYONE ELSE MAKES TO ANOTHER CLASS BETWEEN THAT READ AND THIS WRITE IS OVERWRITTEN',
+      );
+    }
+    expect(alertClassSet.description).toContain('BETWEEN THAT READ AND THE WRITE IS OVERWRITTEN');
+  });
+
+  it('says a setting the class already holds changes nothing and is not an error', async () => {
+    const step = await updateStep({ class: 'SMARTError', level: 'ERROR', policy: 'DAILY' });
+    expect(step.description).toContain('It already holds that, so this changes nothing for it and is not an error.');
+  });
+
+  it('plans a reset as removing the key, and names the proactive_support it also removes', async () => {
+    const step = await updateStep({ class: 'SMARTError', reset: true });
+    expect(step.params).toEqual([{ classes: { UPSOnBattery: { policy: 'NEVER' } } }]);
+    expect(step.description).toContain('This removes its stored setting');
+    expect(step.description).toContain('This also removes its stored proactive_support setting (true).');
+  });
+
+  it('says a reset of a class with no stored setting changes nothing', async () => {
+    const step = await updateStep({ class: 'ZpoolCapacityWarning', reset: true });
+    expect(step.params).toEqual([{ classes: stored() }]);
+    expect(step.description).toContain('It holds no stored setting already, so this changes nothing for it');
+  });
+
+  it('refuses at plan time a class the system does not list, naming it', async () => {
+    await expect(alertClassSet.plan(system().ctx, { class: 'NoSuchAlert', level: 'INFO' })).rejects.toThrow(
+      'No alert class "NoSuchAlert" is listed on this system',
+    );
+  });
+
+  it('refuses at plan time where the class list cannot be read or is not a list', async () => {
+    const failed = system(stored(), undefined, { ['alert.list_categories']: new Error('timeout') });
+    await expect(alertClassSet.plan(failed.ctx, { class: 'SMARTError', level: 'INFO' })).rejects.toThrow(
+      'alert.list_categories failed: timeout',
+    );
+    const odd = system();
+    odd.rows['alert.list_categories'] = { classes: [] };
+    await expect(alertClassSet.plan(odd.ctx, { class: 'SMARTError', level: 'INFO' })).rejects.toThrow(
+      'No alert class "SMARTError" is listed',
+    );
+  });
+
+  it('refuses at plan time where the stored map cannot be read', async () => {
+    const failed = system(stored(), undefined, { ['alertclasses.config']: new Error('denied') });
+    await expect(alertClassSet.plan(failed.ctx, { class: 'SMARTError', level: 'INFO' })).rejects.toThrow(
+      'alertclasses.config failed: denied',
+    );
+    await expect(alertClassSet.plan(system(['not', 'a', 'map']).ctx, { class: 'SMARTError', level: 'INFO' })).rejects.toThrow(
+      'no per-class map',
+    );
+  });
+
+  it('writes every other class back unchanged, and only changes the fields named', async () => {
+    const { ctx, call } = system();
+    await alertClassSet.execute(ctx, { class: 'SMARTError', policy: 'IMMEDIATELY' });
+    expect(call.mock.calls).toEqual([
+      ['alertclasses.config'],
+      [
+        'alertclasses.update',
+        [
+          {
+            classes: {
+              SMARTError: { level: 'ERROR', policy: 'IMMEDIATELY', proactive_support: true, future_field: 'x' },
+              UPSOnBattery: { policy: 'NEVER' },
+            },
+          },
+        ],
+      ],
+    ]);
+  });
+
+  it('reads the map again when it executes, so the write carries what is stored then', async () => {
+    const { ctx, call, rows } = system();
+    await alertClassSet.plan(ctx, { class: 'ZpoolCapacityWarning', level: 'INFO' });
+    rows['alertclasses.config'] = { id: 1, classes: { DiskTemperature: { policy: 'HOURLY' } } };
+    await alertClassSet.execute(ctx, { class: 'ZpoolCapacityWarning', level: 'INFO' });
+    expect(call).toHaveBeenLastCalledWith('alertclasses.update', [
+      { classes: { DiskTemperature: { policy: 'HOURLY' }, ZpoolCapacityWarning: { level: 'INFO' } } },
+    ]);
+  });
+
+  it('sends nothing where the read in execute fails or answers no map', async () => {
+    const failed = system(stored(), undefined, { ['alertclasses.config']: new Error('reset by peer') });
+    await expect(alertClassSet.execute(failed.ctx, { class: 'SMARTError', level: 'INFO' })).rejects.toThrow(
+      /alertclasses.config failed: reset by peer.*nothing was sent/,
+    );
+    expect(failed.call).not.toHaveBeenCalledWith('alertclasses.update', expect.anything());
+
+    const empty = system(null);
+    await expect(alertClassSet.execute(empty.ctx, { class: 'SMARTError', level: 'INFO' })).rejects.toThrow(/nothing was sent/);
+    expect(empty.call).not.toHaveBeenCalledWith('alertclasses.update', expect.anything());
+  });
+
+  it('reports the before and after states, reading after off the response', async () => {
+    expect(await alertClassSet.execute(system().ctx, { class: 'SMARTError', level: 'CRITICAL' })).toEqual({
+      class: 'SMARTError',
+      requested: { level: 'CRITICAL' },
+      before: { stored: true, level: 'ERROR', policy: 'DAILY', proactive_support: true },
+      after: { stored: true, level: 'CRITICAL', policy: 'DAILY', proactive_support: true },
+      confirmed: true,
+    });
+  });
+
+  it('reports confirmed false where the response holds something other than what was sent', async () => {
+    const update = { id: 1, classes: { SMARTError: { level: 'ERROR', policy: 'DAILY' } } };
+    expect(
+      await alertClassSet.execute(system(stored(), update).ctx, { class: 'SMARTError', level: 'CRITICAL' }),
+    ).toMatchObject({ after: { stored: true, level: 'ERROR' }, confirmed: false });
+    const dropped = { id: 1, classes: {} };
+    expect(
+      await alertClassSet.execute(system(stored(), dropped).ctx, { class: 'SMARTError', level: 'CRITICAL' }),
+    ).toMatchObject({ after: { stored: false, level: null, policy: null }, confirmed: false });
+  });
+
+  it('reports confirmed null where the response carries no readable map or field', async () => {
+    expect(
+      await alertClassSet.execute(system(stored(), null).ctx, { class: 'SMARTError', level: 'CRITICAL' }),
+    ).toMatchObject({
+      after: { stored: null, level: null, policy: null, proactive_support: null },
+      confirmed: null,
+    });
+    const unreadable = { id: 1, classes: { SMARTError: { level: 3 } } };
+    expect(
+      await alertClassSet.execute(system(stored(), unreadable).ctx, { class: 'SMARTError', level: 'CRITICAL' }),
+    ).toMatchObject({ after: { stored: true, level: null }, confirmed: null });
+  });
+
+  it('confirms a reset by the class being absent from the response, and not otherwise', async () => {
+    expect(await alertClassSet.execute(system().ctx, { class: 'SMARTError', reset: true })).toEqual({
+      class: 'SMARTError',
+      requested: { reset: true },
+      before: { stored: true, level: 'ERROR', policy: 'DAILY', proactive_support: true },
+      after: { stored: false, level: null, policy: null, proactive_support: null },
+      confirmed: true,
+    });
+    const kept = { id: 1, classes: stored() };
+    expect(await alertClassSet.execute(system(stored(), kept).ctx, { class: 'SMARTError', reset: true })).toMatchObject({
+      after: { stored: true },
+      confirmed: false,
+    });
+  });
+
+  it('executes only against a confirmation token minted from its own plan', async () => {
+    const { ctx, call } = system();
+    const registry = new SystemRegistry();
+    registry.add(ctx.system);
+    const catalog = new ToolCatalog();
+    catalog.register(alertClassSet);
+    const confirmations = new ConfirmationService();
+    const executor = new ToolExecutor({ catalog, registry, confirmations });
+    const args = { class: 'SMARTError', policy: 'NEVER' };
+
+    const first = await executor.execute('alert_class_set', args);
+    expect(first.type).toBe('PLAN');
+    expect(call).not.toHaveBeenCalledWith('alertclasses.update', expect.anything());
+
+    await expect(executor.execute('alert_class_set', { ...args, confirmation_token: 'forged' })).rejects.toThrow();
+    expect(call).not.toHaveBeenCalledWith('alertclasses.update', expect.anything());
+
+    const token = confirmations.mint(first.type === 'PLAN' ? first.key : '');
+    const confirmed = await executor.execute('alert_class_set', { ...args, confirmation_token: token });
+    expect(confirmed.type).toBe('RESULTS');
+    expect(call).toHaveBeenCalledWith('alertclasses.update', expect.anything());
+  });
+
+  it('is pointed at from alert_settings and alerts_dismiss', () => {
+    expect(alertSettings.description).toContain('`alert_class_set` changes one');
+    expect(alertsDismiss.description).toContain('`alert_class_set` changes them');
   });
 });
