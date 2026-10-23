@@ -1728,9 +1728,12 @@ const UPDATE_APPLY_GUIDANCE =
   'read from `boot.environment.query` WHEN THE WATCH ENDS, NOT WHEN THE INSTALL DOES. Each is null where it was ' +
   'not established — the read failed (`environments_read_error` says why), no environment or more than one was ' +
   'marked, or an entry could not be read — and a null is never "none". `next_boot_changes_environment` is true ' +
-  'where both are known and differ, which is the installed update waiting for a restart; false where they are ' +
-  'the same, which AFTER A JOB THAT SUCCEEDED means the next boot does NOT run the update; and null wherever ' +
-  'either is null. Read before the job has ended it describes the system part-way through, not the outcome. ' +
+  'where both are known and differ, which means ONLY that the next boot runs a different environment from the ' +
+  'one running now: WHETHER THAT ENVIRONMENT IS THIS UPDATE\'S IS NOT ESTABLISHED, since nothing was read ' +
+  'before the call and an environment marked earlier reads the same, so compare `active_on_reboot` with the ' +
+  'target version the plan named. It is false where they are the same, which AFTER A JOB THAT SUCCEEDED means ' +
+  'the next boot does NOT run the update, and null wherever either is null. Read before the job has ended it ' +
+  'describes the system part-way through, not the outcome. ' +
   '`system_reboot_info` reports whether the system says it needs restarting.';
 
 export const systemUpdateApply: MutatingTool = {
