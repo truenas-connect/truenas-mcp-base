@@ -52,11 +52,11 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `user_set_locked`, `dataset_set_quota`, `pool_device_set_online`,
   `dataset_set_property`, `dataset_create`, `dataset_rename`, `disk_identify`,
   `certificate_csr_create`, `alert_class_set`, `app_upgrade`, `app_rollback`,
-  `vm_create` —
+  `vm_create`, `vm_disk_image_import` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop`, `container_restart`,
-  `certificate_csr_create`, `app_upgrade` and `app_rollback` the ten that start
-  a background job,
+  `certificate_csr_create`, `app_upgrade`, `app_rollback` and
+  `vm_disk_image_import` the eleven that start a background job,
   which each watches for a bounded time and then reports on rather than waiting
   out — and `container_start` the one whose answer depends on the version it is
   talking to, a job on TrueNAS 25.10 and a synchronous call on 26 and later,
@@ -95,6 +95,15 @@ confirmation UX, audit sinks) enters through injected interfaces.
   after the machine is made is reported, with `complete` false, rather than
   thrown or rolled back, since nothing here deletes a VM or a zvol. The NIC's
   MAC is read back off the answer.
+  `vm_disk_image_import` converts a qcow2, qed, raw, vdi, vhdx or vmdk image
+  already on the system into a new zvol. The middleware converts only into a
+  zvol that exists, so the tool makes it first with `pool.dataset.create` and
+  then starts `vm.device.convert`, building `source` and `destination` itself.
+  The caller gives the zvol's size, because the image's virtual size is not
+  readable on this API surface; a zvol smaller than a raw image fails the
+  plan where the image's size was read, since there the file size is the
+  virtual size. A conversion that fails after the zvol is made is reported with
+  the zvol named, and the zvol is not deleted.
   `snapshot_clone` is the additive route
   back to a snapshot's data: it deletes nothing and modifies no dataset that
   exists, which is what lets the catalog decline the rollback that answers the
