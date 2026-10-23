@@ -31,6 +31,7 @@ import { fleetComplianceReport, fleetHealthRollup, haStatus } from '@/tools/flee
 import { networkConfig, networkInterfaces } from '@/tools/network';
 import { nfsClients } from '@/tools/nfs';
 import {
+  poolDeviceSetOnline,
   poolResilverConfig,
   poolScrubTaskCreate,
   poolScrubTasksList,
@@ -188,6 +189,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(userCreate);
   catalog.register(userSetLocked);
   catalog.register(datasetSetQuota);
+  catalog.register(poolDeviceSetOnline);
   return catalog;
 }
 
@@ -234,6 +236,7 @@ export {
   nvmeofList,
   nvmeofSubsystemCreate,
   nvmeofSubsystemUpdate,
+  poolDeviceSetOnline,
   poolResilverConfig,
   poolScrubTaskCreate,
   poolScrubTasksList,

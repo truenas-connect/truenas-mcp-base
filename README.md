@@ -49,7 +49,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `smb_share_create`, `smb_share_update`, `nfs_share_create`,
   `nfs_share_update`, `iscsi_target_create`, `iscsi_target_update`,
   `nvmeof_subsystem_create`, `nvmeof_subsystem_update`, `user_create`,
-  `user_set_locked`, `dataset_set_quota` —
+  `user_set_locked`, `dataset_set_quota`, `pool_device_set_online` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop` and `container_restart` the seven that
   start a background job,
@@ -132,6 +132,17 @@ confirmation UX, audit sinks) enters through injected interfaces.
   five cron fields and stated in the plan exactly as sent, and `threshold`
   carries no unit because none is reported. Nothing here starts a scrub now or
   deletes a scrub task.
+  `pool_device_set_online` takes one device in a data pool offline or brings it
+  back, named by the pool's name and the `disk` `storage_pool_topology`
+  reports. Taking a device offline is refused, at plan time and again when the
+  call is made, wherever its vdev would be left unable to serve its data — a
+  striped `data`, `special` or `dedup` device, the last ONLINE member of a
+  mirror, a RAIDZ or dRAID member past its parity — and wherever that could not
+  be read, or while a resilver is running on the pool; a `log`, `cache` or
+  `spare` device is not refused. Its plan states the vdev's type and every
+  member's state, and that bringing a device online does not repair it, saying
+  whether a resilver follows. It does not replace or detach a
+  device.
   `share_set_enabled` switches one SMB share or NFS export on or off, named by
   `protocol` and `id` together as `shares_list` reports them, and is the first
   mutating tool a `Sharing` credential reaches without full access. Disabling a
