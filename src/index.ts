@@ -95,6 +95,7 @@ export {
   listDatasets,
   quotaReport,
   datasetSetQuota,
+  datasetSetProperty,
   datasetPermissions,
   systemDatasetConfig,
   disksList,

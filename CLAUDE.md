@@ -2935,6 +2935,30 @@ The read is plan-time only and is not a step, as `snapshots_create`'s is
 (#119). `execute` makes one call, and the result reads the limits off the
 updated dataset it answers with (#121).
 
+### An input enum is a `Record` over the declared union, and a list the system owns is read (#190)
+
+`dataset_set_property` validates a value against the union the update declares
+for that property, written as a `Record<union, true>` per property. That is
+exhaustive both ways: a value the client adds or drops fails to compile, rather
+than being silently refused or accepted. The union is the oldest surface's
+(#101), so a newer system may accept a value this refuses. For a write that is
+the conservative direction. `recordsize` is declared a plain `string`, so there
+is no union to check against. It is checked against the system's own
+`pool.dataset.recordsize_choices` instead. A list that could not be read refuses
+the plan, because a size would otherwise reach approval unchecked.
+
+**A property whose type does not state that it accepts `INHERIT` is
+override-only.** Every enumerated property here declares `INHERIT` in its union.
+`recordsize`'s `string` says nothing either way, so `INHERIT` is refused for it.
+That is #102's rule about an unstated meaning, applied to an input.
+
+**The state is a value AND a source, and both are compared.** The same value
+inherited and set locally are different states: setting it makes it local, and
+INHERIT is what undoes that. So the plan's "changes nothing" needs both to
+match, `changed` compares both pairs, and `confirmed` for an override needs
+source `LOCAL`. The source names (`LOCAL`, `INHERITED`, `DEFAULT`) are ZFS's and
+not declared by the surface, so the guidance marks them `(unconfirmed)`.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

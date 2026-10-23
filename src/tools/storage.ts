@@ -8,6 +8,7 @@ import {
   errorText,
   numberOrNull,
   recordOrNull,
+  textList,
   textOrNull,
 } from '@/tools/common';
 
@@ -1155,25 +1156,50 @@ function limitSentence(
   );
 }
 
-/** The dataset row as the plan reads it, matched by id on the response (#153). */
-async function readQuotaDataset(ctx: ToolContext, dataset: string): Promise<Record<string, unknown>> {
-  let rows: unknown[];
+/**
+ * The options a one-dataset read is sent with: named by id, so the walk is off —
+ * `snapshots.ts`'s existence read — and only the properties the caller reports.
+ * One function for the read and for any plan step naming it, so the two cannot
+ * drift apart.
+ */
+function datasetReadOptions(properties: string[]): { extra: Record<string, unknown> } {
+  return { extra: { retrieve_children: false, properties } };
+}
+
+/**
+ * The one dataset named, matched by id on the response (#153), or null where
+ * the system listed none that was. A failed read rejects.
+ */
+async function datasetRow(
+  ctx: ToolContext,
+  dataset: string,
+  properties: string[],
+): Promise<Record<string, unknown> | null> {
+  const rows = await firstValueFrom(
+    // The filter is inlined so the call's own parameter types apply, as above.
+    ctx.system.client.api.query('pool.dataset.query', [['id', '=', dataset]], datasetReadOptions(properties)),
+  );
+  return rows.map(recordOrNull).find((held) => held !== null && textOrNull(held['id']) === dataset) ?? null;
+}
+
+/**
+ * The dataset row as a plan reads it, failing the plan where it could not be
+ * read or is not there.
+ */
+async function readPlannedDataset(
+  ctx: ToolContext,
+  dataset: string,
+  properties: string[],
+): Promise<Record<string, unknown>> {
+  let row: Record<string, unknown> | null;
   try {
-    rows = await firstValueFrom(
-      // Inlined so the call's own parameter types apply, as above. Named by id,
-      // so the walk is off — `snapshots.ts`'s existence read — and the four
-      // properties are `datasets_quota_report`'s.
-      ctx.system.client.api.query('pool.dataset.query', [['id', '=', dataset]], {
-        extra: { retrieve_children: false, properties: ['used', 'referenced', 'quota', 'refquota'] },
-      }),
-    );
+    row = await datasetRow(ctx, dataset, properties);
   } catch (reason) {
     throw new Error(
       `Dataset "${dataset}" could not be read (pool.dataset.query failed: ${errorText(reason)}), so nothing is planned`,
     );
   }
-  const row = rows.map(recordOrNull).find((held) => held !== null && textOrNull(held['id']) === dataset);
-  if (row === undefined || row === null) {
+  if (row === null) {
     throw new Error(
       `Dataset "${dataset}" does not exist on this system — \`storage_list_datasets\` reports each ` +
         "dataset's `id`, which is the name this takes",
@@ -1267,7 +1293,8 @@ export const datasetSetQuota: MutatingTool = {
   async plan(ctx, rawArgs): Promise<PlanStep[]> {
     const request = parseQuotaRequest(rawArgs);
     const { dataset, limits } = request;
-    const row = await readQuotaDataset(ctx, dataset);
+    // The four properties are `datasets_quota_report`'s.
+    const row = await readPlannedDataset(ctx, dataset, ['used', 'referenced', 'quota', 'refquota']);
     // The middleware refuses these limits on a volume, so the plan does too
     // (#161). An unreadable type does not refuse anything (#154); it is stated.
     const type = textOrNull(row['type']);
@@ -1319,6 +1346,426 @@ export const datasetSetQuota: MutatingTool = {
       refquota_bytes: refquota,
       referenced_bytes: held === null ? null : propertyBytes(held['referenced']),
       confirmed: agreement(sent, { quota, refquota }),
+    };
+  },
+};
+
+/** The update's data argument, typed off the call (#91). */
+type DatasetUpdate = CallParams<ApiSurface, 'pool.dataset.update'>[1];
+
+/**
+ * The properties `dataset_set_property` sets. The test for a place here is that
+ * changing it can neither lose nor expose data, and setting it back undoes it.
+ * `readonly` is disruptive — writers start failing — and passes both, so it is
+ * in; `sync`, `deduplication`, `checksum`, `copies`, `acltype` and `aclmode` fail
+ * one or the other and are named as excluded in the description (#102).
+ */
+const SETTABLE_PROPERTIES = [
+  'compression',
+  'atime',
+  'recordsize',
+  'snapdir',
+  'exec',
+  'readonly',
+] as const satisfies readonly (keyof DatasetUpdate)[];
+
+type SettableProperty = (typeof SETTABLE_PROPERTIES)[number];
+
+/** The properties whose values are a declared union rather than a system's list. */
+type EnumProperty = Exclude<SettableProperty, 'recordsize'>;
+
+/**
+ * Every value the update declares for each enumerated property, `INHERIT`
+ * included. A `Record` over the declared union, so a value the client adds or
+ * drops fails to compile here rather than being refused or accepted silently —
+ * and the union is the OLDEST surface's (#101), so a newer system may accept a
+ * value this list refuses. That is the conservative direction for a write.
+ */
+const DECLARED_VALUES: { [P in EnumProperty]: Record<NonNullable<DatasetUpdate[P]>, true> } = {
+  compression: {
+    'ON': true,
+    'OFF': true,
+    'LZ4': true,
+    'GZIP': true,
+    'GZIP-1': true,
+    'GZIP-9': true,
+    'ZSTD': true,
+    'ZSTD-FAST': true,
+    'ZLE': true,
+    'LZJB': true,
+    'ZSTD-1': true,
+    'ZSTD-2': true,
+    'ZSTD-3': true,
+    'ZSTD-4': true,
+    'ZSTD-5': true,
+    'ZSTD-6': true,
+    'ZSTD-7': true,
+    'ZSTD-8': true,
+    'ZSTD-9': true,
+    'ZSTD-10': true,
+    'ZSTD-11': true,
+    'ZSTD-12': true,
+    'ZSTD-13': true,
+    'ZSTD-14': true,
+    'ZSTD-15': true,
+    'ZSTD-16': true,
+    'ZSTD-17': true,
+    'ZSTD-18': true,
+    'ZSTD-19': true,
+    'ZSTD-FAST-1': true,
+    'ZSTD-FAST-2': true,
+    'ZSTD-FAST-3': true,
+    'ZSTD-FAST-4': true,
+    'ZSTD-FAST-5': true,
+    'ZSTD-FAST-6': true,
+    'ZSTD-FAST-7': true,
+    'ZSTD-FAST-8': true,
+    'ZSTD-FAST-9': true,
+    'ZSTD-FAST-10': true,
+    'ZSTD-FAST-20': true,
+    'ZSTD-FAST-30': true,
+    'ZSTD-FAST-40': true,
+    'ZSTD-FAST-50': true,
+    'ZSTD-FAST-60': true,
+    'ZSTD-FAST-70': true,
+    'ZSTD-FAST-80': true,
+    'ZSTD-FAST-90': true,
+    'ZSTD-FAST-100': true,
+    'ZSTD-FAST-500': true,
+    'ZSTD-FAST-1000': true,
+    'INHERIT': true,
+  },
+  atime: { ON: true, OFF: true, INHERIT: true },
+  snapdir: { DISABLED: true, VISIBLE: true, HIDDEN: true, INHERIT: true },
+  exec: { ON: true, OFF: true, INHERIT: true },
+  readonly: { ON: true, OFF: true, INHERIT: true },
+};
+
+/** ZFS sets these on a filesystem only; a volume has none of them. */
+const FILESYSTEM_ONLY: ReadonlySet<SettableProperty> = new Set(['atime', 'recordsize', 'snapdir', 'exec']);
+
+/** The two properties whose change reaches only blocks written afterwards. */
+const NEW_WRITES_ONLY: ReadonlySet<SettableProperty> = new Set(['compression', 'recordsize']);
+
+/**
+ * The sources ZFS reports for a value this dataset does not set itself. These
+ * are ZFS's own source names, not something this API surface declares — the
+ * client types `source` a plain string — so the reading is (unconfirmed).
+ */
+const NOT_LOCAL_SOURCES: ReadonlySet<string> = new Set(['INHERITED', 'DEFAULT']);
+
+interface PropertyRequest {
+  dataset: string;
+  property: SettableProperty;
+  value: string;
+}
+
+function parsePropertyRequest(args: Record<string, unknown>): PropertyRequest {
+  const dataset = args['dataset'];
+  if (typeof dataset !== 'string' || dataset === '') {
+    throw new Error('"dataset" is required and must be a dataset name, such as "tank/media"');
+  }
+  const property = args['property'];
+  if (typeof property !== 'string' || !(SETTABLE_PROPERTIES as readonly string[]).includes(property)) {
+    throw new Error(
+      `"property" must be one of ${SETTABLE_PROPERTIES.join(', ')}; sync, deduplication, checksum, copies, ` +
+        'acltype and aclmode are deliberately not set by this tool',
+    );
+  }
+  const value = args['value'];
+  if (typeof value !== 'string' || value === '') {
+    throw new Error('"value" is required and must be a value for the property, or INHERIT');
+  }
+  const settable = property as SettableProperty;
+  if (settable === 'recordsize') {
+    if (value === 'INHERIT') {
+      throw new Error(
+        '`recordsize` is override-only here: the API declares it a plain string and does not state that it ' +
+          'accepts INHERIT, so pass a size from the system\'s own record size choices',
+      );
+    }
+  } else if (!Object.hasOwn(DECLARED_VALUES[settable], value)) {
+    throw new Error(
+      `"${value}" is not a value of \`${settable}\`; it accepts ${Object.keys(DECLARED_VALUES[settable]).join(', ')}`,
+    );
+  }
+  return { dataset, property: settable, value };
+}
+
+/**
+ * The update's params. The value was checked against the property's declared
+ * union by the parse, or against the system's own list by the plan, and a
+ * computed key cannot carry that to the compiler — hence the one cast.
+ */
+function propertyUpdateParams(request: PropertyRequest): CallParams<ApiSurface, 'pool.dataset.update'> {
+  return [request.dataset, { [request.property]: request.value } as DatasetUpdate];
+}
+
+/** A property's value and source as the system spelled them; null where either could not be read. */
+interface PropertyReading {
+  value: string | null;
+  source: string | null;
+}
+
+/**
+ * The value is the property object's `value`, not its `parsed`: it is a string
+ * on every property here, and passed through as the system spelled it, so a
+ * value this catalog does not list is still reported rather than nulled.
+ */
+function propertyReading(row: Record<string, unknown> | null, property: SettableProperty): PropertyReading {
+  const held = row === null ? null : recordOrNull(row[property]);
+  return {
+    value: held === null ? null : textOrNull(held['value']),
+    source: held === null ? null : textOrNull(held['source']),
+  };
+}
+
+/**
+ * Whether a reading is the state a request asks for: the value set on this
+ * dataset itself, or, for INHERIT, a value it does not set. False wherever what
+ * was read says otherwise; null where it does not settle it either way.
+ */
+function readingMatches(requested: string, reading: PropertyReading): boolean | null {
+  const source = reading.source?.toUpperCase() ?? null;
+  if (requested === 'INHERIT') {
+    if (source === null) return null;
+    if (NOT_LOCAL_SOURCES.has(source)) return true;
+    return source === 'LOCAL' ? false : null;
+  }
+  // ZFS reports these values in lower case where the API takes upper case, so
+  // the comparison ignores letter case; the value is still reported as spelled.
+  if (reading.value !== null && reading.value.toUpperCase() !== requested.toUpperCase()) return false;
+  if (source !== null && source !== 'LOCAL') return false;
+  return reading.value === null || source === null ? null : true;
+}
+
+function readingText(reading: PropertyReading): string {
+  const value = reading.value ?? 'a value that could not be read';
+  const source = reading.source === null ? 'a source that could not be read' : `source ${reading.source}`;
+  return `${value} (${source})`;
+}
+
+/**
+ * Refuses a `recordsize` the system does not offer, reading the system's own
+ * list rather than one written here. Plan-time only and not a step (#119). A
+ * list that could not be read refuses too: the size would otherwise reach
+ * approval unchecked, and nothing is lost by planning again.
+ */
+async function checkRecordsize(ctx: ToolContext, row: Record<string, unknown>, request: PropertyRequest): Promise<void> {
+  const pool = textOrNull(row['pool']);
+  let choices: string[] | null;
+  try {
+    choices = textList(
+      await firstValueFrom(ctx.system.client.api.call('pool.dataset.recordsize_choices', pool === null ? [] : [pool])),
+    );
+  } catch (reason) {
+    throw new Error(
+      `The record sizes this system accepts could not be read (pool.dataset.recordsize_choices failed: ` +
+        `${errorText(reason)}), so "${request.value}" was not checked and nothing is planned`,
+    );
+  }
+  if (choices === null) {
+    throw new Error(
+      'The record sizes this system accepts could not be read (pool.dataset.recordsize_choices answered with ' +
+        `something that is not a list), so "${request.value}" was not checked and nothing is planned`,
+    );
+  }
+  if (!choices.includes(request.value)) {
+    throw new Error(
+      `"${request.value}" is not a record size this system accepts for dataset "${request.dataset}"; it accepts ` +
+        `${choices.length === 0 ? 'none it listed' : choices.join(', ')}`,
+    );
+  }
+}
+
+/** What the plan says the change does, beyond setting the value. */
+function propertyEffect(request: PropertyRequest, current: PropertyReading): string {
+  const { property, value } = request;
+  let effect = '';
+  if (readingMatches(value, current) === true) {
+    effect +=
+      value === 'INHERIT'
+        ? ' It already inherits, so this changes nothing and is not an error.'
+        : ' It is already set to that on this dataset, so this changes nothing and is not an error.';
+  }
+  if (NEW_WRITES_ONLY.has(property)) {
+    effect +=
+      ` EXISTING DATA IS NOT REWRITTEN: only blocks written after the change use the new \`${property}\`, and ` +
+      'what is already on the dataset keeps the one it was written with.';
+  }
+  if (property === 'readonly' && value === 'ON') {
+    effect +=
+      ' WRITES TO THE DATASET WILL FAIL once this is applied — every application, share and client writing to ' +
+      'it gets an error — until `readonly` is set back.';
+  } else if (property === 'readonly' && value === 'INHERIT') {
+    effect +=
+      ' If the parent is read-only, WRITES TO THE DATASET WILL FAIL once this is applied; the parent\'s ' +
+      'value is not read here.';
+  }
+  return effect;
+}
+
+const DATASET_SET_PROPERTY_GUIDANCE =
+  '`dataset` and `property` are as named, and `requested` is the value passed, `INHERIT` included. ' +
+  '`previous_value` and `previous_source` are the property as a read made immediately before the call ' +
+  'reported it; `resulting_value` and `resulting_source` are as the response the update itself answered ' +
+  'with states it — never copied from the request. A value is passed through as the system spelled it, ' +
+  'including one this catalog does not list, and null is a value that could not be read, NEVER "unset". ' +
+  'A source is where ZFS says the value comes from — `LOCAL` set on this dataset, `INHERITED` from an ' +
+  'ancestor, `DEFAULT` from ZFS itself — as the system spelled it; those names are ZFS\'s, not declared ' +
+  'by this API surface (unconfirmed). `lookup` is what the read before the call did: `FOUND`, `NOT_FOUND` ' +
+  '(it listed no such dataset) or `UNREADABLE`, with the reason in `lookup_error`; the call is made ' +
+  'whichever it was. `changed` compares the value and source before with the value and source after, ' +
+  'and is null where any of the four could not be read. `confirmed` is whether the response shows the ' +
+  'state asked for — the value, compared ignoring letter case, with source `LOCAL`; or for INHERIT, a ' +
+  'source of `INHERITED` or `DEFAULT`. FALSE IS NOT A SUCCESS: the call did not reject and the property ' +
+  'is not in the state asked for. Null is a response that settles it neither way — a value or source ' +
+  'that could not be read, or a source other than those three.';
+
+export const datasetSetProperty: MutatingTool = {
+  name: 'dataset_set_property',
+  description:
+    'Sets one ZFS property on one dataset to a value, or back to inheriting it, on this TrueNAS system. ' +
+    'Two-phase: called without a confirmation_token it returns a plan for user approval; called with one ' +
+    "it sends the change. `dataset` is the dataset's full name, as `storage_list_datasets` reports it in " +
+    '`id`; a name the system does not list fails the plan, naming it. `property` is one of `compression`, ' +
+    '`atime`, `recordsize`, `snapdir`, `exec` and `readonly` — properties whose change can neither lose ' +
+    'nor expose data, and is undone by setting it back. DELIBERATELY NOT SETTABLE HERE: `sync` (DISABLED ' +
+    'acknowledges writes before they are on stable storage, so a power loss loses data a client was told ' +
+    'was written), `deduplication` (its memory cost, and data written while it was on stays deduplicated ' +
+    'after it is turned off), `checksum` (OFF disables ZFS\'s integrity check), `copies` (it affects new ' +
+    'writes only), and `acltype` and `aclmode` (they change how every permission on the dataset is ' +
+    'interpreted). Quotas are `dataset_set_quota`; reservations and user properties are set by no tool ' +
+    'here. `value` is one of the values the API declares for that property, or `INHERIT`, which clears ' +
+    "this dataset's own setting so the value comes from its nearest ancestor that sets one, or from ZFS's " +
+    'default; anything else fails the plan, naming the accepted values. `recordsize` takes a size from ' +
+    "the system's own record size choices, checked when the plan is made, and IS OVERRIDE-ONLY: the API " +
+    'declares it a plain string and does not state that it accepts INHERIT, so INHERIT is refused for it. ' +
+    '`atime`, `recordsize`, `snapdir` and `exec` are filesystem properties, and a volume fails the plan ' +
+    'for them. THE PLAN STATES THE CURRENT VALUE AND SOURCE AND THE VALUE REQUESTED, so wherever the ' +
+    'current value could be read the call that undoes this is in the plan — a value whose source was ' +
+    'INHERITED or DEFAULT is put back by INHERIT, not by setting that value, which would set it locally. ' +
+    '`compression` and `recordsize` DO NOT REWRITE EXISTING DATA: only blocks written afterwards use the ' +
+    'new setting. `readonly` ON MAKES EVERY WRITE TO THE DATASET FAIL until it is set back. The current ' +
+    'value is read when the plan is made and again immediately before the call, for the result; the ' +
+    'call is made whatever that second read finds. Setting a value the dataset already holds locally, or ' +
+    'INHERIT on one that already inherits, is not an error. `destructiveness` is `reversible`: nothing is ' +
+    'deleted, and setting the property back undoes the setting — but blocks written while a ' +
+    '`compression` or `recordsize` was in force keep it, and nothing here rewrites them. ' +
+    DATASET_SET_PROPERTY_GUIDANCE,
+  resultGuidance: DATASET_SET_PROPERTY_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      dataset: {
+        type: 'string',
+        description: 'The dataset\'s full name, e.g. "tank/media", as `storage_list_datasets` reports it in `id`.',
+      },
+      property: {
+        type: 'string',
+        enum: [...SETTABLE_PROPERTIES],
+        description: 'The one ZFS property to set.',
+      },
+      value: {
+        type: 'string',
+        description:
+          'The new value as the API spells it — e.g. LZ4, ZSTD or OFF for `compression`; ON or OFF for ' +
+          '`atime`, `exec` and `readonly`; DISABLED, VISIBLE or HIDDEN for `snapdir`; a size such as 128K ' +
+          'for `recordsize` — or INHERIT, which every property here but `recordsize` accepts.',
+      },
+    },
+    required: ['dataset', 'property', 'value'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // One property on one dataset, and the plan names the value to send back.
+  // Nothing is deleted; what a setting does to blocks already written is the
+  // description's to state (#122).
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const { dataset, property, value } = parsePropertyRequest(rawArgs);
+    return { dataset, property, value };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const request = parsePropertyRequest(rawArgs);
+    const { dataset, property, value } = request;
+    const row = await readPlannedDataset(ctx, dataset, [property]);
+    // The middleware refuses filesystem properties on a volume, so the plan
+    // does too (#161). An unreadable type does not refuse anything (#154).
+    const type = textOrNull(row['type']);
+    let typeNote = '';
+    if (FILESYSTEM_ONLY.has(property)) {
+      if (type === 'VOLUME') {
+        throw new Error(
+          `Dataset "${dataset}" is a volume, and \`${property}\` is a filesystem property that ZFS does not ` +
+            'set on one',
+        );
+      }
+      if (type === null) {
+        typeNote =
+          ` Whether this dataset is a filesystem could not be read; ZFS does not set \`${property}\` on a ` +
+          'volume, so the call may be rejected.';
+      }
+    }
+    if (property === 'recordsize') await checkRecordsize(ctx, row, request);
+    const current = propertyReading(row, property);
+    const target =
+      value === 'INHERIT'
+        ? "INHERIT: clear this dataset's own setting, so the value comes from its nearest ancestor that sets " +
+          "one, or from ZFS's default, which this plan does not read"
+        : value;
+    return [
+      {
+        method: 'pool.dataset.query',
+        params: [[['id', '=', dataset]], datasetReadOptions([property])],
+        description:
+          `Read dataset "${dataset}"'s \`${property}\`, to report its value and source as they were ` +
+          'immediately before the change. Changes nothing.',
+      },
+      {
+        method: 'pool.dataset.update',
+        params: propertyUpdateParams(request),
+        description:
+          `Set \`${property}\` on dataset "${dataset}". Now: ${readingText(current)}. Will be: ${target}.` +
+          `${typeNote}${propertyEffect(request, current)} The current value was read when this plan was made.`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const request = parsePropertyRequest(rawArgs);
+    const { dataset, property, value } = request;
+    // The read is caught rather than thrown and nothing branches on it: it
+    // describes the outcome, and failing here would throw away an approval
+    // already given for a change that is still safe to make (#119).
+    let before: Record<string, unknown> | null = null;
+    let lookupError: string | null = null;
+    try {
+      before = await datasetRow(ctx, dataset, [property]);
+    } catch (reason) {
+      lookupError = errorText(reason);
+    }
+    const updated: unknown = await firstValueFrom(
+      ctx.system.client.api.call('pool.dataset.update', propertyUpdateParams(request)),
+    );
+    const previous = propertyReading(before, property);
+    // The update answers with the updated dataset, so the outcome is read off
+    // that rather than echoed from the request (#121).
+    const resulting = propertyReading(recordOrNull(updated), property);
+    const readings = [previous.value, previous.source, resulting.value, resulting.source];
+    return {
+      dataset,
+      property,
+      requested: value,
+      lookup: lookupError !== null ? 'UNREADABLE' : before === null ? 'NOT_FOUND' : 'FOUND',
+      lookup_error: lookupError,
+      previous_value: previous.value,
+      previous_source: previous.source,
+      resulting_value: resulting.value,
+      resulting_source: resulting.source,
+      changed: readings.includes(null)
+        ? null
+        : previous.value !== resulting.value || previous.source !== resulting.source,
+      confirmed: readingMatches(value, resulting),
     };
   },
 };

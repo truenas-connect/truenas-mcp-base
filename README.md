@@ -49,7 +49,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `smb_share_create`, `smb_share_update`, `nfs_share_create`,
   `nfs_share_update`, `iscsi_target_create`, `iscsi_target_update`,
   `nvmeof_subsystem_create`, `nvmeof_subsystem_update`, `user_create`,
-  `user_set_locked`, `dataset_set_quota` —
+  `user_set_locked`, `dataset_set_quota`, `dataset_set_property` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop` and `container_restart` the seven that
   start a background job,
@@ -200,6 +200,17 @@ confirmation UX, audit sinks) enters through injected interfaces.
   fail. A volume is refused, since it has neither limit. It does not touch the quota
   alert thresholds, per-user or per-group quotas, reservations, or a volume's
   size.
+  `dataset_set_property` sets one of `compression`, `atime`, `recordsize`,
+  `snapdir`, `exec` and `readonly` on one dataset, or sets it back to
+  inheriting. Those are the properties whose change can neither lose nor expose
+  data and is undone by setting it back; `sync`, `deduplication`, `checksum`,
+  `copies`, `acltype` and `aclmode` are deliberately not settable. A value is
+  checked against the values the API declares for that property, and a
+  `recordsize` against the system's own list of sizes. `recordsize` cannot be
+  set to inherit, because the API does not say it accepts that. The plan states
+  the current value and where it comes from. It says that `compression` and
+  `recordsize` do not rewrite data already written, and that `readonly` on makes
+  writes fail. The result reports the value and source before and after.
   `container_list` and the three container power tools are the first family
   written against the client's `ops` layer rather than `api.call`, because every
   one of these operations changes SHAPE between TrueNAS versions and not just
