@@ -3124,6 +3124,37 @@ checking the app first would name a missing app instead of the stopped engine.
 A rollback version list that could not be read refuses
 instead, because the version would otherwise reach approval unchecked (#190).
 
+### Several mutating calls: the first one's failure throws, a later one's is data (#198)
+
+`vm_create` is the first tool whose `execute` makes more than one MUTATING call:
+`vm.create`, then one `vm.device.create` each for the disk, the NIC and the
+optional CDROM. **Only the first call's rejection fails the tool**, because
+until it answers nothing exists. After it, the machine exists. A device call
+that fails is listed in `failed_devices`, `complete` is false, the remaining
+devices are still attempted, and nothing is rolled back. No tool here deletes a
+VM or a zvol, and a cleanup that can itself fail would leave two unknowns
+instead of one partial result.
+
+**The plan-time checks exist to keep that partial case rare, not to rule it
+out.** Four refusals that can be read beforehand fail the PLAN, including where
+the read itself fails: a zvol name that is taken, a missing parent, an interface
+`interface.query` does not list, an ISO that does not stat. The middleware may
+refuse a device for other reasons this tool does not check, and those still
+arrive as partial results. A refusal
+at plan time costs a retry. The same refusal at execute time leaves a half-made
+machine. The pool's free space is the exception. It is a supporting read
+(#154), and a zvol larger than the free space is warned about rather than
+refused, because whether the zvol reserves its whole size is `(unconfirmed)`.
+
+**A step whose params need an id an earlier step creates names where it comes
+from**: `vm` is the text `(the id the vm.create call answers with)` rather than a
+number. The token binds the arguments rather than the plan (#181), so this costs
+nothing, and a guessed number would be a call the plan shows and `execute` does
+not make.
+
+`bytesText` and `DATASET_NAME_CHARS` moved from `storage.ts` to `common.ts`
+here, as the second family to state bytes in a plan and to name a new dataset.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

@@ -11,10 +11,13 @@ import {
 } from '@/catalog/tool';
 import {
   booleanOrNull,
+  bytesText,
+  DATASET_NAME_CHARS,
   errorText,
   numberOrNull,
   plural,
   recordOrNull,
+  refuseArgs,
   textOrNull,
   watchJob,
 } from '@/tools/common';
@@ -2908,6 +2911,671 @@ export const vmClone: MutatingTool = {
       new_vm_ids: appeared,
       clone_id: cloneId,
       clone_name: cloneId === null ? null : (resulting.listing?.get(cloneId) ?? null),
+    };
+  },
+};
+
+/**
+ * `vm_create`: one new libvirt-backed virtual machine on a new zvol, left
+ * stopped.
+ *
+ * ONE MACHINE, TWO TO FOUR CALLS. `vm.create` takes no devices on the surface
+ * this catalog is typed against; each device is its own `vm.device.create`,
+ * naming the machine by the id the first call answers with. So the plan names
+ * every call in the order `execute` makes it (#119) — the machine, the disk, the
+ * NIC and the optional CDROM — and each device step says that the id it carries
+ * does not exist until the first call has answered.
+ *
+ * PARTIAL FAILURE IS DATA, NOT AN EXCEPTION. Once `vm.create` has answered the
+ * machine exists, and a device call that fails after it leaves a machine with
+ * fewer devices than were asked for. The tool does not throw then and does not
+ * roll back: nothing here deletes a VM or a zvol (#153, #170), and a cleanup
+ * that can itself fail would turn one honest partial result into two unknowns.
+ * Every device call is made whatever the one before it answered, since none
+ * depends on another, and the result names what was made and what was not.
+ * Only a `vm.create` that rejects fails the tool, because then nothing exists.
+ *
+ * THE PLAN-TIME CHECKS ARE WHAT KEEP THAT PARTIAL CASE RARE. A device call the
+ * middleware would refuse for a reason readable beforehand — a zvol name that is
+ * taken, a parent that is not there, an interface the system does not have, an
+ * ISO that does not stat — fails the PLAN, naming it, so it never reaches
+ * approval as a call that would leave a half-made machine. They are plan-time
+ * only and not steps, as `dataset_create`'s are (#191).
+ *
+ * `autostart: false` AND `ensure_display_device: false` ARE ALWAYS SENT and
+ * neither is an argument. The first is "left stopped" applied to the next boot
+ * as well as to now. The second is because the middleware's default for it is
+ * not on the surface, and a display device carries a console password (#100)
+ * this catalog neither sets nor reports.
+ */
+
+/** The object `vm.create` takes, off the call (#91). */
+type VmCreateFields = CallParams<ApiSurface, 'vm.create'>[0];
+
+/** The object `vm.device.create` takes, off the call (#91). */
+type VmDeviceCreateFields = CallParams<ApiSurface, 'vm.device.create'>[0];
+
+type VmBootloader = NonNullable<VmCreateFields['bootloader']>;
+
+/**
+ * The bootloaders the create declares, as a `Record` over its union (#190), so
+ * a value the client adds or drops fails to compile rather than being silently
+ * accepted or refused here.
+ */
+const VM_BOOTLOADERS: Record<VmBootloader, true> = { UEFI: true, UEFI_CSM: true };
+
+/**
+ * The share of a pool a new zvol may leave free before the plan warns.
+ *
+ * A suggestion rather than a ZFS limit — the ticket names it as one — and the
+ * plan states it as a percentage of the pool's size as `storage_pool_status`
+ * reports it.
+ */
+const ZVOL_FREE_FLOOR = 0.2;
+
+/** {@link ZVOL_FREE_FLOOR} as the plan and the description spell it. */
+const ZVOL_FREE_FLOOR_PERCENT = `${ZVOL_FREE_FLOOR * 100}%`;
+
+/** What `vm_create` was asked to make. */
+interface VmCreateArgs {
+  name: string;
+  description: string | null;
+  vcpus: number;
+  cores: number;
+  threads: number;
+  /** Sent as given; see {@link vmMemorySentence} for why it carries no unit. */
+  memory: number;
+  bootloader: VmBootloader | null;
+  zvolName: string;
+  /** Bytes, on ZFS grounds (#96): a volume's size is counted in nothing else. */
+  zvolVolsize: number;
+  nicAttach: string;
+  isoPath: string | null;
+}
+
+/** A whole-number argument of 1 or more, with the default it takes where one exists. */
+function countArg(args: Record<string, unknown>, key: string, fallback: number | null): number {
+  const value = args[key];
+  if (value == null && fallback !== null) return fallback;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`"${key}" ${fallback === null ? 'is required and ' : ''}must be a whole number, 1 or more`);
+  }
+  return value;
+}
+
+/** A text argument, or null where an optional one was left out. Empty text is refused, not read as none. */
+function textArg(args: Record<string, unknown>, key: string, required: boolean): string | null {
+  const value = args[key];
+  if (value == null && !required) return null;
+  if (typeof value !== 'string' || value === '') {
+    throw new Error(`"${key}" ${required ? 'is required and ' : ''}must be non-empty text`);
+  }
+  return value;
+}
+
+/**
+ * The caller's arguments, or the error naming what is wrong with them.
+ *
+ * The fields the ticket puts out of scope are REFUSED BY NAME rather than left
+ * out of the schema alone: silently dropping one would let a caller believe it
+ * was applied (`refuseArgs`).
+ */
+function parseVmCreateArgs(args: Record<string, unknown>): VmCreateArgs {
+  refuseArgs(
+    args,
+    ['autostart', 'ensure_display_device'],
+    'this tool always sends false for it, so the machine is left stopped and no display device is asked for',
+  );
+  refuseArgs(
+    args,
+    [
+      'cpu_mode',
+      'cpu_model',
+      'cpuset',
+      'nodeset',
+      'pin_vcpus',
+      'command_line_args',
+      'trusted_platform_module',
+      'enable_secure_boot',
+    ],
+    'CPU mode and pinning, extra command-line arguments, secure boot and TPM are outside what this tool sets',
+  );
+  refuseArgs(
+    args,
+    ['devices', 'path', 'zvol', 'display', 'pptdev', 'usb'],
+    'the only devices made are one disk on a NEW zvol, one NIC and an optional CDROM; an existing zvol or ' +
+      'file as a disk, a display device and passthrough are not',
+  );
+  const name = textArg(args, 'name', true) as string;
+  const description = textArg(args, 'description', false);
+  const zvolName = textArg(args, 'zvol_name', true) as string;
+  const segments = zvolName.split('/');
+  if (segments.length < 2 || segments.includes('')) {
+    throw new Error(
+      `"${zvolName}" is not a zvol name under a parent: write the parent dataset's full name, a slash and the ` +
+        'new name, with no empty part, such as "tank/vms/runner-disk"',
+    );
+  }
+  const leaf = segments[segments.length - 1] as string;
+  if (!DATASET_NAME_CHARS.test(leaf)) {
+    throw new Error(
+      `"${leaf}" has a character ZFS does not accept in a dataset name; it accepts letters, digits, "_", "-", ` +
+        '".", ":" and space',
+    );
+  }
+  const bootloader = args['bootloader'];
+  if (bootloader != null && (typeof bootloader !== 'string' || !Object.hasOwn(VM_BOOTLOADERS, bootloader))) {
+    throw new Error(`"bootloader" must be one of ${Object.keys(VM_BOOTLOADERS).join(', ')}`);
+  }
+  const isoPath = textArg(args, 'iso_path', false);
+  if (isoPath !== null && !isoPath.startsWith('/')) {
+    throw new Error(`"iso_path" must be an absolute path on the system, such as "/mnt/tank/isos/installer.iso"`);
+  }
+  return {
+    name,
+    description,
+    vcpus: countArg(args, 'vcpus', null),
+    cores: countArg(args, 'cores', 1),
+    threads: countArg(args, 'threads', 1),
+    memory: countArg(args, 'memory', null),
+    bootloader: (bootloader as VmBootloader | null | undefined) ?? null,
+    zvolName,
+    zvolVolsize: countArg(args, 'zvol_volsize', null),
+    nicAttach: textArg(args, 'nic_attach', true) as string,
+    isoPath,
+  };
+}
+
+/** The arguments under their own names, for the confirmation token and the result. */
+function vmCreateRequested(args: VmCreateArgs): Record<string, unknown> {
+  return {
+    name: args.name,
+    description: args.description,
+    vcpus: args.vcpus,
+    cores: args.cores,
+    threads: args.threads,
+    memory: args.memory,
+    bootloader: args.bootloader,
+    zvol_name: args.zvolName,
+    zvol_volsize: args.zvolVolsize,
+    nic_attach: args.nicAttach,
+    iso_path: args.isoPath,
+  };
+}
+
+/**
+ * The params `vm.create` is made with, built once so the plan step names
+ * exactly the call `execute` makes. `description` and `bootloader` are left out
+ * where the caller gave none, since neither is declared nullable; the two
+ * falses are always present.
+ */
+function vmCreateParams(args: VmCreateArgs): CallParams<ApiSurface, 'vm.create'> {
+  return [
+    {
+      name: args.name,
+      ...(args.description === null ? {} : { description: args.description }),
+      vcpus: args.vcpus,
+      cores: args.cores,
+      threads: args.threads,
+      memory: args.memory,
+      ...(args.bootloader === null ? {} : { bootloader: args.bootloader }),
+      autostart: false,
+      ensure_display_device: false,
+    },
+  ];
+}
+
+/** The kinds of device this tool makes. */
+type NewDeviceKind = 'DISK' | 'NIC' | 'CDROM';
+
+/** One device `execute` adds, in the order it adds them. */
+interface NewDevice {
+  kind: NewDeviceKind;
+  attributes: VmDeviceCreateFields['attributes'];
+}
+
+/** The devices to add: a disk on a new zvol, a NIC, and a CDROM where an ISO was named. */
+function newDevices(args: VmCreateArgs): NewDevice[] {
+  const devices: NewDevice[] = [
+    {
+      kind: 'DISK',
+      attributes: { dtype: 'DISK', create_zvol: true, zvol_name: args.zvolName, zvol_volsize: args.zvolVolsize },
+    },
+    { kind: 'NIC', attributes: { dtype: 'NIC', nic_attach: args.nicAttach } },
+  ];
+  if (args.isoPath !== null) devices.push({ kind: 'CDROM', attributes: { dtype: 'CDROM', path: args.isoPath } });
+  return devices;
+}
+
+/** The params one device call is made with, once the machine's id is known. */
+function deviceParams(vm: number, device: NewDevice): CallParams<ApiSurface, 'vm.device.create'> {
+  return [{ vm, attributes: device.attributes }];
+}
+
+/**
+ * What a device step's params carry where `execute` will put the machine's id.
+ * The id does not exist when the plan is made, so the step says where it comes
+ * from rather than showing a number that would not be the one sent.
+ */
+const VM_ID_PENDING = '(the id the vm.create call answers with)';
+
+/**
+ * One dataset by name, matched by `id` on the response and not by the filter
+ * alone (#153): a dropped filter answers with every dataset, which a row count
+ * would read as "it exists". A failed read rejects.
+ */
+async function datasetNamed(ctx: ToolContext, name: string): Promise<Record<string, unknown> | null> {
+  const rows = await firstValueFrom(
+    ctx.system.client.api.query('pool.dataset.query', [['id', '=', name]], {
+      extra: { retrieve_children: false, properties: [] },
+    }),
+  );
+  return rows.map(recordOrNull).find((held) => held !== null && textOrNull(held['id']) === name) ?? null;
+}
+
+/** {@link datasetNamed}, failing the plan where the read itself failed. */
+async function plannedDatasetRead(
+  ctx: ToolContext,
+  name: string,
+  what: string,
+): Promise<Record<string, unknown> | null> {
+  try {
+    return await datasetNamed(ctx, name);
+  } catch (reason) {
+    throw new Error(
+      `${what} "${name}" could not be read (pool.dataset.query failed: ${errorText(reason)}), so nothing is planned`,
+    );
+  }
+}
+
+/**
+ * Fails the plan unless the zvol's parent is a filesystem that exists and the
+ * zvol's own name is free. An unreadable read refuses too, because the device
+ * call it guards comes AFTER the machine is made, and a refusal there is a
+ * half-made machine. An unreadable parent `type` does not refuse (#154); only a
+ * `VOLUME`, which ZFS holds no dataset under, does.
+ */
+async function checkNewZvol(ctx: ToolContext, zvolName: string): Promise<string> {
+  const parent = zvolName.slice(0, zvolName.lastIndexOf('/'));
+  const parentRow = await plannedDatasetRead(ctx, parent, 'Parent dataset');
+  if (parentRow === null) {
+    throw new Error(
+      `Parent dataset "${parent}" of zvol "${zvolName}" does not exist on this system, and this tool does not ` +
+        "create it — `storage_list_datasets` reports each dataset's `id`",
+    );
+  }
+  if (textOrNull(parentRow['type']) === 'VOLUME') {
+    throw new Error(`Parent dataset "${parent}" is a volume, and ZFS does not create a dataset under one`);
+  }
+  if ((await plannedDatasetRead(ctx, zvolName, 'Dataset')) !== null) {
+    throw new Error(
+      `A dataset named "${zvolName}" already exists on this system. This tool makes a NEW zvol and does not ` +
+        'attach an existing one, which would give it a second writer',
+    );
+  }
+  return parent;
+}
+
+/**
+ * Fails the plan unless the system lists a network interface by that name,
+ * which is what `nic_attach` takes and what `network_interfaces` reports as
+ * `name`. A listing that could not be read refuses, for {@link checkNewZvol}'s
+ * reason.
+ */
+async function checkNicAttach(ctx: ToolContext, nicAttach: string): Promise<void> {
+  let rows: unknown;
+  try {
+    rows = await firstValueFrom(ctx.system.client.api.query('interface.query'));
+  } catch (reason) {
+    throw new Error(
+      `The network interfaces could not be listed (interface.query failed: ${errorText(reason)}), so whether ` +
+        `"${nicAttach}" exists was not checked and nothing is planned`,
+    );
+  }
+  if (!Array.isArray(rows)) {
+    throw new Error(
+      'The network interfaces could not be listed (the system answered with something other than a list), so ' +
+        `whether "${nicAttach}" exists was not checked and nothing is planned`,
+    );
+  }
+  if (!rows.some((row) => textOrNull(recordOrNull(row)?.['name']) === nicAttach)) {
+    throw new Error(
+      `The system lists no network interface named "${nicAttach}" — \`network_interfaces\` reports each ` +
+        "interface's `name`, which is what `nic_attach` takes",
+    );
+  }
+}
+
+/**
+ * Fails the plan unless `filesystem.stat` reads the ISO path, and where it reads
+ * it as a directory. Answers the type the stat reported, null where it stated
+ * none this tool could read — which does not refuse, since the stat itself
+ * succeeded.
+ */
+async function checkIsoPath(ctx: ToolContext, isoPath: string): Promise<string | null> {
+  let answer: unknown;
+  try {
+    answer = await firstValueFrom(ctx.system.client.api.call('filesystem.stat', [isoPath]));
+  } catch (reason) {
+    throw new Error(
+      `The ISO path "${isoPath}" could not be read (filesystem.stat failed: ${errorText(reason)}), so nothing is ` +
+        'planned',
+    );
+  }
+  const type = textOrNull(recordOrNull(answer)?.['type']);
+  if (type === 'DIRECTORY') {
+    throw new Error(`The ISO path "${isoPath}" is a directory, and a CDROM device holds an image file`);
+  }
+  return type;
+}
+
+/** A pool's size and free space as `storage_pool_status` reads them, or why they were not read. */
+interface PoolSpace {
+  size: number | null;
+  free: number | null;
+  error: string | null;
+}
+
+/**
+ * The pool's space, as a SUPPORTING read: its failure does not fail the plan
+ * (#154), it is stated. The pool is matched by name on the response (#121).
+ */
+async function readPoolSpace(ctx: ToolContext, pool: string): Promise<PoolSpace> {
+  try {
+    const rows = await firstValueFrom(ctx.system.client.api.query('pool.query', [['name', '=', pool]]));
+    const row = rows.find((candidate) => textOrNull(candidate.name) === pool);
+    if (row === undefined) return { size: null, free: null, error: `the system listed no pool named "${pool}"` };
+    return { size: numberOrNull(row.size), free: numberOrNull(row.free), error: null };
+  } catch (reason) {
+    return { size: null, free: null, error: errorText(reason) };
+  }
+}
+
+/** Whether a zvol takes its whole size when it is made, which the plan cannot settle. */
+const ZVOL_RESERVATION_UNCONFIRMED =
+  'Whether a zvol made this way reserves its whole size at once or takes space as it is written is ' +
+  '(unconfirmed) here: nothing on this API says, and it was not read off a live system.';
+
+/**
+ * What the plan says about the zvol's size against the pool's free space.
+ *
+ * Larger than the free space is WARNED and not refused: whether it is refused
+ * turns on the reservation question above, and refusing on a guess is #120's
+ * defect pointing the other way. But it says what the refusal would cost, since
+ * it would land after the machine is made.
+ */
+function zvolSpaceSentence(pool: string, volsize: number, space: PoolSpace): string {
+  const asked = `The zvol is ${bytesText(volsize)}`;
+  if (space.error !== null || space.free === null) {
+    return (
+      `${asked}. THE FREE SPACE OF POOL "${pool}" COULD NOT BE READ ` +
+      `(${space.error ?? 'the system reported no `free` this tool could read'}), so whether it fits is NOT ` +
+      'established here.'
+    );
+  }
+  const against = `${asked}, against ${bytesText(space.free)} free on pool "${pool}".`;
+  if (volsize > space.free) {
+    return (
+      `${against} THE ZVOL IS LARGER THAN THE POOL'S FREE SPACE. ${ZVOL_RESERVATION_UNCONFIRMED} If it does, ` +
+      'THE DISK CALL IS REFUSED AFTER THE MACHINE HAS BEEN CREATED, which leaves the machine without its disk.'
+    );
+  }
+  const left = space.free - volsize;
+  if (space.size === null) {
+    return (
+      `${against} Taking its whole size it would leave ${bytesText(left)} free; the pool's own size could not ` +
+      `be read, so whether that is under ${ZVOL_FREE_FLOOR_PERCENT} of it is not stated. ` +
+      ZVOL_RESERVATION_UNCONFIRMED
+    );
+  }
+  const share =
+    left < space.size * ZVOL_FREE_FLOOR
+      ? `TAKING ITS WHOLE SIZE IT WOULD LEAVE ${bytesText(left)} FREE, UNDER ${ZVOL_FREE_FLOOR_PERCENT} OF THE ` +
+        `POOL'S ${bytesText(space.size)}.`
+      : `Taking its whole size it would leave ${bytesText(left)} free of the pool's ${bytesText(space.size)}.`;
+  return `${against} ${share} ${ZVOL_RESERVATION_UNCONFIRMED}`;
+}
+
+/** The vCPU allocation in words, with the product `vms_list` reports as `vcpus`. */
+function vmCpuSentence(args: VmCreateArgs): string {
+  return (
+    `${plural(args.vcpus, 'virtual socket')} of ${plural(args.cores, 'core')} of ` +
+    `${plural(args.threads, 'thread')}, which the machine sees as ${args.vcpus * args.cores * args.threads} ` +
+    'vCPUs and `vms_list` reports as its `vcpus`'
+  );
+}
+
+/**
+ * The memory as the system will store it, and the unit it is NOT given.
+ *
+ * `vms_list` reads this field as MiB, which is TrueNAS's documented unit and is
+ * not on the pinned surface. #96's rule is that a unit is asserted only where it
+ * was established, so the argument carries no suffix and the plan names the
+ * reading as `vms_list`'s rather than as a fact.
+ */
+function vmMemorySentence(memory: number): string {
+  return (
+    `\`memory\` ${memory}, sent as given — \`vms_list\` reads this field as MiB, which is TrueNAS's documented ` +
+    'unit for it and is NOT on this API surface (unconfirmed)'
+  );
+}
+
+/** What the plan says about the bootloader, claiming no default the surface does not state. */
+function vmBootloaderSentence(bootloader: VmBootloader | null): string {
+  return bootloader === null
+    ? 'No `bootloader` is sent, so the system\'s default is used; this API surface does not state which it is.'
+    : `\`bootloader\` ${bootloader}.`;
+}
+
+/**
+ * What the first call's step says about everything after it. One text, so the
+ * description and the plan cannot state the partial case two ways.
+ */
+const VM_CREATE_PARTIAL =
+  'THIS IS THE FIRST OF SEVERAL CALLS AND NOTHING IS ROLLED BACK: once it has answered the machine exists, and ' +
+  'a device call below that fails leaves it with fewer devices than this plan names. That is reported, with ' +
+  '`complete` false, and not undone — NO TOOL IN THIS CATALOG DELETES A VIRTUAL MACHINE OR A ZVOL.';
+
+/** Where a device step's machine comes from, in the one wording every device step uses. */
+const ON_THE_NEW_MACHINE =
+  'on the machine the `vm.create` call above makes — `vm` is the id that call answers with, which does not ' +
+  'exist until it has';
+
+/** The `error` a device carries where it was never attempted because the machine had no id to name. */
+const NO_VM_ID =
+  'not attempted: `vm.create` answered without an id this tool could read, so there was no machine to add it ' +
+  'to. The machine may still exist — `vms_list` is how to check';
+
+/**
+ * One device the middleware made, read off its answer by named field. The NIC's
+ * MAC is the middleware's to generate, so it is read here and never predicted
+ * (#170); every field is null where the answer carried none this tool could
+ * read.
+ */
+function createdDevice(kind: NewDeviceKind, answered: unknown): Record<string, unknown> {
+  const row = recordOrNull(answered);
+  const held = recordOrNull(row?.['attributes']) ?? {};
+  const base = { kind, device_id: numberOrNull(row?.['id']) };
+  switch (kind) {
+    case 'DISK':
+      return {
+        ...base,
+        zvol_name: textOrNull(held['zvol_name']),
+        zvol_volsize: numberOrNull(held['zvol_volsize']),
+        path: textOrNull(held['path']),
+      };
+    case 'NIC':
+      return { ...base, nic_attach: textOrNull(held['nic_attach']), mac: textOrNull(held['mac']) };
+    case 'CDROM':
+      return { ...base, path: textOrNull(held['path']) };
+  }
+}
+
+const VM_CREATE_GUIDANCE =
+  '`vm_id` is the id the `vm.create` call answered with — the numeric `id` `vms_list` reports for the new ' +
+  'entry, whose `source` is `vm` — and `vm_name` and `autostart` are read off that same answer, each null ' +
+  "where it carried none this tool could read. `requested` is exactly what was asked for, under the arguments' " +
+  'own names. `created_devices` lists every device call that was answered, each with its `kind` (`DISK`, ' +
+  '`NIC` or `CDROM`) and the `device_id` the answer named; a `DISK` also carries `zvol_name`, `zvol_volsize` ' +
+  'and `path`, a `NIC` `nic_attach` and `mac` — THE MAC THE MIDDLEWARE GENERATED, read off the answer and ' +
+  'never predicted — and a `CDROM` `path`, each null where the answer carried none. `failed_devices` lists ' +
+  'every device that was not made, with its `kind` and the `error` that stopped it. `complete` is true only ' +
+  'where the id was read and every device was made. WHERE `complete` IS FALSE THE MACHINE STILL EXISTS, with ' +
+  'fewer devices than were asked for: nothing is rolled back, and no tool in this catalog deletes a virtual ' +
+  'machine or a zvol. A null `vm_id` is the call answering without an id this tool could read, so no device ' +
+  'was attempted — it is NOT evidence that no machine was made; `vms_list` is how to check.';
+
+export const vmCreate: MutatingTool = {
+  name: 'vm_create',
+  description:
+    'Creates one new virtual machine on the older libvirt-backed `vm` stack of a TrueNAS system — the stack ' +
+    '`vms_list` reports with `source` `vm` — with one disk on a NEW zvol, one network interface and optionally ' +
+    'one CDROM holding an installer ISO, and LEAVES IT STOPPED. Two-phase: called without a confirmation_token ' +
+    'it returns a plan for user approval; called with one it makes the machine. `vcpus`, `cores` and `threads` ' +
+    'are virtual sockets, cores per socket and threads per core, and the machine sees their product; `cores` ' +
+    'and `threads` default to 1. `memory` CARRIES NO UNIT ON THIS API: `vms_list` reads the field as MiB, ' +
+    "which is TrueNAS's documented unit and is (unconfirmed) here, and the number is sent as given. " +
+    '`bootloader` is UEFI or UEFI_CSM; omitted, the system\'s default is used, which this API does not state. ' +
+    '`zvol_name` is the new zvol\'s full name, such as "tank/vms/runner-disk": ITS PARENT DATASET MUST EXIST ' +
+    'AND THE NAME MUST NOT, and either failing fails the plan, naming it. `zvol_volsize` is its size in bytes, ' +
+    `and THE PLAN STATES IT AGAINST THE POOL'S FREE SPACE, saying where it would leave under ` +
+    `${ZVOL_FREE_FLOOR_PERCENT} of the pool free or would not fit. \`nic_attach\` is the host interface the ` +
+    'NIC is attached to, and must be one `network_interfaces` reports by `name`. `iso_path` must be a file ' +
+    '`filesystem.stat` can read. Every one of those checks is made when the plan is made and NOT AGAIN. ' +
+    '`autostart` AND `ensure_display_device` ARE ALWAYS SENT AS false and are not arguments: the machine does ' +
+    'not start now or when the system boots (`vm_start` starts it), and no display device — which would carry ' +
+    'a console password — is asked for. An existing zvol or file as a disk, a display device, passthrough, CPU ' +
+    'mode or pinning, extra command-line arguments, secure boot and TPM are not taken, and passing one is an ' +
+    'error naming it. THIS IS TWO TO FOUR CALLS — `vm.create`, then one `vm.device.create` per device — AND A ' +
+    'DEVICE CALL THAT FAILS AFTER THE MACHINE WAS CREATED DOES NOT FAIL THE TOOL AND IS NOT ROLLED BACK: the ' +
+    'result names what was made and what was not. `destructiveness` is `reversible` because nothing is deleted ' +
+    'or changed, and that MUST NOT be read as "this catalog can undo it": undoing this means deleting a ' +
+    'virtual machine and a zvol, and NO TOOL HERE DOES EITHER. ' +
+    VM_CREATE_GUIDANCE,
+  resultGuidance: VM_CREATE_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', minLength: 1, description: 'The name of the new virtual machine.' },
+      description: { type: 'string', minLength: 1, description: 'A description stored on the machine.' },
+      vcpus: { type: 'integer', minimum: 1, description: 'Virtual sockets.' },
+      cores: { type: 'integer', minimum: 1, default: 1, description: 'Cores per socket. Default 1.' },
+      threads: { type: 'integer', minimum: 1, default: 1, description: 'Threads per core. Default 1.' },
+      memory: {
+        type: 'integer',
+        minimum: 1,
+        description:
+          'Memory, sent as given. `vms_list` reads this field as MiB, which is (unconfirmed) on this API.',
+      },
+      bootloader: {
+        type: 'string',
+        enum: Object.keys(VM_BOOTLOADERS),
+        description: "The bootloader. Omitted, the system's default is used.",
+      },
+      zvol_name: {
+        type: 'string',
+        minLength: 1,
+        description: 'The new zvol\'s full name, e.g. "tank/vms/runner-disk"; its parent must exist and it must not.',
+      },
+      zvol_volsize: { type: 'integer', minimum: 1, description: "The new zvol's size in bytes." },
+      nic_attach: {
+        type: 'string',
+        minLength: 1,
+        description: 'The host interface the NIC is attached to, by the `name` `network_interfaces` reports.',
+      },
+      iso_path: {
+        type: 'string',
+        minLength: 1,
+        description: 'An installer ISO on the system, e.g. "/mnt/tank/isos/installer.iso", added as a CDROM.',
+      },
+    },
+    required: ['name', 'vcpus', 'memory', 'zvol_name', 'zvol_volsize', 'nic_attach'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // A new machine and a new zvol, and nothing existing is deleted or changed.
+  // Undoing it is a deletion no tool here makes, which the description says
+  // beside the field (#153's trap, as `vm_clone` meets it).
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    return vmCreateRequested(parseVmCreateArgs(rawArgs));
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const args = parseVmCreateArgs(rawArgs);
+    const parent = await checkNewZvol(ctx, args.zvolName);
+    await checkNicAttach(ctx, args.nicAttach);
+    const isoType = args.isoPath === null ? null : await checkIsoPath(ctx, args.isoPath);
+    const pool = args.zvolName.slice(0, args.zvolName.indexOf('/'));
+    const space = await readPoolSpace(ctx, pool);
+    const devices = newDevices(args);
+    const describe: Record<NewDeviceKind, string> = {
+      DISK:
+        `Add a disk on a NEW zvol "${args.zvolName}", which this call creates, ${ON_THE_NEW_MACHINE}. Its parent ` +
+        `"${parent}" exists and no dataset named "${args.zvolName}" does, as read when this plan was made. ` +
+        zvolSpaceSentence(pool, args.zvolVolsize, space),
+      NIC:
+        `Add a network interface attached to host interface "${args.nicAttach}", which \`network_interfaces\` ` +
+        `listed when this plan was made, ${ON_THE_NEW_MACHINE}. Its MAC address is generated by the middleware ` +
+        'and read back off the answer, not predicted here. No `type` is sent, so the system\'s default NIC model ' +
+        'is used; this API surface does not state which.',
+      CDROM:
+        `Add a CDROM device holding "${args.isoPath}", which \`filesystem.stat\` read ` +
+        `${isoType === null ? 'without stating its type' : `as \`${isoType}\``} when this plan was made, ` +
+        `${ON_THE_NEW_MACHINE}. No \`order\` is sent for any device, so which one the machine boots from first ` +
+        'is left to the middleware and is (unconfirmed) here.',
+    };
+    return [
+      {
+        method: 'vm.create',
+        params: vmCreateParams(args),
+        description:
+          `Create the virtual machine "${args.name}" on the \`vm\` stack: ${vmCpuSentence(args)}; ` +
+          `${vmMemorySentence(args.memory)}. ${vmBootloaderSentence(args.bootloader)} \`autostart\` IS SENT AS ` +
+          'false, so the machine is not started now and does not start when the system boots; `vm_start` ' +
+          'starts it. `ensure_display_device` IS SENT AS false, so no display device, and so no console ' +
+          `password, is asked for. ${VM_CREATE_PARTIAL}`,
+      },
+      ...devices.map((device) => ({
+        method: 'vm.device.create',
+        params: [{ vm: VM_ID_PENDING, attributes: device.attributes }],
+        description: describe[device.kind],
+      })),
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const args = parseVmCreateArgs(rawArgs);
+    // The one call whose rejection fails the tool: nothing has been made yet.
+    const answered: unknown = await firstValueFrom(
+      ctx.system.client.api.call('vm.create', vmCreateParams(args)),
+    );
+    const machine = recordOrNull(answered);
+    const vmId = numberOrNull(machine?.['id']);
+    const created: Record<string, unknown>[] = [];
+    const failed: { kind: NewDeviceKind; error: string }[] = [];
+    // Every device is attempted whatever the one before it answered; none
+    // depends on another, and a failure is reported rather than thrown.
+    for (const device of newDevices(args)) {
+      if (vmId === null) {
+        failed.push({ kind: device.kind, error: NO_VM_ID });
+        continue;
+      }
+      try {
+        const reply: unknown = await firstValueFrom(
+          ctx.system.client.api.call('vm.device.create', deviceParams(vmId, device)),
+        );
+        created.push(createdDevice(device.kind, reply));
+      } catch (reason) {
+        failed.push({ kind: device.kind, error: errorText(reason) });
+      }
+    }
+    return {
+      vm_id: vmId,
+      vm_name: textOrNull(machine?.['name']),
+      autostart: booleanOrNull(machine?.['autostart']),
+      requested: vmCreateRequested(args),
+      created_devices: created,
+      failed_devices: failed,
+      complete: vmId !== null && failed.length === 0,
     };
   },
 };

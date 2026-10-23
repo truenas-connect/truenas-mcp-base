@@ -170,6 +170,7 @@ export {
   vmStop,
   vmRestart,
   vmClone,
+  vmCreate,
   serviceControl,
   containerStart,
   containerStop,
