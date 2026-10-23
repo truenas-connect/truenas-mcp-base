@@ -3,6 +3,7 @@ import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
 import type { MutatingTool, PlanStep, ToolContext } from '@/catalog/tool';
 import { ApiSurface, ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+import { appsList } from '@/tools/apps';
 import { readEnvironments, type BootEnvironment } from '@/tools/boot';
 import {
   MAX_TIME_MS,
@@ -11,12 +12,16 @@ import {
   booleanOrNull,
   errorText,
   numberOrNull,
+  plural,
   recordOrNull,
   refuseArgs,
   strictTextList,
   textOrNull,
   watchJob,
 } from '@/tools/common';
+import { nfsClients } from '@/tools/nfs';
+import { tasksRecentRuns } from '@/tools/tasks';
+import { vmsList } from '@/tools/vms';
 
 /**
  * Grounds the LLM on what it is talking to — version, hostname, hardware —
@@ -785,8 +790,9 @@ function rebootReasons(value: unknown): RebootReason[] | null {
  *
  * WHAT THIS TOOL DELIBERATELY DOES NOT DO:
  *
- * - **It does not reboot anything, or schedule or cancel one.** `system.reboot`
- *   exists and is mutating; no tool here is.
+ * - **It does not reboot anything, or schedule or cancel one.** That is
+ *   `system_reboot` (#201), whose `boot_id_before` is compared against this
+ *   tool's `boot_id`.
  * - **It does not read the other node of an HA pair.**
  *   `failover.reboot.info` answers the same question about the peer, and
  *   `ha_status` is the tool that would grow it.
@@ -1810,5 +1816,319 @@ export const systemUpdateApply: MutatingTool = {
       successStates: UPDATE_JOB_SUCCESS_STATES,
     });
     return { watched_seconds: UPDATE_APPLY_WATCH_SECONDS, ...job, ...(await nextBoot(ctx)) };
+  },
+};
+
+/**
+ * `delay` is the one argument `system.reboot` takes beside the reason, and it is
+ * refused rather than passed through: the surface declares it a bare number with
+ * no unit (#96), and an approver acts on "60 seconds" differently from "60
+ * minutes". Left out of the first version, as #201 put it.
+ */
+const REBOOT_REFUSED = ['delay'] as const;
+
+/**
+ * The reason the reboot is made with, exactly as the caller wrote it.
+ *
+ * Non-empty is checked on the text with its whitespace ignored, because a reason
+ * of spaces records nothing, but what is SENT is the argument unmodified: it is
+ * what TrueNAS records, and a trimmed copy would be this tool editing the
+ * caller's words in the audit trail (S3.3).
+ */
+function parseRebootArgs(args: Record<string, unknown>): string {
+  refuseArgs(
+    args,
+    REBOOT_REFUSED,
+    'the reboot is immediate; the surface states no unit for a delay, so this tool does not send one',
+  );
+  const reason = args['reason'];
+  if (typeof reason !== 'string' || reason.trim().length === 0) {
+    throw new Error('"reason" is required: a non-empty string saying why the system is being rebooted');
+  }
+  return reason;
+}
+
+/** How long `system_reboot` watches its job: a ceiling on its patience, not an estimate (#122). */
+const REBOOT_WATCH_MS = 30_000;
+const REBOOT_WATCH_SECONDS = REBOOT_WATCH_MS / 1000;
+
+/** The job state this tool reads as a reboot job that worked. Its own (#86, #161). */
+const REBOOT_JOB_SUCCESS_STATES = new Set(['SUCCESS']);
+
+/**
+ * The job states this tool reads as a job that has ENDED, and so is not one the
+ * reboot interrupts. Its own vocabulary (#86): `tasks_recent_runs` states the
+ * same words in its description, and this list is what the plan's sentence says.
+ * Written as what is EXCLUDED, so a state nobody here has heard of counts as a
+ * job that may be running — the direction #93 asks of a list that would
+ * otherwise run towards "nothing is interrupted".
+ */
+const REBOOT_ENDED_JOB_STATES = new Set(['SUCCESS', 'FINISHED', 'FAILED', 'ERROR', 'ABORTED']);
+
+/** The state word each kind reports when it is not running, and so is not interrupted. */
+const VM_NOT_RUNNING = new Set(['STOPPED']);
+const APP_NOT_RUNNING = new Set(['STOPPED', 'CRASHED']);
+
+/** How many names of one kind the plan spells out. Counts are over everything (#44). */
+const REBOOT_NAMED_MAX = 10;
+
+/** `system.boot_id`, or the failure that stopped it being read. */
+async function readBootId(system: SystemHandle): Promise<{ value: string | null; error: string | null }> {
+  try {
+    return { value: textOrNull(await firstValueFrom(system.client.api.call('system.boot_id'))), error: null };
+  } catch (reason) {
+    return { value: null, error: errorText(reason) };
+  }
+}
+
+/** A composed handler's answer, or why it gave none. */
+async function composed(read: () => Promise<unknown>): Promise<{ value: unknown; error: string | null }> {
+  try {
+    return { value: await read(), error: null };
+  } catch (reason) {
+    return { value: undefined, error: errorText(reason) };
+  }
+}
+
+/** `a, b and 2 more` — at most {@link REBOOT_NAMED_MAX} named, the rest counted. */
+function namedList(names: string[]): string {
+  const shown = names.slice(0, REBOOT_NAMED_MAX);
+  const rest = names.length - shown.length;
+  return rest > 0 ? `${shown.join(', ')} and ${rest} more` : shown.join(', ');
+}
+
+/**
+ * The rows a composed listing returned that are not reported in a state the
+ * kind is known to be stopped in, each as `name (STATE)`. A row whose state
+ * could not be read is kept and says so: dropping it would run the list
+ * towards "nothing is interrupted", which the read did not establish (#93).
+ */
+function notStopped(rows: unknown[], stopped: ReadonlySet<string>): string[] {
+  const kept: string[] = [];
+  for (const row of rows) {
+    const held = recordOrNull(row);
+    const state = textOrNull(held?.['state']);
+    if (state !== null && stopped.has(state)) continue;
+    const name = textOrNull(held?.['name']) ?? 'one the system reported no name for';
+    kept.push(`${name} (${state ?? 'state not read'})`);
+  }
+  return kept;
+}
+
+/** The VM sentence of the plan, from `vms_list`'s answer. */
+function vmSentence(read: { value: unknown; error: string | null }): string {
+  const answer = recordOrNull(read.value);
+  const vms = answer?.['vms'];
+  if (read.error !== null || !Array.isArray(vms)) {
+    return `Virtual machines were NOT READ (vms_list failed: ${read.error ?? 'no list came back'}), so it is not established that none is running.`;
+  }
+  const running = notStopped(vms, VM_NOT_RUNNING);
+  const failures = Array.isArray(answer?.['failures']) ? (answer['failures'] as unknown[]) : [];
+  const partial = failures.map((failure) => {
+    const held = recordOrNull(failure);
+    return `the ${textOrNull(held?.['source']) ?? 'unnamed'} stack could not be read (${textOrNull(held?.['error']) ?? NO_REASON})`;
+  });
+  const found =
+    running.length === 0
+      ? 'No virtual machine was read in a state other than STOPPED'
+      : `${plural(running.length, 'virtual machine')} not reported STOPPED will be interrupted: ${namedList(running)}`;
+  return partial.length === 0
+    ? `${found}.`
+    : `${found}; THAT LIST IS INCOMPLETE: ${partial.join('; ')}.`;
+}
+
+/** The app sentence of the plan, from `apps_list`'s answer. */
+function appSentence(read: { value: unknown; error: string | null }): string {
+  if (read.error !== null || !Array.isArray(read.value)) {
+    return `Applications were NOT READ (apps_list failed: ${read.error ?? 'no list came back'}), so it is not established that none is running.`;
+  }
+  const running = notStopped(read.value, APP_NOT_RUNNING);
+  return running.length === 0
+    ? 'No application was read in a state other than STOPPED or CRASHED.'
+    : `${plural(running.length, 'application')} not reported STOPPED or CRASHED will be interrupted: ${namedList(running)}.`;
+}
+
+/** The NFS sentence of the plan, from `nfs_clients`'s answer — one clause per version. */
+function nfsSentence(read: { value: unknown; error: string | null }): string {
+  if (read.error !== null || recordOrNull(read.value) === null) {
+    return `NFS clients were NOT READ (nfs_clients failed: ${read.error ?? 'no answer came back'}), so it is not established that none is connected.`;
+  }
+  const answer = recordOrNull(read.value) as Record<string, unknown>;
+  const failures = Array.isArray(answer['failures']) ? (answer['failures'] as unknown[]) : [];
+  // The reason a version could not be read, as `nfs_clients` named it.
+  const why = (source: string): string => {
+    const failure = failures.map(recordOrNull).find((held) => textOrNull(held?.['source']) === source);
+    return textOrNull(failure?.['error']) ?? NO_REASON;
+  };
+  const v3 = answer['nfsv3'];
+  const v4 = answer['nfsv4'];
+  const v3Clause = Array.isArray(v3)
+    ? plural(v3.length, 'NFSv3 mount')
+    : `NFSv3 mounts were NOT READ (${why('nfsv3')}), so none is not established`;
+  const v4Clause = Array.isArray(v4)
+    ? plural(v4.length, 'registered NFSv4 client')
+    : `NFSv4 clients were NOT READ (${why('nfsv4')}), so none is not established`;
+  return `NFS: ${v3Clause}; ${v4Clause}. Any client connected loses the server while the system is down.`;
+}
+
+/** The job sentence of the plan, from `tasks_recent_runs`'s answer over every job the system holds. */
+function jobSentence(read: { value: unknown; error: string | null }): string {
+  if (read.error !== null || !Array.isArray(read.value)) {
+    return `Running jobs were NOT READ (tasks_recent_runs failed: ${read.error ?? 'no list came back'}), so it is not established that none is running.`;
+  }
+  const running: string[] = [];
+  for (const row of read.value) {
+    const held = recordOrNull(row);
+    const state = textOrNull(held?.['state']);
+    if (state !== null && REBOOT_ENDED_JOB_STATES.has(state)) continue;
+    const method = textOrNull(held?.['method']) ?? 'a job naming no method';
+    const id = numberOrNull(held?.['id']);
+    running.push(`${method} (${id === null ? 'no id' : `job ${id}`}, ${state ?? 'state not read'})`);
+  }
+  return running.length === 0
+    ? 'No job was read in a state other than SUCCESS, FINISHED, FAILED, ERROR or ABORTED.'
+    : `${plural(running.length, 'job')} not reported as ended will be interrupted: ${namedList(running)}.`;
+}
+
+/**
+ * The HA sentence of the plan. Not a refusal, unlike `system_update_apply`'s:
+ * rebooting the connected node of a pair is a thing this tool does, and what the
+ * plan owes is that the approver knows that is what it is (#201).
+ */
+function haSentence(licensed: { value: unknown; error: string | null }): string {
+  if (licensed.error === null && licensed.value === false) return '';
+  const pointer = 'whether a failover follows is (unconfirmed) here, and `ha_status` reports the pair.';
+  if (licensed.error === null && licensed.value === true) {
+    return ` THIS SYSTEM IS LICENSED FOR HA: this reboots the node the catalog is connected to, and ${pointer}`;
+  }
+  const why = licensed.error === null ? 'it did not answer true or false' : `failover.licensed failed: ${licensed.error}`;
+  return ` Whether this system is an HA pair could not be read (${why}); if it is one, this reboots the node the catalog is connected to, and ${pointer}`;
+}
+
+/** The step for the boot id read `execute` makes immediately before the call (#119). */
+function bootIdStep(): PlanStep {
+  return {
+    method: 'system.boot_id',
+    params: [],
+    description:
+      'Read the boot id IMMEDIATELY BEFORE THE REBOOT CALL, reported as `boot_id_before`, so that a later read ' +
+      'differing from it confirms the system restarted. Changes nothing.',
+  };
+}
+
+const REBOOT_GUIDANCE =
+  '`ended` is whether the reboot job was ESTABLISHED to have reached a state it will not move out of. FALSE IS ' +
+  'THE ORDINARY ANSWER AND IS NOT A FAILED REBOOT: the system drops the connection as it goes down, which ends ' +
+  'the watch with nothing established, and the watch may equally have run out first. `succeeded` is true where ' +
+  'the job ended in `SUCCESS`, false where it ended in any other state, and null wherever `ended` is false. ' +
+  '`job_state` is the state the watch last saw, `error` the text the job recorded (null where it recorded none), ' +
+  'and `finished_at` when it ended, as an ISO 8601 UTC timestamp, null wherever `ended` is false. `job_id` is the ' +
+  "job's numeric identity; null where no job event named this request, which does not mean nothing started. " +
+  '`watched_seconds` is the ceiling that applied, not how long the watch lasted. `boot_id_before` is the ' +
+  '`system.boot_id` read immediately before the call — an opaque identifier, not to be shown or reasoned about — ' +
+  'and null where it could not be read, with `boot_id_read_error` saying why. WHETHER THE REBOOT HAPPENED IS ' +
+  'CONFIRMED BY A LATER READ, NOT BY THIS RESULT: call `system_reboot_info` once the system is back, and a ' +
+  '`boot_id` there that differs from `boot_id_before` is a system that restarted in between. That tool reads ' +
+  "`system.reboot.info`, whose `boot_id` TrueNAS builds from `system.boot_id`; that the two are one identifier " +
+  'is read from the TrueNAS implementation and is not stated on the API surface, so it is (unconfirmed) here. A ' +
+  'call that fails while the system is down is the system being down, not an answer.';
+
+export const systemReboot: MutatingTool = {
+  name: 'system_reboot',
+  description:
+    'Reboots a TrueNAS system, with a stated reason that TrueNAS records. Two-phase: called without a ' +
+    'confirmation_token it returns a plan for user approval; called with one it starts the reboot. `reason` is ' +
+    'required and is passed to `system.reboot` exactly as written; it is an argument, so it is recorded in the ' +
+    'audit trail — DO NOT PUT ANYTHING SECRET IN IT. `delay` is refused: the reboot is immediate. The plan names ' +
+    'what the reboot interrupts — virtual machines not reported stopped, applications not reported stopped or ' +
+    'crashed, connected NFS clients, and jobs not reported as ended — read through `vms_list`, `apps_list`, ' +
+    '`nfs_clients` and `tasks_recent_runs` WHEN THE PLAN IS MADE AND NOT AGAIN, and names every one of those reads ' +
+    'that failed as not established rather than as nothing running. It also states the boot id the system had ' +
+    'then. ON AN HA SYSTEM THIS REBOOTS THE NODE THE CATALOG IS CONNECTED TO; whether a failover follows is ' +
+    '(unconfirmed), and the plan points at `ha_status`. UNDER FAN-OUT, SELECTING SEVERAL SYSTEMS REBOOTS THEM ' +
+    "TOGETHER, AT ONCE, UNDER ONE CONFIRMATION; the plan is made per system — read each system's. " +
+    '`destructiveness` is `reversible` because nothing is destroyed; a reboot is not undone, and what it ' +
+    'interrupted is not resumed by anything here. Shutting a system down and HA failover are not done here. THE ' +
+    'RESULT IS ABOUT THE JOB THIS CALL STARTED: the tool watches it for at most `watched_seconds` and then ' +
+    'returns what it has. ' +
+    REBOOT_GUIDANCE,
+  resultGuidance: REBOOT_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      reason: {
+        type: 'string',
+        minLength: 1,
+        description:
+          'Why the system is being rebooted, in words. Sent to TrueNAS unmodified and recorded by it, and recorded ' +
+          'in the audit trail — nothing secret.',
+      },
+    },
+    required: ['reason'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // Nothing is destroyed. A reboot is not undone either, which the description
+  // says beside the field (#153).
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    return { reason: parseRebootArgs(rawArgs) };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const reason = parseRebootArgs(rawArgs);
+    // Every read is issued before any is awaited, and none may fail the plan:
+    // each sentence says what its read established, a failed one included.
+    // The four listings are their tools' handlers rather than the API (#44), so
+    // "running" here is read through the same normalization a caller sees.
+    const [licensed, bootId, vms, apps, nfs, jobs] = await Promise.all([
+      composed(() => firstValueFrom(ctx.system.client.api.call('failover.licensed'))),
+      readBootId(ctx.system),
+      composed(() => vmsList.handler(ctx, {})),
+      composed(() => appsList.handler(ctx, {})),
+      composed(() => nfsClients.handler(ctx, {})),
+      // From the epoch rather than the listing's default day: a job started
+      // two days ago and still running is the one most worth naming.
+      composed(() => tasksRecentRuns.handler(ctx, { since: '1970-01-01' })),
+    ]);
+    const boot =
+      bootId.value === null
+        ? `The boot id could not be read when this plan was made (${bootId.error ?? 'the system reported none'}).`
+        : `The boot id when this plan was made was ${bootId.value}.`;
+    return [
+      bootIdStep(),
+      {
+        method: 'system.reboot',
+        params: [reason],
+        description:
+          `Reboot the system, recording the reason as given. This starts a background job; the connection drops ` +
+          `as the system goes down, and the job is followed through the client's own tracking, which reads ` +
+          `\`core.get_jobs\` and changes nothing, for at most ${REBOOT_WATCH_SECONDS} seconds.` +
+          `${haSentence(licensed)} ${boot} WHAT THE REBOOT INTERRUPTS, as read when this plan was made and not ` +
+          `read again: ${vmSentence(vms)} ${appSentence(apps)} ${nfsSentence(nfs)} ${jobSentence(jobs)} The ` +
+          'scheduled runs of cron jobs and init/shutdown scripts do not go through the job system and are not ' +
+          'covered by that last read.',
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const reason = parseRebootArgs(rawArgs);
+    const api = ctx.system.client.api;
+    // Read unconditionally and branched on by nothing, so `execute` stays a
+    // pure function of (args, system) (#119). A failed read is data: the
+    // reboot is still the call that was approved.
+    const before = await readBootId(ctx.system);
+    // `system.reboot` declares `response: null`, so no `extra` reads it (#166).
+    // The connection dropping mid-job is `watchJob`'s second failure era, which
+    // ends the watch rather than failing the call (#122).
+    const job = await watchJob(api, api.callAndGetJobId('system.reboot', [reason]), {
+      watchMs: REBOOT_WATCH_MS,
+      successStates: REBOOT_JOB_SUCCESS_STATES,
+    });
+    return {
+      watched_seconds: REBOOT_WATCH_SECONDS,
+      ...job,
+      boot_id_before: before.value,
+      boot_id_read_error: before.error,
+    };
   },
 };

@@ -108,13 +108,16 @@ describe('createDefaultCatalog', () => {
       'vm_create',
       'vm_disk_image_import',
       'system_update_apply',
+      'system_reboot',
     ]);
   });
 
-  it('advertises system_update_apply to a full-access credential only', () => {
-    expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain('system_update_apply');
-    expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain('system_update_apply');
-    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain('system_update_apply');
+  it('advertises system_update_apply and system_reboot to a full-access credential only', () => {
+    for (const name of ['system_update_apply', 'system_reboot']) {
+      expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain(name);
+      expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain(name);
+      expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain(name);
+    }
   });
 
   it('advertises vm_create and vm_disk_image_import to a full-access credential only', () => {
