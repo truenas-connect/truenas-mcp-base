@@ -101,7 +101,8 @@ confirmation UX, audit sinks) enters through injected interfaces.
   then starts `vm.device.convert`, building `source` and `destination` itself.
   The caller gives the zvol's size, because the image's virtual size is not
   readable on this API surface; a zvol smaller than a raw image fails the
-  plan, since there the file size is the virtual size. A conversion that fails after the zvol is made is reported with
+  plan where the image's size was read, since there the file size is the
+  virtual size. A conversion that fails after the zvol is made is reported with
   the zvol named, and the zvol is not deleted.
   `snapshot_clone` is the additive route
   back to a snapshot's data: it deletes nothing and modifies no dataset that

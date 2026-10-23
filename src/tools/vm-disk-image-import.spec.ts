@@ -174,6 +174,7 @@ describe('vm_disk_image_import', () => {
         { image_path: '/mnt/tank/images/disk.raw', zvol_volsize: 1 },
       );
       expect(steps[1]?.description).toContain('as `FILE` and without a size this tool could read');
+      expect(steps[1]?.description).toContain('whether the zvol is large enough was NOT checked here');
       const [, convert] = await plan({ stat: { value: {} } });
       expect(convert?.description).toContain('without stating its type');
     });

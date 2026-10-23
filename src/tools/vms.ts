@@ -3761,7 +3761,10 @@ function imageSizeSentence(args: VmDiskImageImportArgs, stat: ImageStat): string
     "The middleware reads the image's VIRTUAL size itself, with `qemu-img info`, and REFUSES THE CONVERSION " +
     "where it is larger than the zvol's — AFTER THE ZVOL ABOVE HAS BEEN MADE, which leaves it in place, empty.";
   if (args.imagePath.endsWith('raw')) {
-    return `${read} A raw image's virtual size is its file size. ${refusal}`;
+    return stat.size === null
+      ? `${read} A raw image's virtual size is its file size, which was NOT read, so whether the zvol is large ` +
+          `enough was NOT checked here. ${refusal}`
+      : `${read} A raw image's virtual size is its file size. ${refusal}`;
   }
   return (
     `${read} That is the FILE's size, and for this format it is NOT the virtual size, which is not readable ` +
@@ -3777,8 +3780,9 @@ function convertResult(record: Record<string, unknown> | null, ended: boolean): 
 const VM_DISK_IMAGE_IMPORT_GUIDANCE =
   '`requested` is exactly what was asked for, under the arguments\' own names. `zvol_created` is true once ' +
   '`pool.dataset.create` has answered, and `zvol_id` is the `id` that answer named, null where it carried none ' +
-  'this tool could read. `convert_error` is set where the conversion could not be STARTED — the middleware ' +
-  'refused the call before any job named it — and null otherwise. `job_id`, `ended`, `succeeded`, ' +
+  'this tool could read. `convert_error` is set where NO JOB WAS SEEN TO START — the middleware refused the ' +
+  'call, or the connection failed before any job named it, in which case the conversion may still be running ' +
+  'unnamed — and null otherwise. `job_id`, `ended`, `succeeded`, ' +
   '`job_state`, `error` and `finished_at` describe the conversion job as the watch left it: `ended` is true ' +
   'only where the job was followed to its end inside `watched_seconds`, and `succeeded` is read from the ' +
   "job's state (`SUCCESS` or `FINISHED`) and is null where the job did not end inside the watch. A LARGE " +
@@ -3786,7 +3790,9 @@ const VM_DISK_IMAGE_IMPORT_GUIDANCE =
   '`tasks_recent_runs` is where the job is followed after that. `convert_result` is the boolean the job ' +
   'answered with, null unless it ended, and it is NOT the outcome — `succeeded` is. `complete` is true only ' +
   'where the job ended and succeeded. WHERE `zvol_created` IS TRUE AND `complete` IS FALSE THE ZVOL STILL ' +
-  'EXISTS, empty, part-written or still being written, and no tool in this catalog deletes a zvol.';
+  'EXISTS, and no tool in this catalog deletes a zvol. `complete` false is NOT evidence the conversion ' +
+  'failed: a job still going, or one followed to an end this tool could not read as success, can leave the ' +
+  'zvol fully written, and `tasks_recent_runs` is how to check.';
 
 export const vmDiskImageImport: MutatingTool = {
   name: 'vm_disk_image_import',
@@ -3798,8 +3804,9 @@ export const vmDiskImageImport: MutatingTool = {
     'read it. `zvol` is the new zvol\'s full name, such as "tank/vms/imported-disk": ITS PARENT DATASET MUST ' +
     'EXIST AND THE NAME MUST NOT, and either failing fails the plan, naming it. `zvol_volsize` is its size in ' +
     "bytes and MUST BE AT LEAST THE IMAGE'S VIRTUAL SIZE, which this API surface cannot read: for a raw image " +
-    'that is the file size, and a smaller zvol fails the plan; for any other format the plan states the file ' +
-    'size and says the virtual size can be larger. The plan states the zvol\'s size against the pool\'s free ' +
+    'that is the file size, and where `filesystem.stat` reports that size a smaller zvol fails the plan; for ' +
+    'any other format the plan states the file size where it was read and says the virtual size can be ' +
+    'larger. The plan states the zvol\'s size against the pool\'s free ' +
     'space. Every check is made when the plan is made and NOT AGAIN; a dataset of that name made in between ' +
     'makes the create call fail, so nothing is overwritten. THIS IS TWO CALLS — `pool.dataset.create`, then ' +
     '`vm.device.convert` as a background job — and THE MIDDLEWARE REQUIRES THE ZVOL TO EXIST BEFORE IT ' +
