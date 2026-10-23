@@ -49,7 +49,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `smb_share_create`, `smb_share_update`, `nfs_share_create`,
   `nfs_share_update`, `iscsi_target_create`, `iscsi_target_update`,
   `nvmeof_subsystem_create`, `nvmeof_subsystem_update`, `user_create`,
-  `user_set_locked`, `pool_device_set_online` —
+  `user_set_locked`, `dataset_set_quota`, `pool_device_set_online` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop` and `container_restart` the seven that
   start a background job,
@@ -202,6 +202,15 @@ confirmation UX, audit sinks) enters through injected interfaces.
   to lock the account the catalog is itself signed in as. Its plan names the
   privileges the account's groups hold, since locking the last account holding
   one is a lockout.
+  `dataset_set_quota` sets, changes or removes one dataset's `quota`, its
+  `refquota`, or both, in bytes; `0` and null both remove a limit. It is the
+  mutating half of `datasets_quota_report` and reads the limits the same way.
+  Its plan states each limit as it is now and as it will be, beside the usage
+  that limit caps. A limit below that usage fails the plan, because ZFS refuses
+  one; a limit exactly at it is accepted, and the plan says writes will then
+  fail. A volume is refused, since it has neither limit. It does not touch the quota
+  alert thresholds, per-user or per-group quotas, reservations, or a volume's
+  size.
   `container_list` and the three container power tools are the first family
   written against the client's `ops` layer rather than `api.call`, because every
   one of these operations changes SHAPE between TrueNAS versions and not just

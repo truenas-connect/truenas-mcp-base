@@ -94,6 +94,7 @@ export {
   bootPoolStatus,
   listDatasets,
   quotaReport,
+  datasetSetQuota,
   datasetPermissions,
   systemDatasetConfig,
   disksList,

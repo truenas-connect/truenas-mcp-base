@@ -2935,6 +2935,44 @@ That read passes over parts it cannot read rather than refusing, because the
 call has already landed (#161). So `NOT_FOUND` there also covers a topology that
 did not read, and the guidance says so.
 
+### A limit below current usage is refused, because ZFS refuses it (#189)
+
+The ticket asked whether `dataset_set_quota` should refuse or warn on a limit
+below current usage, on the premise that ZFS accepts one. **It does not.**
+OpenZFS's quota and refquota set-checks answer `ENOSPC` for a new value under
+`used` or `referenced` respectively ("size is less than current used or
+reserved space"). That is read from the OpenZFS implementation, not from this
+API surface, and the plan and description say so. So the plan fails, naming
+both numbers. That is #161's rule: a plan-time refusal is owed where the
+middleware refuses, and a plan promising a call that will be rejected promises
+more than the call delivers.
+
+**A limit exactly at usage is accepted, and it is warned about in capitals.**
+That is how a quota stops a runaway writer, and the ticket's use case survives
+at that value rather than below it. Where the usage could not be read, the plan
+says the call may be rejected. Silence there would read as "there is room". The
+read is plan-time only, so a dataset that grows before confirmation can still
+see the change refused. The description says so, and also that a limit below
+the dataset's reservation (for `refquota`, its refreservation) is refused for the
+same reason and is not read here. A volume is refused too, since neither limit
+is a property a volume has.
+
+**The same refusal narrows `reversible`.** Sending back the old values the plan
+names undoes the change only while usage is still at or below them. A dataset
+that grows past a limit after it was raised or removed cannot be given that
+limit back, so the description says so beside the field (#153's trap).
+
+**The limits are read the way `datasets_quota_report` reads them, through the
+same `quotaLimit`.** There is one account of what `0`, null and an unreadable
+property mean. A removal is sent as passed, `0` or null, and both are compared
+as `0` when `confirmed` is derived. Otherwise a null sent could never confirm
+(#184's problem, met here by normalising rather than by a token, because both
+spellings mean the same thing on the update).
+
+The read is plan-time only and is not a step, as `snapshots_create`'s is
+(#119). `execute` makes one call, and the result reads the limits off the
+updated dataset it answers with (#121).
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**
