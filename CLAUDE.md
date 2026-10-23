@@ -2897,6 +2897,44 @@ would branch on state the token cannot bind. The privileges the account's
 groups hold are a supporting read (#154): a failure is stated, and "holds
 none" is said only where every group and privilege entry was read.
 
+### A redundancy check is a refusal, made twice, over what was read (#193)
+
+`pool_device_set_online` refuses to take a device offline wherever its vdev
+would be left unable to serve its data, and **every case it cannot read
+refuses too**. That covers an unreadable vdev type or another member's state, and a dRAID
+parity that neither the type nor the vdev's name spells. It also covers a device
+nested beneath another inside its vdev, such as a member being replaced or one
+covered by a spare, which the mirror and parity counting does not model. A check
+that defaults to "safe" is #154's costly direction. The check is made only for
+`data`, `special` and `dedup`, the categories whose loss faults the pool. A
+device already OFFLINE is not refused, because sending it offline again takes
+nothing more away.
+
+**A member's state is not enough to count it as a working copy.** A member being
+resilvered reads ONLINE before it holds all of its data. Counted as a copy, it
+would let the one complete member of a mirror be taken offline. So the check
+also refuses while the pool's `scan` is a RESILVER still SCANNING, or where the
+scan could not be read. The scan record belongs to the pool, so this is
+pool-wide rather than per vdev, which is the conservative direction.
+
+**The check is made again in `execute`, on the read the call's params come
+from**, as `user_create`'s privilege check is (#187). The token binds the pool
+and disk names and not the ids or member states the plan read (#181), so a
+mirror that lost its other member between plan and approval is refused before
+anything is sent. That is a refusal, not a branch to another call.
+
+**A disk listed twice is refused, not resolved.** A spare in use appears in
+`spare` and again inside the vdev it stands in for, and the two listings do not
+say which role a change would reach. For the same reason, a topology that could
+not be read in full refuses in both directions: the unread part could hold the
+second listing.
+
+**The read after the call finds the device by GUID, not by disk name.** The GUID
+is what the call was sent, and a device that faults can lose its resolved disk.
+That read passes over parts it cannot read rather than refusing, because the
+call has already landed (#161). So `NOT_FOUND` there also covers a topology that
+did not read, and the guidance says so.
+
 ### A limit below current usage is refused, because ZFS refuses it (#189)
 
 The ticket asked whether `dataset_set_quota` should refuse or warn on a limit

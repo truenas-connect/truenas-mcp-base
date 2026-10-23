@@ -169,4 +169,5 @@ export {
   containerRestart,
   poolScrubTaskCreate,
   poolScrubTaskUpdate,
+  poolDeviceSetOnline,
 } from '@/tools/index';

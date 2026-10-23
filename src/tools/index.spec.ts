@@ -96,8 +96,15 @@ describe('createDefaultCatalog', () => {
       'user_create',
       'user_set_locked',
       'dataset_set_quota',
+      'pool_device_set_online',
       'dataset_set_property',
     ]);
+  });
+
+  it('advertises pool_device_set_online to a full-access credential only', () => {
+    expect(createDefaultCatalog().list(Role.Full).map((t) => t.name)).toContain('pool_device_set_online');
+    expect(createDefaultCatalog().list(Role.Sharing).map((t) => t.name)).not.toContain('pool_device_set_online');
+    expect(createDefaultCatalog().list(Role.ReadOnly).map((t) => t.name)).not.toContain('pool_device_set_online');
   });
 
   it('advertises user_create and user_set_locked to a full-access credential only', () => {
