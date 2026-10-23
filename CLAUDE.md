@@ -3032,6 +3032,30 @@ plan-time reads are not steps (#119). The tests have their own spec,
 filters. `fakeSystem` answers every read from one list, so it cannot tell "the
 dataset exists" from "the new name is free".
 
+### A disk's enclosure slot is found by its device name, not `disk.query`'s `enclosure` (#194)
+
+`disk_identify` finds the slot to light by the slot element in `enclosure2.query`
+whose `dev` is the disk's name, and sends that entry's `id` and the slot's key to
+`enclosure2.set_slot_status`. The ticket's route was `disk.query`'s
+`enclosure: { number, slot }`, mapped to an enclosure id. Read from the
+`truenas/middleware` source on master, 2026-10-22, **that route does not
+exist**. `enclosure` is computed from a database column, `disk_enclosure_slot`,
+as `number * 1000 + slot`, and neither `disk.py` nor `disk_/sync.py` writes it.
+No `enclosure2.query` entry carries a `number` either. `set_slot_status` looks up
+the enclosure by `id` and the slot by its key under
+`elements['Array Device Slot']`, which is the record the `dev` match reads. The
+whole repository was not searched for a writer of the column, so a later tool
+must not rely on `enclosure` being null either.
+
+The slot keys this reads are `dev`, `supports_identify_light` and
+`drive_bay_light_status`, and the enclosure keys are `id` and `label`. All of
+them are confirmed from the same source, so the allowlist is a plain one rather
+than #98's form. None was checked against a live system with a shelf.
+`drive_bay_light_status` is the slot's sysfs `locate` attribute, so a read-back of
+`ON` is the kernel's setting and not an observation of the LED. The guidance
+says so. The tests are in `disk-identify.spec.ts`, which is named for the tool as
+the ticket asked, and `disks.spec.ts` is left as it was.
+
 ## Conventions
 
 - **A tool description must not promise more than the normalization delivers.**

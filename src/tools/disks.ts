@@ -1,7 +1,8 @@
 import { firstValueFrom } from 'rxjs';
 import { Role } from '@/interfaces';
-import { ReadOnlyTool, SystemHandle } from '@/catalog/tool';
+import { MutatingTool, PlanStep, ReadOnlyTool, SystemHandle, ToolContext } from '@/catalog/tool';
 import {
+  booleanOrNull,
   effectiveLimit,
   errorText,
   numberOrNull,
@@ -484,6 +485,352 @@ export const disksTemperature: ReadOnlyTool = {
       disks: names.map((name) => readDiskTemperature(name, held, aggregates.record)),
       unavailable: null,
       history,
+    };
+  },
+};
+
+/**
+ * `disk_identify`: turning one disk's enclosure locate light on or off.
+ *
+ * THE SLOT IS FOUND BY THE DISK'S DEVICE NAME IN `enclosure2.query`, NOT
+ * THROUGH `disk.query`'s `enclosure`. The ticket's route was `disk.query`'s
+ * `enclosure: { number, slot }` mapped to an enclosure id. That route does not
+ * exist, read from the middleware source (`truenas/middleware` master,
+ * 2026-10-22). `enclosure` is computed from a database column,
+ * `disk_enclosure_slot`, as `number * 1000 + slot`, and neither `disk.py` nor
+ * `disk_/sync.py` writes that column. And no `enclosure2.query` entry has a
+ * `number`: its top-level keys are `id`, `name`, `model`, `controller`,
+ * `elements` and `label`. So there is no number to map from. `set_slot_status`
+ * looks the enclosure up by `id` and the slot by its key under
+ * `elements['Array Device Slot']`, and every slot element there carries `dev`,
+ * the device name sysfs maps into it. Finding that `dev` gives the two values
+ * the call takes, read from the same record it validates against.
+ *
+ * KEYS READ, ALL CONFIRMED FROM THE SAME SOURCE rather than guessed, so this
+ * is a plain allowlist and not #98's form: the enclosure's `id` and `label`
+ * (the middleware sets `label` to the user's label or else `name`), and per
+ * slot `dev`, `supports_identify_light` and `drive_bay_light_status`. The last
+ * is `"ON"`, `"OFF"` or null, read from the slot's sysfs `locate` attribute,
+ * and is null where the slot does not support reading it. Not checked against a
+ * live system with a shelf.
+ *
+ * WHAT CAN BE READ BACK IS THE KERNEL'S `locate` STATE, NOT THE LED. A result
+ * reading `ON` is sysfs saying the slot's locate bit is set. No read says the
+ * light is physically lit, and the guidance says so.
+ */
+
+/** The element type, under an enclosure's `elements`, that holds disk slots. */
+const DISK_SLOT_ELEMENT = 'Array Device Slot';
+
+/** Where a caller gets a disk name from. */
+const DISK_NAMES_FROM = 'names come from `disks_list`';
+
+/** What `disk_identify` was asked to do. */
+interface IdentifyArgs {
+  disk: string;
+  on: boolean;
+}
+
+function parseIdentifyArgs(args: Record<string, unknown>): IdentifyArgs {
+  const disk = textOrNull(args['disk']);
+  if (disk === null) {
+    throw new Error('"disk" is required and must be a disk name, as `disks_list` reports it');
+  }
+  const on = args['on'];
+  if (typeof on !== 'boolean') throw new Error('"on" is required and must be a boolean');
+  return { disk, on };
+}
+
+/** The disk as `disk.query` describes it, for the approver and the person at the rack. */
+interface IdentifiedDisk {
+  serial: string | null;
+  model: string | null;
+  /** The pool's name, null for "in no pool", undefined for "membership not reported". */
+  pool: string | null | undefined;
+}
+
+/**
+ * Reads the disk by name, or fails naming it. Plan-time only and not a step:
+ * `execute` does not make this call (#192).
+ *
+ * The row is found by `name` rather than taken first, because a filter that did
+ * not apply comes back as every disk (#121).
+ */
+async function readIdentifiedDisk(ctx: ToolContext, disk: string): Promise<IdentifiedDisk> {
+  const rows: unknown = await firstValueFrom(
+    ctx.system.client.api.query('disk.query', [['name', '=', disk]], { extra: { pools: true } }),
+  );
+  if (!Array.isArray(rows)) throw new Error(NOT_A_LIST);
+  const row = rows.map(recordOrNull).find((entry) => textOrNull(entry?.['name']) === disk);
+  if (row == null) throw new Error(`No disk named "${disk}" on this system — ${DISK_NAMES_FROM}`);
+  return {
+    serial: textOrNull(row['serial']),
+    model: textOrNull(row['model']),
+    pool: 'pool' in row ? textOrNull(row['pool']) : undefined,
+  };
+}
+
+/** The slot a disk sits in, as one `enclosure2.query` entry reports it. */
+interface DiskSlot {
+  enclosureId: string;
+  enclosureLabel: string | null;
+  slot: number;
+  /** `supports_identify_light`, or null where it could not be read. */
+  supportsIdentify: boolean | null;
+  /** `drive_bay_light_status`: `ON`, `OFF`, or null where none was reported. */
+  light: string | null;
+}
+
+/** Every slot element in one enclosure entry, with its key, or null where they could not be read. */
+function slotElements(enclosure: Record<string, unknown>): [string, Record<string, unknown> | null][] | null {
+  const elements = recordOrNull(enclosure['elements']);
+  const slots = elements === null ? null : recordOrNull(elements[DISK_SLOT_ELEMENT]);
+  if (slots === null) return null;
+  return Object.entries(slots).map(([key, value]) => [key, recordOrNull(value)]);
+}
+
+/** A slot key read as the number `set_slot_status` takes, or null where it is not one. */
+function slotNumber(key: string): number | null {
+  return /^\d+$/.test(key) ? Number(key) : null;
+}
+
+function slotOf(enclosure: Record<string, unknown>, key: string, element: Record<string, unknown>): DiskSlot | string {
+  const enclosureId = textOrNull(enclosure['id']);
+  const slot = slotNumber(key);
+  if (enclosureId === null || slot === null) {
+    return enclosureId === null ? 'an enclosure whose id could not be read' : `a slot keyed "${key}"`;
+  }
+  return {
+    enclosureId,
+    enclosureLabel: textOrNull(enclosure['label']),
+    slot,
+    supportsIdentify: booleanOrNull(element['supports_identify_light']),
+    light: textOrNull(element['drive_bay_light_status']),
+  };
+}
+
+/**
+ * The enclosure entries the system listed, null for one that was not a record,
+ * or a throw where the answer was not a list. An unreadable entry is kept as a
+ * null so that it is counted: it could be the one holding the disk (#93).
+ */
+async function readEnclosures(ctx: ToolContext): Promise<(Record<string, unknown> | null)[]> {
+  const rows: unknown = await firstValueFrom(ctx.system.client.api.query('enclosure2.query'));
+  if (!Array.isArray(rows)) {
+    throw new Error('the system answered `enclosure2.query` with something other than a list of enclosures');
+  }
+  return rows.map(recordOrNull);
+}
+
+/**
+ * Finds the one slot whose `dev` is the disk, or fails saying why there is none
+ * to send. Made at plan time AND again by `execute`, because the token binds the
+ * disk's name and not the enclosure and slot the plan found it in (#181).
+ *
+ * A disk listed in two slots is refused, not resolved: lighting one of them
+ * could light the wrong bay, which is the outcome this tool exists to prevent.
+ */
+async function findDiskSlot(ctx: ToolContext, disk: string): Promise<DiskSlot> {
+  const enclosures = await readEnclosures(ctx);
+  const found: (DiskSlot | string)[] = [];
+  let unread = 0;
+  for (const enclosure of enclosures) {
+    const elements = enclosure === null ? null : slotElements(enclosure);
+    if (enclosure === null || elements === null) {
+      unread += 1;
+      continue;
+    }
+    for (const [key, element] of elements) {
+      if (element !== null && textOrNull(element['dev']) === disk) found.push(slotOf(enclosure, key, element));
+    }
+  }
+  if (found.length > 1) {
+    throw new Error(
+      `Disk "${disk}" is listed in ${found.length} enclosure slots on this system, so which bay to light is not ` +
+        'established; nothing is sent',
+    );
+  }
+  const [slot] = found;
+  if (slot === undefined) {
+    throw new Error(
+      `The system reports no managed enclosure slot for disk "${disk}"` +
+        (unread > 0
+          ? `, but ${unread} enclosure entr${unread === 1 ? 'y' : 'ies'} could not be read in full, so it may ` +
+            'be in one of those. '
+          : '. ') +
+        'A system or disk without a managed enclosure has no locate light this tool can reach',
+    );
+  }
+  if (typeof slot === 'string') {
+    throw new Error(`Disk "${disk}" is listed in ${slot}, so the call cannot name its slot; nothing is sent`);
+  }
+  return slot;
+}
+
+/** The middleware refuses a slot that does not support identification, so the plan refuses first (#161). */
+function identifyRefusal(disk: string, slot: DiskSlot): string | null {
+  if (slot.supportsIdentify !== false) return null;
+  return (
+    `Slot ${slot.slot} of enclosure "${slot.enclosureId}", which holds disk "${disk}", reports that it does not ` +
+    'support an identify light, and the middleware refuses the call for such a slot'
+  );
+}
+
+function setSlotParams(slot: DiskSlot, on: boolean): [{ enclosure_id: string; slot: number; status: 'ON' | 'OFF' }] {
+  return [{ enclosure_id: slot.enclosureId, slot: slot.slot, status: on ? 'ON' : 'OFF' }];
+}
+
+function describeSlot(slot: DiskSlot): string {
+  const label = slot.enclosureLabel === null ? '' : ` ("${slot.enclosureLabel}")`;
+  return `slot ${slot.slot} of enclosure "${slot.enclosureId}"${label}`;
+}
+
+function poolSentence(pool: string | null | undefined): string {
+  if (pool === undefined) return 'the system did not report its pool membership';
+  if (pool === null) return 'it is in no pool';
+  return `it is a member of pool "${pool}"`;
+}
+
+function lightSentence(slot: DiskSlot, on: boolean): string {
+  const target = on ? 'ON' : 'OFF';
+  if (slot.light === null) {
+    return 'The slot reported no locate state, so whether the light is on now was not read.';
+  }
+  if (slot.light === target) return `Its locate state already reads ${target}, which is not an error.`;
+  return `Its locate state reads ${slot.light} now.`;
+}
+
+const IDENTIFY_GUIDANCE =
+  '`enclosure_id` and `slot` are what the call was sent, found immediately before ' +
+  'it by the slot whose device is `disk`. `requested` is `ON` or `OFF`. ' +
+  '`previous_light` is the slot\'s `drive_bay_light_status` read immediately ' +
+  'before the call, and `resulting_light` the same field read again immediately ' +
+  'after it, finding the slot by enclosure id and slot number. Each is `ON`, ' +
+  '`OFF`, or null where the slot reported no state: SOME SLOTS DO NOT REPORT ONE, ' +
+  'and then NO STATE WAS READ AND NOTHING HERE SAYS THE LIGHT IS ON. Both are the ' +
+  'kernel\'s `locate` setting for the slot, not an observation of the LED: ' +
+  '`ON` means the system accepted that the light should be lit, not that anyone ' +
+  'saw it. `confirmed` is true where `resulting_light` equals `requested`, false ' +
+  'where it reads the other value, and null where no state was read — `confirmed: ' +
+  'null` is a request that was accepted and not checked, never a lit light. ' +
+  '`resulting_lookup` says what the read after the call did: `FOUND`; `NOT_FOUND`, ' +
+  'where no enclosure listed that slot; or `UNREADABLE`, the read failing, with ' +
+  '`resulting_read_error` naming why and null otherwise. A read after the call ' +
+  'that failed is not a failed call: the call had already been made.';
+
+export const diskIdentify: MutatingTool = {
+  name: 'disk_identify',
+  description:
+    'Turns the locate (identify) light of the enclosure slot one disk sits in on ' +
+    'or off, on this TrueNAS system, so the person at the rack pulls the right ' +
+    'drive. Two-phase: called without a confirmation_token it returns a plan for ' +
+    'user approval; called with one it sends the change. `disk` is the device ' +
+    'name as `disks_list` reports it, and `on` is required: true lights the ' +
+    'slot, false turns it off. A disk this system does not list fails the plan, ' +
+    'naming it. The slot is the one `enclosure2.query` lists the disk\'s device ' +
+    'in; A DISK NO ENCLOSURE SLOT LISTS FAILS THE PLAN, saying the system ' +
+    'reports no managed enclosure slot for it — that is a system or a disk ' +
+    'without a managed enclosure, and not something the caller did wrong. A ' +
+    'disk listed in more than one slot fails ' +
+    'too, and so does a slot that reports it does not support an identify ' +
+    'light, which the middleware refuses. The plan names the disk\'s serial, ' +
+    'model and pool membership beside the enclosure and slot, so the approver ' +
+    'and the person at the rack agree on which disk it is. Whether the light ' +
+    'actually lit can be read back only as far as the slot reports a locate ' +
+    'state; the result never reports the light as on from the request alone. ' +
+    'The `CLEAR` status and fault lights are not covered, and nothing here ' +
+    'lists enclosures or empty slots. `destructiveness` is `reversible`: the ' +
+    'reverse call turns the light back, and no data or configuration is ' +
+    'touched. ' +
+    IDENTIFY_GUIDANCE,
+  resultGuidance: IDENTIFY_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      disk: {
+        type: 'string',
+        description: 'The disk, as `disks_list` reports it in `name`, e.g. "sdb".',
+      },
+      on: {
+        type: 'boolean',
+        description: 'true turns the slot\'s locate light on; false turns it off.',
+      },
+    },
+    required: ['disk', 'on'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    const { disk, on } = parseIdentifyArgs(rawArgs);
+    return { disk, on };
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const args = parseIdentifyArgs(rawArgs);
+    const identified = await readIdentifiedDisk(ctx, args.disk);
+    const slot = await findDiskSlot(ctx, args.disk);
+    const refusal = identifyRefusal(args.disk, slot);
+    if (refusal !== null) throw new Error(refusal);
+    const support =
+      slot.supportsIdentify === null
+        ? ' Whether the slot supports an identify light could not be read, so the middleware may refuse the call.'
+        : '';
+    return [
+      {
+        method: 'enclosure2.query',
+        params: [],
+        description:
+          `Read the enclosures, to find the slot whose device is "${args.disk}" — ${describeSlot(slot)} when this ` +
+          'plan was made. Changes nothing. If no slot lists the disk when this runs, nothing is sent. This same read ' +
+          'is made again immediately after the call, to report the locate state that resulted.',
+      },
+      {
+        method: 'enclosure2.set_slot_status',
+        params: setSlotParams(slot, args.on),
+        description:
+          `Turn the locate light of ${describeSlot(slot)} ${args.on ? 'ON' : 'OFF'}. That slot holds disk ` +
+          `"${args.disk}", serial ${identified.serial ?? '(not reported)'}, model ` +
+          `${identified.model ?? '(not reported)'}; ${poolSentence(identified.pool)}. ` +
+          `${lightSentence(slot, args.on)}${support}`,
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const args = parseIdentifyArgs(rawArgs);
+    // Not caught: this read is what the call's params come from, so where it
+    // fails there is nothing to send — a refusal, not a branch (#181).
+    const slot = await findDiskSlot(ctx, args.disk);
+    const refusal = identifyRefusal(args.disk, slot);
+    if (refusal !== null) throw new Error(refusal);
+    const requested = args.on ? 'ON' : 'OFF';
+    await firstValueFrom(ctx.system.client.api.call('enclosure2.set_slot_status', setSlotParams(slot, args.on)));
+    // The call has landed by here, so this read may not fail the tool.
+    let lookup: 'FOUND' | 'NOT_FOUND' | 'UNREADABLE' = 'NOT_FOUND';
+    let readError: string | null = null;
+    let resultingLight: string | null = null;
+    try {
+      const enclosure = (await readEnclosures(ctx)).find((entry) => textOrNull(entry?.['id']) === slot.enclosureId);
+      const element = enclosure == null ? undefined : slotElements(enclosure)?.find(
+        ([key]) => slotNumber(key) === slot.slot,
+      );
+      if (element !== undefined) {
+        lookup = 'FOUND';
+        resultingLight = element[1] === null ? null : textOrNull(element[1]['drive_bay_light_status']);
+      }
+    } catch (reason) {
+      lookup = 'UNREADABLE';
+      readError = errorText(reason);
+    }
+    return {
+      disk: args.disk,
+      enclosure_id: slot.enclosureId,
+      slot: slot.slot,
+      requested,
+      previous_light: slot.light,
+      resulting_light: resultingLight,
+      resulting_lookup: lookup,
+      resulting_read_error: readError,
+      confirmed: resultingLight === null ? null : resultingLight === requested,
     };
   },
 };
