@@ -50,7 +50,7 @@ confirmation UX, audit sinks) enters through injected interfaces.
   `nfs_share_update`, `iscsi_target_create`, `iscsi_target_update`,
   `nvmeof_subsystem_create`, `nvmeof_subsystem_update`, `user_create`,
   `user_set_locked`, `dataset_set_quota`, `pool_device_set_online`,
-  `dataset_set_property` —
+  `dataset_set_property`, `dataset_create` —
   `cloudsync_run`, `snapshot_task_run`, `vm_stop`, `vm_restart`,
   `service_control`, `container_stop` and `container_restart` the seven that
   start a background job,
@@ -225,6 +225,16 @@ confirmation UX, audit sinks) enters through injected interfaces.
   the current value and where it comes from. It says that `compression` and
   `recordsize` do not rewrite data already written, and that `readonly` on makes
   writes fail. The result reports the value and source before and after.
+  `dataset_create` creates one filesystem dataset under a parent that must
+  already exist; it never creates intermediate datasets, and refuses a name that
+  exists, has a character ZFS does not accept, or is `ix-applications` or
+  `.system`. Volumes are not created here. Encryption is inherited from the
+  parent and no key or passphrase is taken; the plan says whether the new
+  dataset will be encrypted, and under which encryption root. It can set
+  `comments`, `compression`, `atime`, `recordsize`, a quota and a refquota, and
+  a `share_type` of GENERIC, SMB or NFS, and the plan names each one sent. The
+  result reports the new dataset through `storage_list_datasets`' fields. No
+  tool here deletes a dataset, so undoing a create is a person's job.
   `container_list` and the three container power tools are the first family
   written against the client's `ops` layer rather than `api.call`, because every
   one of these operations changes SHAPE between TrueNAS versions and not just

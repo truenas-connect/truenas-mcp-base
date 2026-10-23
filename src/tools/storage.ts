@@ -8,6 +8,7 @@ import {
   errorText,
   numberOrNull,
   recordOrNull,
+  refuseArgs,
   textList,
   textOrNull,
 } from '@/tools/common';
@@ -1554,9 +1555,14 @@ function readingText(reading: PropertyReading): string {
  * Refuses a `recordsize` the system does not offer, reading the system's own
  * list rather than one written here. Plan-time only and not a step (#119). A
  * list that could not be read refuses too: the size would otherwise reach
- * approval unchecked, and nothing is lost by planning again.
+ * approval unchecked, and nothing is lost by planning again. `row` is the
+ * dataset whose pool is asked about — for `dataset_create`, the parent.
  */
-async function checkRecordsize(ctx: ToolContext, row: Record<string, unknown>, request: PropertyRequest): Promise<void> {
+async function checkRecordsize(
+  ctx: ToolContext,
+  row: Record<string, unknown>,
+  request: { dataset: string; value: string },
+): Promise<void> {
   const pool = textOrNull(row['pool']);
   let choices: string[] | null;
   try {
@@ -1805,6 +1811,404 @@ export const datasetSetProperty: MutatingTool = {
         ? null
         : previous.value !== resulting.value || previous.source !== resulting.source,
       confirmed: readingMatches(value, resulting),
+    };
+  },
+};
+
+/** The create's argument, typed off the call (#91) and narrowed to the filesystem arm. */
+type FilesystemCreate = Exclude<CallParams<ApiSurface, 'pool.dataset.create'>[0], { volsize: number }>;
+
+/**
+ * The values `dataset_create` accepts for its two enumerated properties, typed
+ * over the CREATE's declared unions. They are `dataset_set_property`'s lists:
+ * a value the create declares and the update does not fails to compile here,
+ * and one the update declares and the create does not would be accepted and
+ * left to the middleware to refuse.
+ */
+const CREATE_VALUES: { [P in 'compression' | 'atime']: Record<NonNullable<FilesystemCreate[P]>, true> } = {
+  compression: DECLARED_VALUES.compression,
+  atime: DECLARED_VALUES.atime,
+};
+
+/**
+ * The `share_type`s this tool sends. The API also declares MULTIPROTOCOL and
+ * APPS, which prepare a dataset for an SMB-and-NFS share and for an
+ * application's storage; what either changes is not stated by the surface, and
+ * no tool here serves either purpose, so they are refused rather than guessed
+ * at.
+ */
+const SHARE_TYPES = ['GENERIC', 'SMB', 'NFS'] as const satisfies readonly NonNullable<
+  FilesystemCreate['share_type']
+>[];
+
+type ShareType = (typeof SHARE_TYPES)[number];
+
+/** ZFS's dataset-name character set: letters, digits, `_`, `-`, `.`, `:` and space. */
+const DATASET_NAME_CHARS = /^[A-Za-z0-9_.: -]+$/;
+
+/**
+ * Names TrueNAS keeps for its own datasets. Whether the middleware refuses a
+ * new one is (unconfirmed), so this tool refuses them regardless.
+ */
+const RESERVED_DATASET_NAMES: readonly string[] = ['ix-applications', '.system'];
+
+/** The properties `dataset_create` sets, by API name, and the argument that names each. */
+const CREATE_SETTINGS = {
+  comments: 'comments',
+  compression: 'compression',
+  atime: 'atime',
+  recordsize: 'recordsize',
+  quota: 'quota_bytes',
+  refquota: 'refquota_bytes',
+} as const satisfies Partial<Record<keyof FilesystemCreate, string>>;
+
+type CreateSetting = keyof typeof CREATE_SETTINGS;
+
+interface CreateRequest {
+  name: string;
+  parent: string;
+  /** Only the settings passed; one not passed is absent and is not sent. */
+  settings: Partial<Record<CreateSetting, string | number>>;
+  shareType: ShareType | null;
+}
+
+function parseCreateRequest(args: Record<string, unknown>): CreateRequest {
+  refuseArgs(args, ['type', 'volsize'], 'this tool creates a filesystem dataset only');
+  refuseArgs(
+    args,
+    ['encryption', 'encryption_options', 'inherit_encryption'],
+    "encryption is inherited from the parent; a passphrase or key of the caller's own is a secret argument, " +
+      'which this catalog does not take',
+  );
+  refuseArgs(args, ['create_ancestors'], 'the parent must already exist, so nothing is created that was not named');
+  const name = args['name'];
+  if (typeof name !== 'string' || name === '') {
+    throw new Error('"name" is required and must be the new dataset\'s full name, such as "tank/projects/new"');
+  }
+  const segments = name.split('/');
+  if (segments.length < 2 || segments.includes('')) {
+    throw new Error(
+      `"${name}" is not a dataset name under a parent: write the parent's full name, a slash and the new name, ` +
+        'with no empty part, such as "tank/projects/new"',
+    );
+  }
+  const leaf = segments[segments.length - 1] as string;
+  if (!DATASET_NAME_CHARS.test(leaf)) {
+    throw new Error(
+      `"${leaf}" has a character ZFS does not accept in a dataset name; it accepts letters, digits, "_", "-", ` +
+        '".", ":" and space',
+    );
+  }
+  if (RESERVED_DATASET_NAMES.includes(leaf)) {
+    throw new Error(`"${leaf}" is a name TrueNAS reserves for its own datasets, so this tool does not create one`);
+  }
+  const settings: CreateRequest['settings'] = {};
+  const comments = args['comments'];
+  if (comments !== undefined) {
+    if (typeof comments !== 'string') throw new Error('"comments" must be text');
+    settings.comments = comments;
+  }
+  for (const property of ['compression', 'atime'] as const) {
+    const value = args[property];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || !Object.hasOwn(CREATE_VALUES[property], value)) {
+      throw new Error(
+        `"${String(value)}" is not a value of \`${property}\`; it accepts ${Object.keys(CREATE_VALUES[property]).join(', ')}`,
+      );
+    }
+    settings[property] = value;
+  }
+  const recordsize = args['recordsize'];
+  if (recordsize !== undefined) {
+    if (typeof recordsize !== 'string' || recordsize === '') {
+      throw new Error('"recordsize" must be a size from the system\'s own record size choices, such as "128K"');
+    }
+    settings.recordsize = recordsize;
+  }
+  for (const kind of ['quota', 'refquota'] as const) {
+    const key = CREATE_SETTINGS[kind];
+    const value = args[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`"${key}" must be a whole number of bytes, 0 or more`);
+    }
+    settings[kind] = value;
+  }
+  const shareType = args['share_type'];
+  if (shareType !== undefined && !(SHARE_TYPES as readonly unknown[]).includes(shareType)) {
+    throw new Error(
+      `"share_type" must be one of ${SHARE_TYPES.join(', ')}; MULTIPROTOCOL and APPS are not sent by this tool`,
+    );
+  }
+  return {
+    name,
+    parent: segments.slice(0, -1).join('/'),
+    settings,
+    shareType: (shareType as ShareType | undefined) ?? null,
+  };
+}
+
+/** The arguments as passed, under their own names, for the confirmation token and the result. */
+function createArgs(request: CreateRequest): Record<string, string | number> {
+  const args: Record<string, string | number> = { name: request.name };
+  for (const setting of Object.keys(request.settings) as CreateSetting[]) {
+    args[CREATE_SETTINGS[setting]] = request.settings[setting] as string | number;
+  }
+  if (request.shareType !== null) args['share_type'] = request.shareType;
+  return args;
+}
+
+/**
+ * The create's params, built in one place so the plan step names exactly the
+ * call `execute` makes. `type` is sent explicitly. The enumerated values were
+ * checked against the create's declared unions by the parse, and `recordsize`
+ * against the system's own list by the plan; spreading a record of them cannot
+ * carry that to the compiler, hence the one cast.
+ */
+function createParams(request: CreateRequest): CallParams<ApiSurface, 'pool.dataset.create'> {
+  return [
+    {
+      name: request.name,
+      type: 'FILESYSTEM',
+      ...request.settings,
+      ...(request.shareType === null ? {} : { share_type: request.shareType }),
+    } as FilesystemCreate,
+  ];
+}
+
+/**
+ * The ZFS properties the parent is read with. The `encrypted`,
+ * `encryption_root` and `locked` fields the plan reads are fields of the entry
+ * rather than properties, and are asked for by the properties they describe so
+ * that a read narrowed to a property list cannot leave them unfilled; whether
+ * the middleware needs that is not stated by the surface.
+ */
+const PARENT_PROPERTIES = ['encryption', 'encryptionroot', 'keystatus'];
+
+/** What the plan says about the new dataset's encryption, read off its parent. */
+function encryptionSentence(parent: string, row: Record<string, unknown>): string {
+  const encrypted = booleanOrNull(row['encrypted']);
+  if (encrypted === false) {
+    return ` It will NOT be encrypted: encryption is inherited from the parent, and "${parent}" is not encrypted.`;
+  }
+  if (encrypted === null) {
+    return (
+      ` Whether "${parent}" is encrypted could not be read, so whether the new dataset will be is not stated; ` +
+      'it inherits the parent\'s encryption either way.'
+    );
+  }
+  const root = textOrNull(row['encryption_root']);
+  let text =
+    ` It WILL BE ENCRYPTED, inheriting the encryption of "${parent}" under ` +
+    `${root === null ? 'an encryption root that could not be read' : `encryption root "${root}"`}.`;
+  const locked = booleanOrNull(row['locked']);
+  if (locked === true) {
+    text +=
+      ` "${parent}" IS LOCKED. Whether a dataset can be created under a locked encryption root is ` +
+      '(unconfirmed), so the call may be rejected.';
+  } else if (locked === null) {
+    text += ` Whether "${parent}" is locked could not be read.`;
+  }
+  return text;
+}
+
+/** What the plan says about `share_type`, claiming nothing the surface does not state. */
+function shareTypeSentence(shareType: ShareType | null): string {
+  switch (shareType) {
+    case null:
+      return ' No `share_type` is sent; the default is understood to be GENERIC (unconfirmed).';
+    case 'GENERIC':
+      return ' `share_type` GENERIC is sent, which is understood to be the default (unconfirmed).';
+    case 'SMB':
+      return (
+        ' `share_type` SMB is sent. It is understood to set the dataset\'s ACL type and mode for SMB ' +
+        '(unconfirmed: the API declares only the name).'
+      );
+    case 'NFS':
+      return ' `share_type` NFS is sent. What it changes is not stated by the API (unconfirmed).';
+  }
+}
+
+/** The properties the plan says are set, in words; every one not passed is inherited. */
+function settingsSentence(settings: CreateRequest['settings']): string {
+  const parts = (Object.keys(settings) as CreateSetting[]).map((setting) => {
+    const value = settings[setting];
+    if (setting === 'quota' || setting === 'refquota') {
+      return `\`${setting}\` ${value === 0 ? 'no limit (sent as 0)' : bytesText(value as number)}`;
+    }
+    return setting === 'comments' ? `\`comments\` ${JSON.stringify(value)}` : `\`${setting}\` ${String(value)}`;
+  });
+  if (parts.length === 0) {
+    return " No property is set, so every property is inherited from the parent or is ZFS's default.";
+  }
+  return ` Set on it: ${parts.join('; ')}. Every other property is inherited from the parent or is ZFS's default.`;
+}
+
+/**
+ * The created dataset, through `storage_list_datasets`' allowlist — the same
+ * six fields, read the same way, and never the entry forwarded. A field the
+ * response did not carry is null rather than absent, so the shape is the one
+ * the guidance describes; the spec holds the key list against the listing's.
+ */
+function createdDataset(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: row['id'] ?? null,
+    pool: row['pool'] ?? null,
+    type: row['type'] ?? null,
+    mountpoint: row['mountpoint'] ?? null,
+    used: (row['used'] as ZfsProperty | undefined)?.parsed ?? null,
+    available: (row['available'] as ZfsProperty | undefined)?.parsed ?? null,
+  };
+}
+
+const DATASET_CREATE_GUIDANCE =
+  '`name` is the dataset named, and `requested` is exactly what was passed, under the arguments\' own ' +
+  'names. `created` is the dataset as the response the create itself answered with states it — never ' +
+  'copied from the request — through the fields `storage_list_datasets` reports: `id`, `pool`, `type`, ' +
+  '`mountpoint`, `used` and `available`, each as the system sent it and null where the response carried ' +
+  'none. `created` is null where the response was not a dataset at all, which is NOT evidence that ' +
+  'nothing was created: `storage_list_datasets` is how to check.';
+
+export const datasetCreate: MutatingTool = {
+  name: 'dataset_create',
+  description:
+    'Creates one ZFS filesystem dataset under an existing parent on this TrueNAS system. Two-phase: called ' +
+    'without a confirmation_token it returns a plan for user approval; called with one it sends the create. ' +
+    '`name` is the new dataset\'s full name — the parent\'s full name as `storage_list_datasets` reports it in ' +
+    '`id`, a slash, and the new name. THE PARENT MUST EXIST: one the system does not list fails the plan, ' +
+    'naming it, and no intermediate dataset is ever created. A name that already exists fails the plan. The ' +
+    'new name may hold only letters, digits, `_`, `-`, `.`, `:` and space, and `ix-applications` and ' +
+    '`.system`, which TrueNAS reserves, are refused. ONLY FILESYSTEMS: volumes (zvols) are not created here. ' +
+    'ENCRYPTION IS INHERITED FROM THE PARENT and is not chosen here — no encryption setting, passphrase or ' +
+    'key is taken — and THE PLAN STATES WHETHER THE NEW DATASET WILL BE ENCRYPTED, and under which ' +
+    'encryption root, as read from the parent. Optional settings: `comments`; `compression` and `atime`, ' +
+    'each one of the values the API declares; `recordsize`, a size from the system\'s own record size ' +
+    'choices, checked when the plan is made; `quota_bytes` and `refquota_bytes`, limits in bytes, `0` being ' +
+    'no limit; and `share_type`, one of GENERIC, SMB and NFS. MULTIPROTOCOL and APPS are refused: what they ' +
+    'change is not stated by the API and no tool here serves them. What `share_type` changes is not stated ' +
+    'by the API either: SMB is understood to set the dataset\'s ACL type and mode for SMB, and GENERIC to be ' +
+    'the default, both (unconfirmed). Every setting not passed is inherited from the parent or is ZFS\'s ' +
+    'default. The plan states the `share_type` and every setting it sends. The parent and the name are read ' +
+    'when the plan is made and not again. `destructiveness` is `reversible`: nothing is deleted or changed. ' +
+    'BUT NO TOOL IN THIS CATALOG DELETES A DATASET, so undoing this is a deletion a person makes elsewhere. ' +
+    DATASET_CREATE_GUIDANCE,
+  resultGuidance: DATASET_CREATE_GUIDANCE,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      name: {
+        type: 'string',
+        description: 'The new dataset\'s full name, e.g. "tank/projects/new"; its parent must already exist.',
+      },
+      comments: { type: 'string', description: 'A comment stored on the dataset.' },
+      compression: {
+        type: 'string',
+        description:
+          'The compression algorithm, as the API spells it, e.g. LZ4, ZSTD or OFF; any other value fails the ' +
+          'plan, naming the accepted ones.',
+      },
+      atime: {
+        type: 'string',
+        enum: Object.keys(CREATE_VALUES.atime),
+        description: 'Whether reads update access times.',
+      },
+      recordsize: {
+        type: 'string',
+        description: "A record size from the system's own record size choices, e.g. 128K or 1M.",
+      },
+      quota_bytes: {
+        type: 'integer',
+        minimum: 0,
+        description: 'A `quota` in bytes: caps the dataset with its descendants and snapshots. 0 is no limit.',
+      },
+      refquota_bytes: {
+        type: 'integer',
+        minimum: 0,
+        description: 'A `refquota` in bytes: caps the data the dataset itself holds. 0 is no limit.',
+      },
+      share_type: {
+        type: 'string',
+        enum: [...SHARE_TYPES],
+        description: 'What the dataset is prepared for. Omitted, the system\'s default is used.',
+      },
+    },
+    required: ['name'],
+  },
+  requiredRole: Role.Full,
+  mutating: true,
+  // One new dataset, and nothing existing is deleted or changed. Undoing it is
+  // a deletion no tool here makes, which the description says (#153).
+  destructiveness: 'reversible',
+  normalizeArgs(rawArgs) {
+    return createArgs(parseCreateRequest(rawArgs));
+  },
+  async plan(ctx, rawArgs): Promise<PlanStep[]> {
+    const request = parseCreateRequest(rawArgs);
+    const { name, parent } = request;
+    let parentRow: Record<string, unknown> | null;
+    try {
+      parentRow = await datasetRow(ctx, parent, PARENT_PROPERTIES);
+    } catch (reason) {
+      throw new Error(
+        `Parent dataset "${parent}" could not be read (pool.dataset.query failed: ${errorText(reason)}), so ` +
+          'nothing is planned',
+      );
+    }
+    if (parentRow === null) {
+      throw new Error(
+        `Parent dataset "${parent}" does not exist on this system, and this tool does not create it — ` +
+          "`storage_list_datasets` reports each dataset's `id`",
+      );
+    }
+    // A volume holds no datasets, so the middleware refuses one under it
+    // (#161). An unreadable type does not refuse anything (#154); it is stated.
+    const parentType = textOrNull(parentRow['type']);
+    if (parentType === 'VOLUME') {
+      throw new Error(`Parent dataset "${parent}" is a volume, and ZFS does not create a dataset under one`);
+    }
+    const typeNote =
+      parentType === null
+        ? ` Whether "${parent}" is a filesystem could not be read; ZFS does not create a dataset under a volume, ` +
+          'so the call may be rejected.'
+        : '';
+    let existing: Record<string, unknown> | null;
+    try {
+      existing = await datasetRow(ctx, name, []);
+    } catch (reason) {
+      throw new Error(
+        `Whether dataset "${name}" already exists could not be read (pool.dataset.query failed: ` +
+          `${errorText(reason)}), so nothing is planned`,
+      );
+    }
+    if (existing !== null) {
+      throw new Error(`Dataset "${name}" already exists on this system`);
+    }
+    const recordsize = request.settings.recordsize;
+    if (typeof recordsize === 'string') await checkRecordsize(ctx, parentRow, { dataset: name, value: recordsize });
+    return [
+      {
+        method: 'pool.dataset.create',
+        params: createParams(request),
+        description:
+          `Create filesystem dataset "${name}" under "${parent}".${typeNote}` +
+          `${encryptionSentence(parent, parentRow)}${shareTypeSentence(request.shareType)}` +
+          `${settingsSentence(request.settings)} The parent and the name were read when this plan was made ` +
+          'and are not read again.',
+      },
+    ];
+  },
+  async execute(ctx, rawArgs) {
+    const request = parseCreateRequest(rawArgs);
+    const created: unknown = await firstValueFrom(
+      ctx.system.client.api.call('pool.dataset.create', createParams(request)),
+    );
+    // The create answers with the new dataset, so what was created is read off
+    // that rather than echoed from the request (#121).
+    const held = recordOrNull(created);
+    return {
+      name: request.name,
+      requested: createArgs(request),
+      created: held === null ? null : createdDataset(held),
     };
   },
 };

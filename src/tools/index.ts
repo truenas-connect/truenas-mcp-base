@@ -65,6 +65,7 @@ import {
   snapshotsList,
 } from '@/tools/snapshots';
 import {
+  datasetCreate,
   datasetPermissions,
   datasetSetProperty,
   datasetSetQuota,
@@ -192,6 +193,7 @@ export function createDefaultCatalog(): ToolCatalog {
   catalog.register(datasetSetQuota);
   catalog.register(poolDeviceSetOnline);
   catalog.register(datasetSetProperty);
+  catalog.register(datasetCreate);
   return catalog;
 }
 
@@ -217,6 +219,7 @@ export {
   containerStart,
   containerStop,
   createSnapshot,
+  datasetCreate,
   datasetPermissions,
   datasetSetProperty,
   datasetSetQuota,
